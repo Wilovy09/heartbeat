@@ -4,11 +4,14 @@
 //! by decoding the returned JWT's claims -- this app never re-implements that check, it
 //! just reads the verdict.
 
-use actix_web::{HttpResponse, web};
+use actix_web::{HttpRequest, HttpResponse, web};
 use serde::Deserialize;
 use tera::{Context, Tera};
 
-use crate::{auth, config::Config};
+use crate::{
+    auth::{self, SessionStore},
+    config::Config,
+};
 
 fn render_login(tera: &Tera, error: Option<&str>, email: &str) -> HttpResponse {
     let mut ctx = Context::new();
@@ -33,6 +36,7 @@ pub struct LoginForm {
 pub async fn submit_login(
     tera: web::Data<Tera>,
     cfg: web::Data<Config>,
+    sessions: web::Data<SessionStore>,
     form: web::Form<LoginForm>,
 ) -> HttpResponse {
     let client = reqwest::Client::new();
@@ -95,17 +99,29 @@ pub async fn submit_login(
         );
     };
 
+    let session_id = match sessions.create(token.to_string()) {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!(error = %e, "login: could not generate a session id");
+            return render_login(&tera, Some("No se pudo iniciar la sesión."), &form.email);
+        }
+    };
+
     tracing::info!(email = %form.email, "login: acceso de admin concedido");
     HttpResponse::Found()
         .append_header(("Location", "/"))
-        .cookie(auth::build_session_cookie(
-            token.to_string(),
-            cfg.cookie_secure,
-        ))
+        .cookie(auth::build_session_cookie(session_id, cfg.cookie_secure))
         .finish()
 }
 
-pub async fn logout(cfg: web::Data<Config>) -> HttpResponse {
+pub async fn logout(
+    req: HttpRequest,
+    cfg: web::Data<Config>,
+    sessions: web::Data<SessionStore>,
+) -> HttpResponse {
+    if let Some(cookie) = req.cookie(auth::SESSION_COOKIE) {
+        sessions.remove(cookie.value());
+    }
     HttpResponse::Found()
         .append_header(("Location", "/login"))
         .cookie(auth::build_logout_cookie(cfg.cookie_secure))

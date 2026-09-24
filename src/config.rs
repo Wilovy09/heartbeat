@@ -19,6 +19,10 @@ pub struct Config {
     pub uptime_interval_secs: u64,
     /// A 2xx health check slower than this many ms is "degraded" (yellow), not "up".
     pub uptime_degraded_ms: u32,
+    /// Comma-separated hosts registered apps' URLs may point at (`*.example.com` = any
+    /// subdomain). Requests carry the admin's JWT and `ADMIN_LOGS_KEY`, so they only go to
+    /// these hosts, over https -- see `outbound`.
+    pub allowed_hosts: String,
     /// Mark the session cookie `Secure` (HTTPS-only). Only turn off for local http dev.
     pub cookie_secure: bool,
     /// Shared secret sent as `X-Admin-Logs-Key` on every proxied call to a registered
@@ -56,6 +60,8 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(800),
+            allowed_hosts: env::var("ALLOWED_HOSTS")
+                .unwrap_or_else(|_| "*.adquiere.co".to_string()),
             cookie_secure: env::var("COOKIE_SECURE")
                 .ok()
                 .and_then(|v| v.parse().ok())

@@ -2,7 +2,7 @@ use actix_web::{HttpRequest, HttpResponse, web};
 use serde::Deserialize;
 use tera::{Context, Tera};
 
-use crate::{auth, registry::AppRegistry, uptime::UptimeMonitor};
+use crate::{auth, outbound::Outbound, registry::AppRegistry, uptime::UptimeMonitor};
 
 async fn render_apps(tera: &Tera, registry: &AppRegistry, error: Option<&str>) -> HttpResponse {
     let apps = registry.list().await;
@@ -38,10 +38,17 @@ pub async fn add(
     req: HttpRequest,
     tera: web::Data<Tera>,
     registry: web::Data<AppRegistry>,
+    outbound: web::Data<Outbound>,
     form: web::Form<AddAppForm>,
 ) -> HttpResponse {
     if let Err(resp) = auth::require_session(&req) {
         return resp;
+    }
+    for (label, url) in [("logs", &form.logs_url), ("health", &form.health_url)] {
+        if let Err(e) = outbound.check(url) {
+            let msg = format!("URL de {label}: {e}");
+            return render_apps(&tera, &registry, Some(&msg)).await;
+        }
     }
     match registry
         .add(&form.name, &form.logs_url, &form.health_url)

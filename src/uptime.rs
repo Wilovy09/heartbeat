@@ -13,6 +13,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 
+use crate::outbound::Outbound;
 use crate::registry::{AppRegistry, RegisteredApp};
 
 const RETENTION: Duration = Duration::from_secs(30 * 24 * 3600);
@@ -26,8 +27,6 @@ const MAX_EVENTS: usize = 30;
 
 #[derive(Debug, thiserror::Error)]
 pub enum UptimeError {
-    #[error("no se pudo crear el cliente HTTP: {0}")]
-    Client(#[from] reqwest::Error),
     #[error("error de E/S en {path}: {source}")]
     Io {
         path: PathBuf,
@@ -95,9 +94,27 @@ pub struct Heartbeat {
 }
 
 impl Heartbeat {
-    async fn probe(client: &reqwest::Client, url: &str, degraded_after_ms: u32) -> Self {
+    async fn probe(outbound: &Outbound, url: &str, degraded_after_ms: u32) -> Self {
+        // Re-checked on every probe, not just at registration: entries saved before the
+        // allowlist existed, or before ALLOWED_HOSTS was narrowed, must not slip through.
+        let url = match outbound.check(url) {
+            Ok(url) => url,
+            Err(e) => {
+                return Self {
+                    at: unix_now(),
+                    status: Status::Down,
+                    latency_ms: None,
+                    message: format!("URL de health no permitida: {e}"),
+                };
+            }
+        };
         let started = Instant::now();
-        let result = client.get(url).send().await;
+        let result = outbound
+            .client()
+            .get(url)
+            .timeout(PROBE_TIMEOUT)
+            .send()
+            .await;
         let latency_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
         let at = unix_now();
         match result {
@@ -258,22 +275,22 @@ pub struct MonitorDetail {
 pub struct UptimeMonitor {
     dir: PathBuf,
     policy: CheckPolicy,
-    client: reqwest::Client,
+    outbound: Outbound,
     histories: RwLock<HashMap<String, History>>,
 }
 
 impl UptimeMonitor {
     /// Loads (and compacts) every `<slug>.jsonl` found in `dir`. Malformed lines are skipped
     /// with a warning rather than failing startup over one torn write.
-    pub async fn load(dir: impl Into<PathBuf>, policy: CheckPolicy) -> Result<Self, UptimeError> {
+    pub async fn load(
+        dir: impl Into<PathBuf>,
+        policy: CheckPolicy,
+        outbound: Outbound,
+    ) -> Result<Self, UptimeError> {
         let dir = dir.into();
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(UptimeError::io(&dir))?;
-        let client = reqwest::Client::builder()
-            .timeout(PROBE_TIMEOUT)
-            .user_agent("heartbeat")
-            .build()?;
 
         let mut histories = HashMap::new();
         let mut entries = tokio::fs::read_dir(&dir)
@@ -309,7 +326,7 @@ impl UptimeMonitor {
         let monitor = Self {
             dir,
             policy,
-            client,
+            outbound,
             histories: RwLock::new(histories),
         };
         monitor.compact_all().await?;
@@ -343,11 +360,11 @@ impl UptimeMonitor {
             let Some(url) = app.health_url.clone() else {
                 continue;
             };
-            let client = self.client.clone();
+            let outbound = self.outbound.clone();
             let slug = app.slug.clone();
             let degraded_after_ms = self.policy.degraded_after_ms;
             probes.spawn(async move {
-                let beat = Heartbeat::probe(&client, &url, degraded_after_ms).await;
+                let beat = Heartbeat::probe(&outbound, &url, degraded_after_ms).await;
                 (slug, beat)
             });
         }
@@ -497,6 +514,25 @@ impl UptimeMonitor {
 mod tests {
     use super::*;
 
+    fn outbound() -> Outbound {
+        Outbound::new("*.adquiere.co").unwrap()
+    }
+
+    #[tokio::test]
+    async fn probe_refuses_urls_outside_the_policy_without_sending() {
+        for url in [
+            "http://127.0.0.1:1/health",
+            "https://169.254.169.254/latest/meta-data/",
+        ] {
+            let beat = Heartbeat::probe(&outbound(), url, 1000).await;
+            assert_eq!(beat.status, Status::Down);
+            assert!(
+                beat.message.starts_with("URL de health no permitida"),
+                "{url}"
+            );
+        }
+    }
+
     fn beat(at: u64, status: Status, latency_ms: Option<u32>) -> Heartbeat {
         Heartbeat {
             at,
@@ -564,13 +600,17 @@ mod tests {
             degraded_after_ms: 1000,
         };
         {
-            let monitor = UptimeMonitor::load(dir.path(), policy).await.unwrap();
+            let monitor = UptimeMonitor::load(dir.path(), policy, outbound())
+                .await
+                .unwrap();
             monitor
                 .record("app", beat(unix_now(), Status::Up, Some(12)))
                 .await
                 .unwrap();
         }
-        let monitor = UptimeMonitor::load(dir.path(), policy).await.unwrap();
+        let monitor = UptimeMonitor::load(dir.path(), policy, outbound())
+            .await
+            .unwrap();
         assert_eq!(
             monitor
                 .detail("app", Duration::from_secs(3600))

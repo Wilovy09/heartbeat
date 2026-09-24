@@ -58,6 +58,22 @@ solo lugar ves/filtras/parseas el JSON de stdout y el texto crudo de stderr de t
   sea su ambiente. Una app que no reconozca el header simplemente sigue validando por el
   token del usuario, como antes.
 
+## Seguridad
+
+- **Sesiones del lado del servidor**: la cookie solo lleva un ID aleatorio de 256 bits; el
+  JWT del upstream se queda en memoria del proceso. Una cookie inventada no da acceso, y
+  "Salir" invalida la sesión de verdad. Reiniciar el proceso cierra todas las sesiones.
+- **Política de salida** (`src/outbound.rs`): el proxy de logs y el monitor de uptime solo
+  hacen requests a URLs `https://` cuyo host esté en `ALLOWED_HOSTS` (por defecto
+  `*.adquiere.co`), no siguen redirects y rechazan nombres que resuelvan a IPs privadas,
+  loopback o link-local (incluida la de metadatos de AWS, `169.254.169.254`). Se valida al
+  registrar la app y otra vez en cada request, así que entradas viejas tampoco pasan. Esas
+  requests llevan `ADMIN_LOGS_KEY` y el JWT del admin: nunca salen hacia otro host ni en
+  texto plano.
+- El proxy de logs no devuelve el cuerpo crudo cuando la respuesta no es JSON.
+- En EC2, forzar IMDSv2 en la instancia como defensa extra
+  (`aws ec2 modify-instance-metadata-options --http-tokens required`).
+
 ## Correr localmente
 
 ```bash
@@ -81,6 +97,7 @@ ADMIN_LOGS_KEY=
 UPTIME_DIR=./data/uptime
 UPTIME_INTERVAL_SECS=60
 UPTIME_DEGRADED_MS=1000
+ALLOWED_HOSTS=*.adquiere.co
 ```
 
 ## Despliegue en EC2 (Ubuntu 24.04)

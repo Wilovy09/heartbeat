@@ -8,7 +8,7 @@
 use actix_web::{HttpRequest, HttpResponse, web};
 use serde::Deserialize;
 
-use crate::{auth, config::Config, registry::AppRegistry};
+use crate::{auth, config::Config, outbound::Outbound, registry::AppRegistry};
 
 #[derive(Deserialize)]
 pub struct LogsQuery {
@@ -20,6 +20,7 @@ pub async fn get_logs(
     req: HttpRequest,
     cfg: web::Data<Config>,
     registry: web::Data<AppRegistry>,
+    outbound: web::Data<Outbound>,
     path: web::Path<String>,
     query: web::Query<LogsQuery>,
 ) -> HttpResponse {
@@ -39,11 +40,22 @@ pub async fn get_logs(
         }));
     };
 
-    let client = reqwest::Client::new();
+    // Checked before anything is sent: this request carries the admin's JWT and
+    // ADMIN_LOGS_KEY, which must only ever reach allowlisted https hosts.
+    let logs_url = match outbound.check(&app.logs_url) {
+        Ok(url) => url,
+        Err(e) => {
+            tracing::warn!(app = %slug, error = %e, "logs proxy: refused non-allowlisted url");
+            return HttpResponse::Forbidden().json(serde_json::json!({
+                "error": format!("La URL de logs de '{}' no está permitida: {e}", app.name)
+            }));
+        }
+    };
+
     // The user's own token still goes along (harmless, and it's what authorizes a
     // registered app that hasn't opted into the shared-key path) -- ADMIN_LOGS_KEY, when
     // configured, is what actually authorizes across environments. See Config::admin_logs_key.
-    let mut req_builder = client.get(&app.logs_url).bearer_auth(&token);
+    let mut req_builder = outbound.client().get(logs_url).bearer_auth(&token);
     if let Some(key) = &cfg.admin_logs_key {
         req_builder = req_builder.header("X-Admin-Logs-Key", key);
     }
@@ -57,7 +69,7 @@ pub async fn get_logs(
     let upstream = match req_builder.send().await {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(app = %slug, url = %app.logs_url, error = %e, "logs proxy: upstream request failed");
+            tracing::warn!(app = %slug, error = %e, "logs proxy: upstream request failed");
             return HttpResponse::BadGateway().json(serde_json::json!({
                 "error": format!("No se pudo conectar con '{}': {e}", app.name)
             }));
@@ -81,12 +93,14 @@ pub async fn get_logs(
     // dashboard JS to react to correctly, not just "the JSON didn't parse."
     match serde_json::from_str::<serde_json::Value>(&raw_body) {
         Ok(json) => HttpResponse::build(out_status).json(json),
+        // The body itself is never echoed back: if the URL ever pointed somewhere it
+        // shouldn't, the response must not become a way to read that endpoint.
         Err(_) => HttpResponse::build(out_status).json(serde_json::json!({
             "error": format!(
-                "'{}' respondió {} con un cuerpo no-JSON: {}",
+                "'{}' respondió {} con un cuerpo no-JSON ({} bytes)",
                 app.name,
                 status.as_u16(),
-                if raw_body.is_empty() { "(vacío)" } else { &raw_body }
+                raw_body.len()
             )
         })),
     }

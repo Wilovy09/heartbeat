@@ -109,7 +109,8 @@ block content %}
             <form
               method="post"
               action="/apps/{{ app.slug }}/rotate-token"
-              onsubmit="return confirm('¿Rotar el token de {{ app.name }}? Los embeds que ya están publicados dejarán de funcionar hasta actualizar el token.');"
+              data-name="{{ app.name }}"
+              onsubmit="return confirm('¿Rotar el token de ' + this.dataset.name + '? Los embeds que ya están publicados dejarán de funcionar hasta actualizar el token.');"
               style="display: inline"
             >
               <button class="btn secondary" type="submit">Rotar token</button>
@@ -120,7 +121,8 @@ block content %}
           <form
             method="post"
             action="/apps/{{ app.slug }}/delete"
-            onsubmit="return confirm('¿Eliminar {{ app.name }}?');"
+            data-name="{{ app.name }}"
+            onsubmit="return confirm('¿Eliminar ' + this.dataset.name + '?');"
             style="display: inline"
           >
             <button class="btn danger" type="submit">Eliminar</button>

@@ -45,9 +45,7 @@ impl RegisteredApp {
 
 /// 24 random bytes, hex-encoded (48 chars).
 fn new_embed_token() -> anyhow::Result<String> {
-    let mut bytes = [0u8; 24];
-    getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("no se pudo generar el token: {e}"))?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    crate::token::random_hex(24).map_err(|e| anyhow::anyhow!("no se pudo generar el token: {e}"))
 }
 
 pub struct AppRegistry {
