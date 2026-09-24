@@ -164,22 +164,19 @@ mod tests {
 
     #[test]
     fn check_enforces_https_and_the_allowlist() {
-        let out = Outbound::new("*.adquiere.co, api.partner.com").unwrap();
-        assert!(
-            out.check("https://api-pulso-test.adquiere.co/health")
-                .is_ok()
-        );
-        assert!(out.check("https://a.b.adquiere.co/x").is_ok());
+        let out = Outbound::new("*.example.com, api.partner.com").unwrap();
+        assert!(out.check("https://api.example.com/health").is_ok());
+        assert!(out.check("https://a.b.example.com/x").is_ok());
         assert!(out.check("https://API.PARTNER.COM/x").is_ok());
 
         assert!(matches!(
-            out.check("http://api.adquiere.co/x"),
+            out.check("http://api.example.com/x"),
             Err(OutboundError::NotHttps)
         ));
         for bad in [
-            "https://adquiere.co/x",          // bare domain isn't a subdomain
-            "https://evil-adquiere.co/x",     // suffix without the dot
-            "https://adquiere.co.evil.com/x", // allowed name as a prefix
+            "https://example.com/x",          // bare domain isn't a subdomain
+            "https://evil-example.com/x",     // suffix without the dot
+            "https://example.com.evil.com/x", // allowed name as a prefix
             "https://sub.partner.com/x",      // exact entry doesn't cover subdomains
             "https://169.254.169.254/latest/meta-data/",
             "https://127.0.0.1/x",
@@ -192,7 +189,7 @@ mod tests {
         assert!(
             Outbound::new("")
                 .unwrap()
-                .check("https://x.adquiere.co")
+                .check("https://x.example.com")
                 .is_err()
         );
     }

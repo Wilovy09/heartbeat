@@ -26,7 +26,7 @@ async fn main() -> std::io::Result<()> {
         .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
         .init();
 
-    let cfg = Config::from_env();
+    let cfg = Config::from_env().unwrap_or_else(|e| panic!("{e}"));
 
     let mut tera = Tera::new();
     tera.load_from_glob("templates/**/*.html")

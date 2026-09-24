@@ -1,17 +1,33 @@
 use std::env;
 
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("falta la variable de entorno {0} (ver .env.example)")]
+    Missing(&'static str),
+}
+
+/// A required variable: unset or blank is an error, never a silent default -- these name
+/// the deployment's own login server and hosts, which no default could guess.
+fn required(name: &'static str) -> Result<String, ConfigError> {
+    env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or(ConfigError::Missing(name))
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub host: String,
     pub port: u16,
-    /// Full URL of the login endpoint this app authenticates against, e.g.
-    /// `https://api-pulso-test.adquiere.co/api/v1/auth/login`. That endpoint already
-    /// returns `is_admin` (checked live against its own DB, not trusted from a JWT claim)
-    /// -- this app leans on that instead of re-implementing admin verification itself.
+    /// Full URL of the login endpoint this app authenticates against (required), e.g.
+    /// `https://api.example.com/auth/login`. It must answer a JSON `{email, password}` POST
+    /// with `access_token` and `is_admin` -- this app trusts that verdict instead of
+    /// re-implementing admin verification itself.
     pub login_url: String,
     /// Where the registered-apps list (name + logs endpoint URL) is persisted. A plain
     /// JSON file, not a database -- a handful of rows that change rarely don't earn a DB
-    /// dependency for a small internal viewer.
+    /// dependency.
     pub apps_file: String,
     /// Directory holding one `<slug>.jsonl` heartbeat history per app (see `uptime`).
     pub uptime_dir: String,
@@ -32,23 +48,21 @@ pub struct Config {
     /// versa (each environment provisions accounts independently) -- so forwarding the
     /// user's token can't be the thing that authorizes cross-environment log access. This
     /// key must match `ADMIN_LOGS_KEY` on every registered app that's expected to accept
-    /// it (see pulso-backend's `routes::logs::admin_logs_key_matches`). `None` (unset)
+    /// it (see "Contrato de los endpoints" in the README). `None` (unset)
     /// just means no key is sent -- registered apps without this feature still work via
     /// the user's own JWT, same as before.
     pub admin_logs_key: Option<String>,
 }
 
 impl Config {
-    pub fn from_env() -> Self {
-        Self {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        Ok(Self {
             host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
             port: env::var("PORT")
                 .ok()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(8090),
-            login_url: env::var("LOGIN_URL").unwrap_or_else(|_| {
-                "https://api-pulso-test.adquiere.co/api/v1/auth/login".to_string()
-            }),
+            login_url: required("LOGIN_URL")?,
             apps_file: env::var("APPS_FILE").unwrap_or_else(|_| "./data/apps.json".to_string()),
             uptime_dir: env::var("UPTIME_DIR").unwrap_or_else(|_| "./data/uptime".to_string()),
             uptime_interval_secs: env::var("UPTIME_INTERVAL_SECS")
@@ -60,13 +74,12 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(800),
-            allowed_hosts: env::var("ALLOWED_HOSTS")
-                .unwrap_or_else(|_| "*.adquiere.co".to_string()),
+            allowed_hosts: required("ALLOWED_HOSTS")?,
             cookie_secure: env::var("COOKIE_SECURE")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(true),
             admin_logs_key: env::var("ADMIN_LOGS_KEY").ok(),
-        }
+        })
     }
 }

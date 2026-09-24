@@ -1,15 +1,32 @@
 use actix_web::{HttpRequest, HttpResponse, web};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tera::{Context, Tera};
 
-use crate::{auth, outbound::Outbound, registry::AppRegistry, uptime::UptimeMonitor};
+use crate::{
+    auth, config::Config, outbound::Outbound, registry::AppRegistry, uptime::UptimeMonitor,
+};
 
-async fn render_apps(tera: &Tera, registry: &AppRegistry, error: Option<&str>) -> HttpResponse {
+/// `form`: what the user submitted, echoed back into the inputs when registration fails.
+async fn render_apps(
+    tera: &Tera,
+    cfg: &Config,
+    registry: &AppRegistry,
+    error: Option<&str>,
+    form: Option<&AddAppForm>,
+) -> HttpResponse {
     let apps = registry.list().await;
     let mut ctx = Context::new();
     ctx.insert("active", "apps");
     ctx.insert("apps", &apps);
     ctx.insert("error", &error);
+    ctx.insert("form", &form);
+    let allowed_hosts: Vec<&str> = cfg
+        .allowed_hosts
+        .split(',')
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .collect();
+    ctx.insert("allowed_hosts", &allowed_hosts.join(", "));
     match tera.render("apps.html", &ctx) {
         Ok(html) => HttpResponse::Ok().content_type("text/html").body(html),
         Err(e) => HttpResponse::InternalServerError().body(format!("template error: {e}")),
@@ -19,15 +36,16 @@ async fn render_apps(tera: &Tera, registry: &AppRegistry, error: Option<&str>) -
 pub async fn show(
     req: HttpRequest,
     tera: web::Data<Tera>,
+    cfg: web::Data<Config>,
     registry: web::Data<AppRegistry>,
 ) -> HttpResponse {
     if let Err(resp) = auth::require_session(&req) {
         return resp;
     }
-    render_apps(&tera, &registry, None).await
+    render_apps(&tera, &cfg, &registry, None, None).await
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct AddAppForm {
     name: String,
     logs_url: String,
@@ -37,6 +55,7 @@ pub struct AddAppForm {
 pub async fn add(
     req: HttpRequest,
     tera: web::Data<Tera>,
+    cfg: web::Data<Config>,
     registry: web::Data<AppRegistry>,
     outbound: web::Data<Outbound>,
     form: web::Form<AddAppForm>,
@@ -47,7 +66,7 @@ pub async fn add(
     for (label, url) in [("logs", &form.logs_url), ("health", &form.health_url)] {
         if let Err(e) = outbound.check(url) {
             let msg = format!("URL de {label}: {e}");
-            return render_apps(&tera, &registry, Some(&msg)).await;
+            return render_apps(&tera, &cfg, &registry, Some(&msg), Some(&form)).await;
         }
     }
     match registry
@@ -57,13 +76,14 @@ pub async fn add(
         Ok(_) => HttpResponse::Found()
             .append_header(("Location", "/apps"))
             .finish(),
-        Err(e) => render_apps(&tera, &registry, Some(&e.to_string())).await,
+        Err(e) => render_apps(&tera, &cfg, &registry, Some(&e.to_string()), Some(&form)).await,
     }
 }
 
 pub async fn delete(
     req: HttpRequest,
     tera: web::Data<Tera>,
+    cfg: web::Data<Config>,
     registry: web::Data<AppRegistry>,
     monitor: web::Data<UptimeMonitor>,
     path: web::Path<String>,
@@ -81,7 +101,7 @@ pub async fn delete(
                 .append_header(("Location", "/apps"))
                 .finish()
         }
-        Err(e) => render_apps(&tera, &registry, Some(&e.to_string())).await,
+        Err(e) => render_apps(&tera, &cfg, &registry, Some(&e.to_string()), None).await,
     }
 }
 
@@ -89,6 +109,7 @@ pub async fn delete(
 pub async fn rotate_token(
     req: HttpRequest,
     tera: web::Data<Tera>,
+    cfg: web::Data<Config>,
     registry: web::Data<AppRegistry>,
     path: web::Path<String>,
 ) -> HttpResponse {
@@ -99,6 +120,6 @@ pub async fn rotate_token(
         Ok(()) => HttpResponse::Found()
             .append_header(("Location", "/apps"))
             .finish(),
-        Err(e) => render_apps(&tera, &registry, Some(&e.to_string())).await,
+        Err(e) => render_apps(&tera, &cfg, &registry, Some(&e.to_string()), None).await,
     }
 }

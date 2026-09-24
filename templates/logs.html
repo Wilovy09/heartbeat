@@ -1,58 +1,56 @@
-{% extends "base.html" %} {% block title %}Logs — Heartbeat{% endblock %} {%
-block content %} {% if apps | length == 0 %}
-<div class="card">
-  <p style="color: #7d8598; font-size: 13px">
-    No hay apps registradas todavía. Ve a
-    <a href="/apps" style="color: #4f8cff">Apps</a> para agregar una.
-  </p>
+{% extends "base.html" %}
+{% block title %}Logs — Heartbeat{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1 class="page-title">Logs</h1>
+    <p class="page-sub">Elige una app para ver su stdout y stderr en vivo.</p>
+  </div>
+</header>
+{% if apps | length == 0 %}
+<div class="bay empty">
+  No hay apps registradas todavía. <a href="/apps">Registra la primera</a>.
 </div>
 {% else %}
-<div
-  x-data="uptimeDashboard()"
-  x-init="init()"
-  style="
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-    gap: 16px;
-  "
->
+<div class="bay source-list" x-data="uptimeDashboard()" x-init="init()">
   {% for app in apps %}
-  <a href="/logs/{{ app.slug }}" class="card app-card">
-    <h2 style="margin: 0 0 14px; font-size: 16px; color: var(--text)">
-      {{ app.name }}
-    </h2>
-    <div class="beats">
-      <template
-        x-for="(b, i) in padBeats(recentFor('{{ app.slug }}'))"
-        :key="i"
-      >
-        <span
-          class="beat"
-          :class="b ? 'st-' + b.status : ''"
-          :title="b ? beatTitle(b) : 'Sin datos'"
-        ></span>
+  <a class="source" href="/logs/{{ app.slug }}">
+    <span class="vital" :class="'st-' + statusKey(monitorFor('{{ app.slug }}')?.status)"></span>
+    <span class="source-id">
+      <span class="source-name">{{ app.name }}</span>
+      <span class="source-slug mono">{{ app.slug }}</span>
+    </span>
+    <span class="beats source-beats" aria-hidden="true">
+      <template x-for="(b, i) in padBeats(recentFor('{{ app.slug }}'), 30)" :key="i">
+        <span class="beat" :class="b && 'st-' + b.status"></span>
       </template>
-    </div>
+    </span>
+    <span class="source-pct mono" x-text="fmtPct(monitorFor('{{ app.slug }}')?.uptime_24h)"></span>
+    <span class="source-go">Abrir logs <span aria-hidden="true">→</span></span>
   </a>
   {% endfor %}
 </div>
-{% endif %} {% endblock %} {% block head %}
+{% endif %}
+{% endblock %}
+{% block head %}
 <script src="/static/uptime.js"></script>
 <style>
-  .app-card {
-    display: block;
-    text-decoration: none;
-    transition:
-      border-color 0.12s,
-      transform 0.12s;
-  }
-  .app-card:hover {
-    border-color: var(--accent);
-    transform: translateY(-1px);
-  }
-  .app-card .beat {
-    height: 28px;
-    border-radius: 4px;
+  .source-list { padding: 4px; }
+  .source { display: grid; grid-template-columns: 8px minmax(0, 1fr) minmax(120px, 260px) 64px auto; align-items: center; gap: 16px; padding: 12px 14px; border-radius: 8px; text-decoration: none; color: var(--ink); transition: background-color 120ms; }
+  .source + .source { box-shadow: 0 -1px 0 var(--graticule-soft); }
+  .source:hover { background: var(--bay-raised); box-shadow: none; }
+  .source:hover + .source { box-shadow: none; }
+  .source-id { display: flex; flex-direction: column; min-width: 0; }
+  .source-name { font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .source-slug { font-size: 12px; color: var(--ink-3); }
+  .source-beats .beat { height: 16px; }
+  .source-pct { font-size: 12px; color: var(--ink-2); text-align: right; }
+  .source-go { font-size: 13px; color: var(--ink-3); white-space: nowrap; transition: color 120ms; }
+  .source:hover .source-go { color: var(--ink); }
+  @media (max-width: 720px) {
+    .source { grid-template-columns: 8px minmax(0, 1fr) auto; row-gap: 10px; }
+    .source-beats { grid-column: 2 / -1; grid-row: 2; }
+    .source-pct { display: none; }
   }
 </style>
 {% endblock %}

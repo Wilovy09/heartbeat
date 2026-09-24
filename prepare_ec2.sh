@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # One-time bootstrap for a fresh Ubuntu 24.04 EC2 box that will run heartbeat under
-# pm2, behind nginx with a Let's Encrypt cert -- same pattern as pulso-backend's own
-# prepare_ec2.sh, adapted (no PHP/ONNX bits, this app has none of that).
+# pm2, behind nginx with a Let's Encrypt cert.
 #
 # Usage: ./prepare_ec2.sh [project_dir]   (default: /arena/heartbeat)
 set -e

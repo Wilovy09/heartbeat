@@ -1,8 +1,7 @@
 //! Login: proxies credentials to the real login endpoint (see `Config::login_url`), and
 //! only lets the browser in if that endpoint's response says `is_admin: true`. That field
-//! is computed there by a live DB lookup (see pulso-backend's `enrich_with_profile`), not
-//! by decoding the returned JWT's claims -- this app never re-implements that check, it
-//! just reads the verdict.
+//! is the login server's own decision (ideally a live lookup, not a JWT claim) -- this app
+//! never re-implements that check, it just reads the verdict.
 
 use actix_web::{HttpRequest, HttpResponse, web};
 use serde::Deserialize;

@@ -54,7 +54,7 @@ pub struct AppRegistry {
 }
 
 /// Lowercase, spaces/anything-not-alphanumeric collapsed to a single hyphen, trimmed --
-/// "Pulso Backend (test)" -> "pulso-backend-test".
+/// "Billing API (staging)" -> "billing-api-staging".
 fn slugify(name: &str) -> String {
     let mut slug = String::with_capacity(name.len());
     let mut last_was_dash = true; // swallow a leading dash
@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn slugify_lowercases_and_collapses_punctuation() {
-        assert_eq!(slugify("Pulso Backend (test)"), "pulso-backend-test");
+        assert_eq!(slugify("Billing API (staging)"), "billing-api-staging");
         assert_eq!(slugify("  leading/trailing  "), "leading-trailing");
         assert_eq!(slugify("já-acentuado"), "j-acentuado");
     }
@@ -202,12 +202,12 @@ mod tests {
             .await
             .unwrap();
         let slug = registry
-            .add("Pulso Test", "https://x/logs", "https://x/health")
+            .add("Billing API", "https://x/logs", "https://x/health")
             .await
             .unwrap();
-        assert_eq!(slug, "pulso-test");
+        assert_eq!(slug, "billing-api");
         let found = registry.find(&slug).await.unwrap();
-        assert_eq!(found.name, "Pulso Test");
+        assert_eq!(found.name, "Billing API");
         assert_eq!(found.logs_url, "https://x/logs");
         assert_eq!(found.health_url.as_deref(), Some("https://x/health"));
     }
@@ -219,11 +219,11 @@ mod tests {
             .await
             .unwrap();
         registry
-            .add("Pulso Test", "https://x/logs", "https://x/health")
+            .add("Billing API", "https://x/logs", "https://x/health")
             .await
             .unwrap();
         let err = registry
-            .add("pulso test", "https://y/logs", "https://y/health")
+            .add("billing api", "https://y/logs", "https://y/health")
             .await;
         assert!(err.is_err());
     }
@@ -269,7 +269,7 @@ mod tests {
             .await
             .unwrap();
         let slug = registry
-            .add("Pulso Test", "https://x/logs", "https://x/health")
+            .add("Billing API", "https://x/logs", "https://x/health")
             .await
             .unwrap();
         let app = registry.find(&slug).await.unwrap();
@@ -313,7 +313,7 @@ mod tests {
         {
             let registry = AppRegistry::load(&file).await.unwrap();
             registry
-                .add("Pulso Test", "https://x/logs", "https://x/health")
+                .add("Billing API", "https://x/logs", "https://x/health")
                 .await
                 .unwrap();
         }
@@ -327,7 +327,7 @@ mod tests {
         let file = dir.path().join("apps.json");
         let registry = AppRegistry::load(&file).await.unwrap();
         let slug = registry
-            .add("Pulso Test", "https://x/logs", "https://x/health")
+            .add("Billing API", "https://x/logs", "https://x/health")
             .await
             .unwrap();
         registry.remove(&slug).await.unwrap();

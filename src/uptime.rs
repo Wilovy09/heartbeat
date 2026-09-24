@@ -515,7 +515,7 @@ mod tests {
     use super::*;
 
     fn outbound() -> Outbound {
-        Outbound::new("*.adquiere.co").unwrap()
+        Outbound::new("*.example.com").unwrap()
     }
 
     #[tokio::test]

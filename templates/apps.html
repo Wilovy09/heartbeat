@@ -1,137 +1,145 @@
-{% extends "base.html" %} {% block title %}Apps — Heartbeat{% endblock %} {% block head %}
+{% extends "base.html" %}
+{% block title %}Apps — Heartbeat{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1 class="page-title">Apps</h1>
+    <p class="page-sub">Registra una app para monitorear su health, leer sus logs y publicar su estado en otras webs.</p>
+  </div>
+</header>
+
+<div class="registry">
+  <form class="bay intake" method="post" action="/apps">
+    <h2 class="intake-title">Registrar app</h2>
+    {% if error %}<div class="error-box" role="alert">{{ error }}</div>{% endif %}
+    <div class="field">
+      <label for="name">Nombre</label>
+      <input id="name" name="name" placeholder="Billing API (staging)" required value="{% if form %}{{ form.name }}{% endif %}">
+    </div>
+    <div class="field">
+      <label for="logs_url">URL de logs</label>
+      <input id="logs_url" name="logs_url" type="url" class="mono-input" placeholder="https://api.example.com/admin/logs" required value="{% if form %}{{ form.logs_url }}{% endif %}">
+      <p class="hint">Endpoint tipo <span class="mono">/admin/logs</span> que devuelve el stdout y stderr en <a href="https://docs.rs/tracing-subscriber/latest/tracing_subscriber/fmt/format/struct.Json.html" target="_blank" rel="noopener noreferrer">JSON</a>.</p>
+    </div>
+    <div class="field">
+      <label for="health_url">URL de health</label>
+      <input id="health_url" name="health_url" type="url" class="mono-input" placeholder="https://api.example.com/health" required value="{% if form %}{{ form.health_url }}{% endif %}">
+      <p class="hint">Se consulta cada minuto: 2xx es up, lento es degradado, lo demás es down.</p>
+    </div>
+    <p class="rule">Solo <span class="mono">https://</span> en <span class="mono">{{ allowed_hosts }}</span></p>
+    <button class="btn intake-submit" type="submit">Registrar</button>
+  </form>
+
+  <section class="entries" aria-label="Apps registradas">
+    <h2 class="bay-title">Registradas · <span class="mono">{{ apps | length }}</span></h2>
+    {% if apps | length == 0 %}
+    <div class="bay empty">Ninguna todavía. Usa el formulario para registrar la primera.</div>
+    {% endif %}
+    {% for app in apps %}
+    <article class="bay entry">
+      <header class="entry-head">
+        <div class="entry-id">
+          <h3 class="entry-name">{{ app.name }}</h3>
+          <span class="entry-slug mono">{{ app.slug }}</span>
+        </div>
+        <div class="entry-actions">
+          <form method="post" action="/apps/{{ app.slug }}/rotate-token" data-name="{{ app.name }}"
+            onsubmit="return confirm('¿Rotar el token de ' + this.dataset.name + '? Los embeds ya publicados dejarán de funcionar hasta actualizar el token.');">
+            <button class="btn ghost" type="submit">Rotar token</button>
+          </form>
+          <form method="post" action="/apps/{{ app.slug }}/delete" data-name="{{ app.name }}"
+            onsubmit="return confirm('¿Eliminar ' + this.dataset.name + '? Se borra también su historial de uptime.');">
+            <button class="btn danger" type="submit">Eliminar</button>
+          </form>
+        </div>
+      </header>
+
+      <dl class="entry-urls">
+        <dt>Logs</dt>
+        <dd class="mono">{{ app.logs_url }}</dd>
+        <dt>Health</dt>
+        {% if app.health_url %}
+        <dd class="mono">{{ app.health_url }}</dd>
+        {% else %}
+        <dd class="entry-missing">Sin URL de health: no se monitorea. Elimínala y regístrala de nuevo con una.</dd>
+        {% endif %}
+      </dl>
+
+      <div class="entry-embed">
+        <div class="embed-head">
+          <span class="bay-title" style="margin: 0">Embed</span>
+          <button class="btn secondary" type="button" data-slug="{{ app.slug }}" data-token="{{ app.embed_token }}" onclick="copyEmbed(this)">Copiar código</button>
+        </div>
+        <heartbeat-status app="{{ app.slug }}" token="{{ app.embed_token }}"></heartbeat-status>
+        <details class="snippet">
+          <summary>Ver código</summary>
+          <pre class="mono" data-slug="{{ app.slug }}" data-token="{{ app.embed_token }}"></pre>
+        </details>
+      </div>
+    </article>
+    {% endfor %}
+  </section>
+</div>
+{% endblock %}
+{% block head %}
 <script src="/static/embed.js" defer></script>
 <script src="/static/clipboard.js"></script>
 <script>
-  // The snippet uses this page's own origin, so it's right whatever domain Heartbeat is
-  // deployed on.
-  async function copyEmbed(btn) {
-    const { slug, token } = btn.dataset;
-    const snippet =
+  // The snippet uses this page's own origin, so it's right on whatever domain Heartbeat
+  // is deployed. textContent only: slug/token come from data attributes, never markup.
+  function embedSnippet({ slug, token }) {
+    return (
       `<script src="${location.origin}/static/embed.js" defer><\/script>\n` +
-      `<heartbeat-status app="${slug}" token="${token}"></heartbeat-status>`;
+      `<heartbeat-status app="${slug}" token="${token}"></heartbeat-status>`
+    );
+  }
+  async function copyEmbed(btn) {
     const label = btn.textContent;
-    btn.textContent = (await copyToClipboard(snippet)) ? "¡Copiado!" : "No se pudo copiar";
+    btn.textContent = (await copyToClipboard(embedSnippet(btn.dataset))) ? "Copiado" : "No se pudo copiar";
     setTimeout(() => (btn.textContent = label), 1500);
   }
+  document.addEventListener("DOMContentLoaded", () => {
+    for (const pre of document.querySelectorAll(".snippet pre")) pre.textContent = embedSnippet(pre.dataset);
+  });
 </script>
-{% endblock %} {%
-block content %}
-<div class="card" style="margin-bottom: 20px">
-  <h2 style="margin-top: 0; font-size: 15px">Registrar app</h2>
-  {% if error %}
-  <div class="error-box">{{ error }}</div>
-  {% endif %}
-  <form
-    method="post"
-    action="/apps"
-    style="display: flex; gap: 12px; align-items: end; flex-wrap: wrap"
-  >
-    <div>
-      <label for="name">Nombre</label>
-      <input
-        id="name"
-        name="name"
-        placeholder="Pulso Backend (test)"
-        required
-      />
-    </div>
-    <div style="flex: 1; min-width: 280px">
-      <label for="logs_url">URL del endpoint de logs</label>
-      <input
-        id="logs_url"
-        name="logs_url"
-        type="url"
-        placeholder="https://api-pulso-test.adquiere.co/api/v1/admin/logs"
-        required
-        style="width: 100%"
-      />
-    </div>
-    <div style="flex: 1; min-width: 280px">
-      <label for="health_url">URL de health</label>
-      <input
-        id="health_url"
-        name="health_url"
-        type="url"
-        placeholder="https://api-pulso-test.adquiere.co/health"
-        required
-        style="width: 100%"
-      />
-    </div>
-    <button class="btn" type="submit">Agregar</button>
-  </form>
-</div>
+<style>
+  .registry { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 24px; align-items: start; }
+  @media (max-width: 900px) { .registry { grid-template-columns: 1fr; } .intake { position: static !important; } }
 
-<div class="card">
-  <h2 style="margin-top: 0; font-size: 15px">
-    Apps registradas ({{ apps | length }})
-  </h2>
-  {% if apps | length == 0 %}
-  <p style="color: #7d8598; font-size: 13px">Ninguna todavía.</p>
-  {% else %}
-  <table>
-    <thead>
-      <tr>
-        <th>Nombre</th>
-        <th>Slug</th>
-        <th>URL de logs</th>
-        <th>URL de health</th>
-        <th style="min-width: 280px">Embed</th>
-        <th></th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for app in apps %}
-      <tr>
-        <td>{{ app.name }}</td>
-        <td class="mono">{{ app.slug }}</td>
-        <td class="mono" style="word-break: break-all">{{ app.logs_url }}</td>
-        <td class="mono" style="word-break: break-all">
-          {% if app.health_url %}{{ app.health_url }}{% else %}<span
-            style="color: #7d8598"
-            >—</span
-          >{% endif %}
-        </td>
-        <td>
-          <heartbeat-status
-            app="{{ app.slug }}"
-            token="{{ app.embed_token }}"
-          ></heartbeat-status>
-          <div style="display: flex; gap: 8px; margin-top: 8px">
-            <button
-              class="btn secondary"
-              type="button"
-              data-slug="{{ app.slug }}"
-              data-token="{{ app.embed_token }}"
-              onclick="copyEmbed(this)"
-            >
-              Copiar código
-            </button>
-            <form
-              method="post"
-              action="/apps/{{ app.slug }}/rotate-token"
-              data-name="{{ app.name }}"
-              onsubmit="return confirm('¿Rotar el token de ' + this.dataset.name + '? Los embeds que ya están publicados dejarán de funcionar hasta actualizar el token.');"
-              style="display: inline"
-            >
-              <button class="btn secondary" type="submit">Rotar token</button>
-            </form>
-          </div>
-        </td>
-        <td style="text-align: right">
-          <form
-            method="post"
-            action="/apps/{{ app.slug }}/delete"
-            data-name="{{ app.name }}"
-            onsubmit="return confirm('¿Eliminar ' + this.dataset.name + '?');"
-            style="display: inline"
-          >
-            <button class="btn danger" type="submit">Eliminar</button>
-          </form>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% endif %}
-</div>
+  /* Intake form */
+  .intake { position: sticky; top: 76px; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+  .intake-title { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
+  .intake .error-box { margin: 0; }
+  .field input { width: 100%; }
+  .mono-input { font-family: var(--font-mono); font-size: 12px; }
+  .hint { margin: 6px 0 0; font-size: 12px; color: var(--ink-3); text-wrap: pretty; }
+  .hint a { color: var(--ink-2); text-decoration: underline; text-decoration-color: var(--ink-4); text-underline-offset: 2px; transition: color 120ms, text-decoration-color 120ms; }
+  .hint a:hover { color: var(--ink); text-decoration-color: var(--ink-3); }
+  .rule { margin: 0; padding: 10px 12px; border-radius: 6px; background: var(--well); border: 1px solid var(--graticule); font-size: 12px; color: var(--ink-2); }
+  .rule .mono { color: var(--ink); }
+  .intake-submit { height: 36px; }
+
+  /* Entries */
+  .entries { display: flex; flex-direction: column; gap: 12px; }
+  .entries > .bay-title { margin: 4px 0 0; }
+  .entry { padding: 0; }
+  .entry-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px; flex-wrap: wrap; }
+  .entry-id { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+  .entry-name { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
+  .entry-slug { font-size: 12px; color: var(--ink-3); }
+  .entry-actions { display: flex; gap: 6px; }
+  .entry-actions form { display: contents; }
+  .entry-urls { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 8px 16px; margin: 0; padding: 14px 20px; border-top: 1px solid var(--graticule-soft); }
+  .entry-urls dt { font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); padding-top: 1px; }
+  .entry-urls dd { margin: 0; font-size: 12px; color: var(--ink-2); word-break: break-all; }
+  .entry-missing { color: var(--rhythm-degraded) !important; font-family: var(--font-sans); }
+  .entry-embed { padding: 14px 20px 18px; border-top: 1px solid var(--graticule-soft); display: flex; flex-direction: column; gap: 12px; }
+  .embed-head { display: flex; align-items: center; justify-content: space-between; }
+  .snippet summary { width: fit-content; font-size: 12px; color: var(--ink-3); cursor: pointer; list-style: none; }
+  .snippet summary::-webkit-details-marker { display: none; }
+  .snippet summary::before { content: "▸"; display: inline-block; margin-right: 6px; transition: transform 150ms var(--ease-out); }
+  .snippet[open] summary::before { transform: rotate(90deg); }
+  .snippet summary:hover { color: var(--ink); }
+  .snippet pre { margin: 10px 0 0; padding: 12px 14px; border-radius: 6px; background: var(--well); border: 1px solid var(--graticule); font-size: 12px; line-height: 1.6; color: var(--ink-2); white-space: pre-wrap; word-break: break-all; }
+</style>
 {% endblock %}

@@ -8,8 +8,8 @@
 //   theme="light"         default dark
 //   bars="N"              max bars (by default as many as fit the width, up to 100)
 //   refresh="30"          seconds between updates (min 10)
-//   color-up, color-degraded, color-down, color-empty, color-bg, color-text, color-border,
-//   color-pill-text       any CSS color, e.g. color-up="#22c55e"
+//   color-up, color-degraded, color-down, color-empty, color-bg, color-text, color-border
+//                         any CSS color, e.g. color-up="#22c55e"
 // Colors can also come from the host page's CSS, as custom properties (the attribute wins):
 //   heartbeat-status { --hb-up: #22c55e; --hb-bg: transparent; }
 // Talks only to Heartbeat's public /embed/{slug} endpoint (CORS-enabled, token-authorized).
@@ -26,37 +26,49 @@
     'color-bg': '--hb-bg',
     'color-text': '--hb-text',
     'color-border': '--hb-border',
-    'color-pill-text': '--hb-pill-text',
   };
   const DATA_ATTRS = ['app', 'token', 'refresh'];
   const LABELS = { up: 'Up', degraded: 'Degradado', down: 'Down' };
   // Fixed bar size: a wider card shows more history instead of stretching the bars.
-  const BAR_W = 8;
-  const BAR_GAP = 4;
-  const PAD_X = 16;
+  const BAR_W = 6;
+  const BAR_GAP = 3;
+  const PAD_X = 14;
   const MAX_BARS = 100;
 
+  // Same instrument language as the Heartbeat dashboard: a vital dot that beats while the app
+  // is alive (slower when degraded, still when down), mono readouts, a strip of checks.
+  // Plex fonts are used only if the host page already loads them -- never fetched here.
   const STYLE = `
-    :host { display: block; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    .card {
-      --_up: var(--hb-up, #3ecf8e); --_degraded: var(--hb-degraded, #e0a940); --_down: var(--hb-down, #e05a5a);
-      --_pill-text: var(--hb-pill-text, #0f1115);
-      box-sizing: border-box; padding: 14px ${PAD_X}px; border-radius: 10px;
-      border: 1px solid var(--_border); background: var(--_bg); color: var(--_text);
-    }
-    .head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; min-width: 0; }
-    .pill { flex-shrink: 0; font-size: 12px; font-weight: 700; padding: 2px 10px; border-radius: 999px; color: var(--_pill-text); background: var(--_empty); }
-    .pill.none { color: var(--_text); }
-    .name { font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    :host { display: block; font-family: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
+    .card { box-sizing: border-box; padding: 12px ${PAD_X}px 14px; border-radius: 10px; border: 1px solid var(--_border); background: var(--_bg); color: var(--_text); }
+    .head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; min-width: 0; }
+    .vital { position: relative; flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; background: var(--_empty); }
+    .vital.st-down { box-shadow: 0 0 0 3px color-mix(in srgb, var(--_down) 22%, transparent); }
+    .vital.st-up::after, .vital.st-degraded::after { content: ""; position: absolute; inset: 0; border-radius: 50%; background: inherit; animation: beat 2.4s cubic-bezier(0.23, 1, 0.32, 1) infinite; }
+    .vital.st-degraded::after { animation-duration: 3.6s; }
+    @keyframes beat { 0% { transform: scale(1); opacity: 0.55; } 45%, 100% { transform: scale(2.6); opacity: 0; } }
+    @media (prefers-reduced-motion: reduce) { .vital::after { display: none; } }
+    .name { flex: 1; min-width: 0; font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .reading { flex-shrink: 0; display: flex; align-items: baseline; gap: 8px; font-size: 12px; }
+    .state { font-weight: 500; }
+    .state.st-up { color: var(--_up); } .state.st-degraded { color: var(--_degraded); } .state.st-down { color: var(--_down); }
+    .pct { font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; opacity: 0.7; }
     .bars { display: flex; justify-content: space-between; gap: ${BAR_GAP}px; }
-    .bar { flex: 0 0 ${BAR_W}px; height: 24px; border-radius: 999px; background: var(--_empty); }
-    .st-up { background: var(--_up); }
-    .st-degraded { background: var(--_degraded); }
-    .st-down { background: var(--_down); }
-    .error { font-size: 12px; margin-top: 8px; color: var(--_text); opacity: 0.6; }
-    .dark { --_bg: var(--hb-bg, #171a21); --_border: var(--hb-border, #262b36); --_text: var(--hb-text, #d6dae3); --_empty: var(--hb-empty, #3a4150); }
-    .light { --_bg: var(--hb-bg, #ffffff); --_border: var(--hb-border, #e3e6ec); --_text: var(--hb-text, #1c2030); --_empty: var(--hb-empty, #d9dde5); }
+    .bar { flex: 0 0 ${BAR_W}px; height: 22px; border-radius: 2px; background: var(--_empty); }
+    .st-up:not(.state) { background: var(--_up); }
+    .st-degraded:not(.state) { background: var(--_degraded); }
+    .st-down:not(.state) { background: var(--_down); }
+    .error { font-size: 12px; margin-top: 10px; opacity: 0.6; }
+    .dark {
+      --_bg: var(--hb-bg, #111316); --_border: var(--hb-border, rgba(255, 255, 255, 0.075)); --_text: var(--hb-text, #e7e9ec); --_empty: var(--hb-empty, #262a30);
+      --_up: var(--hb-up, #3fd68a); --_degraded: var(--hb-degraded, #f0b43c); --_down: var(--hb-down, #f0514e);
+    }
+    .light {
+      --_bg: var(--hb-bg, #ffffff); --_border: var(--hb-border, rgba(0, 0, 0, 0.09)); --_text: var(--hb-text, #16181c); --_empty: var(--hb-empty, #e4e6ea);
+      --_up: var(--hb-up, #1fa463); --_degraded: var(--hb-degraded, #d6921a); --_down: var(--hb-down, #dc3b38);
+    }
   `;
+
 
   function fmtPct(v) {
     return v == null ? '—' : `${v.toFixed(v === 100 ? 0 : 2)}%`;
@@ -151,19 +163,27 @@
         // CSS.supports keeps a typo from silently wiping the default.
         if (value && CSS.supports('color', value)) card.style.setProperty(prop, value);
       }
+      const d = this.data;
       const head = document.createElement('div');
       head.className = 'head';
-      const pill = document.createElement('span');
+      const vital = document.createElement('span');
+      vital.className = d?.status ? `vital st-${d.status}` : 'vital';
       const name = document.createElement('span');
       name.className = 'name';
-      head.append(pill, name);
-      card.append(head);
-
-      const d = this.data;
-      pill.className = d?.status ? `pill st-${d.status}` : 'pill none';
-      pill.textContent = fmtPct(d?.uptime_24h);
       // textContent, never innerHTML: the name/label is rendered on third-party pages.
       name.textContent = this.getAttribute('label') || d?.name || this.getAttribute('app') || '';
+      const reading = document.createElement('span');
+      reading.className = 'reading';
+      const state = document.createElement('span');
+      state.className = d?.status ? `state st-${d.status}` : 'state';
+      state.textContent = d?.status ? LABELS[d.status] : 'Sin datos';
+      const pct = document.createElement('span');
+      pct.className = 'pct';
+      pct.textContent = fmtPct(d?.uptime_24h);
+      pct.title = 'Uptime últimas 24 h';
+      reading.append(state, pct);
+      head.append(vital, name, reading);
+      card.append(head);
 
       const bars = document.createElement('div');
       bars.className = 'bars';

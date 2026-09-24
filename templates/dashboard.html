@@ -1,371 +1,203 @@
-{% extends "base.html" %} {% block title %}Dashboard — Heartbeat{% endblock %}
-{% block content %} {% if apps | length == 0 %}
-<div class="card">
-  <p style="color: #7d8598; font-size: 13px">
-    No hay apps registradas todavía. Ve a
-    <a href="/apps" style="color: #4f8cff">Apps</a> para agregar una.
-  </p>
+{% extends "base.html" %}
+{% block title %}Dashboard — Heartbeat{% endblock %}
+{% block content %}
+{% if apps | length == 0 %}
+<div class="bay empty">
+  No hay apps registradas todavía. <a href="/apps">Registra la primera</a> para empezar a monitorearla.
 </div>
 {% else %}
-<div class="uptime" x-data="uptimeDashboard()" x-init="init()">
-  <aside class="card monitor-list">
-    <input
-      type="text"
-      x-model="search"
-      placeholder="Buscar..."
-      style="width: 100%; margin-bottom: 10px"
-    />
-    <template x-for="m in filteredMonitors()" :key="m.slug">
-      <a
-        class="monitor-row"
-        :href="'#' + m.slug"
-        :class="selected === m.slug ? 'selected' : ''"
-      >
-        <div
-          style="
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-bottom: 6px;
-          "
-        >
-          <span
-            class="pct-pill"
-            :class="'st-' + statusKey(m.status)"
-            x-text="fmtPct(m.uptime_24h)"
-          ></span>
-          <span class="monitor-name" x-text="m.name"></span>
-        </div>
-        <div class="beats small">
-          <template x-for="(b, i) in padBeats(m.recent)" :key="i">
-            <span
-              class="beat"
-              :class="b ? 'st-' + b.status : ''"
-              :title="b ? beatTitle(b) : ''"
-            ></span>
-          </template>
-        </div>
-      </a>
-    </template>
-    <p
-      x-show="filteredMonitors().length === 0"
-      style="color: var(--muted); font-size: 13px"
-    >
-      Sin resultados.
-    </p>
+<div class="monitor" x-data="uptimeDashboard()" x-init="init()">
+  <!-- Channels: every app, triage order (down, degraded, up, no data). -->
+  <aside class="channels" aria-label="Apps monitoreadas">
+    <input type="search" x-model="search" placeholder="Buscar app" aria-label="Buscar app" class="channel-search">
+    <div class="channel-list">
+      <template x-for="m in filteredMonitors()" :key="m.slug">
+        <a class="channel" :href="'#' + m.slug" :class="selected === m.slug && 'selected'" :aria-current="selected === m.slug ? 'page' : null">
+          <div class="channel-head">
+            <span class="vital" :class="'st-' + statusKey(m.status)"></span>
+            <span class="channel-name" x-text="m.name"></span>
+            <span class="channel-pct mono" x-text="fmtPct(m.uptime_24h)"></span>
+          </div>
+          <div class="beats channel-beats">
+            <template x-for="(b, i) in padBeats(m.recent)" :key="i">
+              <span class="beat" :class="b && 'st-' + b.status" :title="b ? beatTitle(b) : ''"></span>
+            </template>
+          </div>
+        </a>
+      </template>
+      <p class="empty channel-empty" x-show="filteredMonitors().length === 0">Ninguna app coincide.</p>
+    </div>
   </aside>
 
-  <section
-    style="min-width: 0; display: flex; flex-direction: column; gap: 16px"
-  >
-    <div
-      class="error-box"
-      x-show="loadError"
-      x-text="loadError"
-      style="margin: 0"
-    ></div>
+  <section class="stage">
+    <div class="error-box" x-show="loadError" x-text="loadError"></div>
 
-    <!-- Quick stats: nothing selected -->
+    <!-- Overview -->
     <template x-if="!current()">
-      <div style="display: flex; flex-direction: column; gap: 16px">
-        <h1 class="page-title">Resumen</h1>
-        <div class="card stat-row">
-          <div class="stat">
-            <div class="stat-label">Up</div>
-            <div
-              class="stat-big"
-              style="color: var(--up)"
-              x-text="count('up')"
-            ></div>
+      <div class="stack">
+        <header class="verdict">
+          <span class="vital vital-lg" :class="'st-' + overallStatus()"></span>
+          <div>
+            <h1 class="verdict-title" x-text="overallMessage()"></h1>
+            <p class="page-sub" x-text="overview.monitors.length + (overview.monitors.length === 1 ? ' app monitoreada' : ' apps monitoreadas') + ' · chequeo cada ' + overview.interval_secs + ' s'"></p>
           </div>
-          <div class="stat">
-            <div class="stat-label">Degradado</div>
-            <div
-              class="stat-big"
-              style="color: var(--warn)"
-              x-text="count('degraded')"
-            ></div>
+        </header>
+
+        <div class="census bay">
+          <div class="census-cell">
+            <div class="readout-label">Up</div>
+            <div class="census-value mono" :class="count('up') && 'st-text-up'" x-text="count('up')"></div>
           </div>
-          <div class="stat">
-            <div class="stat-label">Down</div>
-            <div
-              class="stat-big"
-              style="color: var(--error)"
-              x-text="count('down')"
-            ></div>
+          <div class="census-cell">
+            <div class="readout-label">Degradado</div>
+            <div class="census-value mono" :class="count('degraded') && 'st-text-degraded'" x-text="count('degraded')"></div>
           </div>
-          <div class="stat">
-            <div class="stat-label">Sin datos</div>
-            <div
-              class="stat-big"
-              style="color: var(--muted)"
-              x-text="count('unknown')"
-            ></div>
+          <div class="census-cell">
+            <div class="readout-label">Down</div>
+            <div class="census-value mono" :class="count('down') && 'st-text-down'" x-text="count('down')"></div>
+          </div>
+          <div class="census-cell">
+            <div class="readout-label">Sin datos</div>
+            <div class="census-value mono" x-text="count('unknown')"></div>
           </div>
         </div>
-        <div class="card">
-          <h2 class="card-title">Eventos recientes</h2>
-          <template x-if="overview.events.length === 0">
-            <p style="color: var(--muted); font-size: 13px">
-              Todavía no hay eventos.
-            </p>
-          </template>
-          <template x-if="overview.events.length > 0">
-            <table>
-              <thead>
-                <tr>
-                  <th>App</th>
-                  <th>Estado</th>
-                  <th>Fecha</th>
-                  <th>Mensaje</th>
-                </tr>
-              </thead>
-              <tbody>
-                <template x-for="e in overview.events" :key="e.slug + e.at">
-                  <tr>
-                    <td>
-                      <a
-                        :href="'#' + e.slug"
-                        style="color: var(--text)"
-                        x-text="e.name"
-                      ></a>
-                    </td>
-                    <td>
-                      <span
-                        class="status-tag"
-                        :class="'st-' + e.status"
-                        x-text="statusLabel(e.status)"
-                      ></span>
-                    </td>
-                    <td
-                      class="mono"
-                      style="white-space: nowrap"
-                      x-text="fmtDateTime(e.at)"
-                    ></td>
-                    <td class="mono msg" x-text="e.message"></td>
-                  </tr>
-                </template>
-              </tbody>
-            </table>
-          </template>
+
+        <template x-if="attention().length">
+          <div class="bay">
+            <h2 class="bay-title">Requieren atención</h2>
+            <div class="alarm-list">
+              <template x-for="m in attention()" :key="m.slug">
+                <a class="alarm" :href="'#' + m.slug">
+                  <span class="vital" :class="'st-' + m.status"></span>
+                  <span class="alarm-name" x-text="m.name"></span>
+                  <span class="alarm-state" :class="'st-text-' + m.status" x-text="statusLabel(m.status)"></span>
+                  <span class="alarm-msg mono" x-text="lastMessage(m)"></span>
+                  <span class="alarm-go" aria-hidden="true">→</span>
+                </a>
+              </template>
+            </div>
+          </div>
+        </template>
+
+        <div class="bay">
+          <h2 class="bay-title">Eventos recientes</h2>
+          <p class="empty" x-show="overview.events.length === 0">Sin cambios de estado todavía.</p>
+          <ol class="timeline">
+            <template x-for="e in visibleEvents(overview.events)" :key="e.slug + e.at">
+              <li class="event">
+                <time class="event-time mono" x-text="fmtDateTime(e.at)"></time>
+                <span class="event-state"><span class="vital" :class="'st-' + e.status"></span><span x-text="statusLabel(e.status)"></span></span>
+                <a class="event-app" :href="'#' + e.slug" x-text="e.name"></a>
+                <span class="event-msg mono" x-text="e.message"></span>
+              </li>
+            </template>
+          </ol>
+          <button type="button" class="more" x-show="overview.events.length > 8" @click="showAllEvents = !showAllEvents" x-text="showAllEvents ? 'Mostrar menos' : 'Mostrar los ' + overview.events.length + ' eventos'"></button>
         </div>
       </div>
     </template>
 
-    <!-- One app selected -->
+    <!-- One app -->
     <template x-if="current()">
-      <div style="display: flex; flex-direction: column; gap: 16px">
-        <div>
-          <h1 class="page-title" x-text="current().name"></h1>
-          <div
-            class="mono"
-            style="
-              font-size: 12px;
-              color: var(--up);
-              margin-top: 4px;
-              word-break: break-all;
-            "
-            x-text="current().health_url || 'Sin URL de health'"
-          ></div>
-          <div style="display: flex; gap: 8px; margin-top: 12px">
-            <a class="btn secondary" :href="'/logs/' + current().slug"
-              >Ver logs</a
-            >
-            <a class="btn secondary" href="#">← Resumen</a>
+      <div class="stack">
+        <header class="page-head" style="margin: 0">
+          <div style="min-width: 0">
+            <h1 class="page-title" x-text="current().name"></h1>
+            <p class="page-sub mono app-url" x-text="current().health_url || 'Sin URL de health'"></p>
           </div>
-        </div>
+          <div class="head-actions">
+            <a class="btn ghost" href="#">← Resumen</a>
+            <a class="btn secondary" :href="'/logs/' + current().slug">Ver logs</a>
+          </div>
+        </header>
 
         <template x-if="!current().health_url">
-          <div class="card" style="color: var(--muted); font-size: 13px">
-            Esta app se registró sin URL de health, así que no se monitorea.
-            Vuelve a registrarla en
-            <a href="/apps" style="color: var(--accent)">Apps</a> con una URL de
-            health.
+          <div class="bay empty">
+            Esta app se registró sin URL de health, así que no se monitorea. Vuelve a registrarla en <a href="/apps">Apps</a> con una URL de health.
           </div>
         </template>
 
         <template x-if="current().health_url">
-          <div style="display: flex; flex-direction: column; gap: 16px">
-            <div
-              class="card"
-              style="display: flex; align-items: center; gap: 20px"
-            >
-              <div style="flex: 1; min-width: 0">
-                <div class="beats large">
-                  <template
-                    x-for="(b, i) in padBeats(current().recent)"
-                    :key="i"
-                  >
-                    <span
-                      class="beat"
-                      :class="b ? 'st-' + b.status : ''"
-                      :title="b ? beatTitle(b) : ''"
-                    ></span>
+          <div class="stack">
+            <div class="vitals bay">
+              <div class="vital-primary">
+                <div class="vital-state" :class="'st-text-' + statusKey(current().status)">
+                  <span class="vital" :class="'st-' + statusKey(current().status)"></span>
+                  <span x-text="statusLabel(current().status)"></span>
+                </div>
+                <div class="vital-reading mono">
+                  <span x-text="current().latency_ms ?? '—'"></span><span class="vital-unit">ms</span>
+                </div>
+                <div class="readout-label">Latencia actual</div>
+              </div>
+              <div class="vital-secondary">
+                <div class="readout">
+                  <div class="readout-label">Prom. 24 h</div>
+                  <div class="readout-value mono" x-text="fmtMs(current().avg_latency_24h_ms)"></div>
+                </div>
+                <div class="readout">
+                  <div class="readout-label">Uptime 24 h</div>
+                  <div class="readout-value mono" x-text="fmtPct(current().uptime_24h)"></div>
+                </div>
+                <div class="readout">
+                  <div class="readout-label">Uptime 30 días</div>
+                  <div class="readout-value mono" x-text="fmtPct(current().uptime_30d)"></div>
+                </div>
+              </div>
+              <div class="vital-strip">
+                <div class="beats strip-beats">
+                  <template x-for="(b, i) in padBeats(current().recent, STRIP_SLOTS)" :key="i">
+                    <span class="beat" :class="b && 'st-' + b.status" :title="b ? beatTitle(b) : ''"></span>
                   </template>
                 </div>
-                <div
-                  style="
-                    display: flex;
-                    justify-content: space-between;
-                    font-size: 11px;
-                    color: var(--muted);
-                    margin-top: 6px;
-                  "
-                >
-                  <span
-                    x-text="current().recent.length ? fmtAgo(current().recent[0].at) : ''"
-                  ></span>
+                <div class="strip-axis">
+                  <span x-text="stripStart(current(), STRIP_SLOTS)"></span>
+                  <span x-text="'chequeo cada ' + overview.interval_secs + ' s'"></span>
                   <span>ahora</span>
                 </div>
-                <div
-                  style="font-size: 12px; color: var(--muted); margin-top: 8px"
-                  x-text="'Chequeo cada ' + overview.interval_secs + ' segundos'"
-                ></div>
-              </div>
-              <span
-                class="status-big"
-                :class="'st-' + statusKey(current().status)"
-                x-text="statusLabel(current().status)"
-              ></span>
-            </div>
-
-            <div class="card stat-row">
-              <div class="stat">
-                <div class="stat-label">Latencia</div>
-                <div class="stat-sub">(actual)</div>
-                <div
-                  class="stat-val"
-                  x-text="fmtMs(current().latency_ms)"
-                ></div>
-              </div>
-              <div class="stat">
-                <div class="stat-label">Latencia prom.</div>
-                <div class="stat-sub">(24 h)</div>
-                <div
-                  class="stat-val"
-                  x-text="fmtMs(current().avg_latency_24h_ms)"
-                ></div>
-              </div>
-              <div class="stat">
-                <div class="stat-label">Uptime</div>
-                <div class="stat-sub">(24 h)</div>
-                <div
-                  class="stat-val"
-                  x-text="fmtPct(current().uptime_24h)"
-                ></div>
-              </div>
-              <div class="stat">
-                <div class="stat-label">Uptime</div>
-                <div class="stat-sub">(30 días)</div>
-                <div
-                  class="stat-val"
-                  x-text="fmtPct(current().uptime_30d)"
-                ></div>
               </div>
             </div>
 
-            <div class="card">
-              <div
-                style="
-                  display: flex;
-                  justify-content: space-between;
-                  align-items: center;
-                  margin-bottom: 8px;
-                "
-              >
-                <h2 class="card-title" style="margin: 0">
-                  Tiempo de respuesta (ms)
-                </h2>
-                <select x-model.number="hours" @change="loadDetail()">
-                  <option value="1">1 h</option>
-                  <option value="6">6 h</option>
-                  <option value="24">24 h</option>
-                  <option value="168">7 días</option>
-                  <option value="720">30 días</option>
-                </select>
+            <div class="bay">
+              <div class="chart-head">
+                <h2 class="bay-title" style="margin: 0">Tiempo de respuesta</h2>
+                <div class="segmented" role="group" aria-label="Rango">
+                  <template x-for="r in RANGES" :key="r.hours">
+                    <button type="button" :aria-pressed="hours === r.hours" @click="setHours(r.hours)" x-text="r.label"></button>
+                  </template>
+                </div>
               </div>
-              <div
-                class="chart"
-                x-init="observeChart($el)"
-                @mousemove="onChartMove($event)"
-                @mouseleave="hover = null"
-              >
+              <div class="chart" x-init="observeChart($el)" @mousemove="onChartMove($event)" @mouseleave="hover = null">
                 <div x-html="chartSvg()"></div>
-                <div
-                  class="chart-tip"
-                  x-show="hover"
-                  :style="hover ? `left:${hover.left}px;top:${hover.top}px;` : ''"
-                >
+                <div class="chart-tip" x-show="hover" :style="hover ? `left:${hover.left}px;top:${hover.top}px;` : ''">
                   <template x-if="hover">
                     <div>
-                      <div
-                        class="mono"
-                        style="color: var(--muted)"
-                        x-text="fmtDateTime(hover.beat.at)"
-                      ></div>
-                      <div
-                        style="
-                          display: flex;
-                          gap: 8px;
-                          align-items: center;
-                          margin-top: 4px;
-                        "
-                      >
-                        <span
-                          class="status-tag"
-                          :class="'st-' + hover.beat.status"
-                          x-text="statusLabel(hover.beat.status)"
-                        ></span>
-                        <strong x-text="fmtMs(hover.beat.latency_ms)"></strong>
+                      <div class="tip-time mono" x-text="fmtDateTime(hover.beat.at)"></div>
+                      <div class="tip-row">
+                        <span class="vital" :class="'st-' + hover.beat.status"></span>
+                        <span x-text="statusLabel(hover.beat.status)"></span>
+                        <strong class="mono" x-text="fmtMs(hover.beat.latency_ms)"></strong>
                       </div>
-                      <div
-                        class="mono"
-                        style="color: var(--muted); margin-top: 4px"
-                        x-text="hover.beat.message"
-                      ></div>
+                      <div class="tip-msg mono" x-text="hover.beat.message"></div>
                     </div>
                   </template>
                 </div>
               </div>
             </div>
 
-            <div class="card">
-              <h2 class="card-title">Eventos</h2>
-              <template x-if="detail.events.length === 0">
-                <p style="color: var(--muted); font-size: 13px">
-                  Todavía no hay eventos.
-                </p>
-              </template>
-              <template x-if="detail.events.length > 0">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Estado</th>
-                      <th>Fecha</th>
-                      <th>Mensaje</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <template x-for="e in detail.events" :key="e.at">
-                      <tr>
-                        <td>
-                          <span
-                            class="status-tag"
-                            :class="'st-' + e.status"
-                            x-text="statusLabel(e.status)"
-                          ></span>
-                        </td>
-                        <td
-                          class="mono"
-                          style="white-space: nowrap"
-                          x-text="fmtDateTime(e.at)"
-                        ></td>
-                        <td class="mono msg" x-text="e.message"></td>
-                      </tr>
-                    </template>
-                  </tbody>
-                </table>
-              </template>
+            <div class="bay">
+              <h2 class="bay-title">Eventos</h2>
+              <p class="empty" x-show="detail.events.length === 0">Sin cambios de estado todavía.</p>
+              <ol class="timeline">
+                <template x-for="e in visibleEvents(detail.events)" :key="e.at">
+                  <li class="event event-app-less">
+                    <time class="event-time mono" x-text="fmtDateTime(e.at)"></time>
+                    <span class="event-state"><span class="vital" :class="'st-' + e.status"></span><span x-text="statusLabel(e.status)"></span></span>
+                    <span class="event-msg mono" x-text="e.message"></span>
+                  </li>
+                </template>
+              </ol>
+              <button type="button" class="more" x-show="detail.events.length > 8" @click="showAllEvents = !showAllEvents" x-text="showAllEvents ? 'Mostrar menos' : 'Mostrar los ' + detail.events.length + ' eventos'"></button>
             </div>
           </div>
         </template>
@@ -373,162 +205,90 @@
     </template>
   </section>
 </div>
-{% endif %} {% endblock %} {% block head %}
+{% endif %}
+{% endblock %}
+{% block head %}
 <script src="/static/uptime.js"></script>
 <style>
-  .uptime {
-    display: grid;
-    grid-template-columns: 340px 1fr;
-    gap: 20px;
-    align-items: start;
-  }
-  @media (max-width: 860px) {
-    .uptime {
-      grid-template-columns: 1fr;
-    }
-  }
-  .monitor-list {
-    position: sticky;
-    top: 20px;
-    max-height: calc(100vh - 100px);
-    overflow-y: auto;
-    padding: 12px;
-  }
-  .monitor-row {
-    display: block;
-    padding: 10px;
-    border-radius: 8px;
-    text-decoration: none;
-    color: var(--text);
-  }
-  .monitor-row:hover {
-    background: rgba(255, 255, 255, 0.03);
-  }
-  .monitor-row.selected {
-    background: rgba(62, 207, 142, 0.1);
-  }
-  .monitor-name {
-    font-size: 14px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .pct-pill {
-    flex-shrink: 0;
-    font-size: 11px;
-    font-weight: 700;
-    padding: 2px 8px;
-    border-radius: 999px;
-    color: #0f1115;
-    background: var(--unknown);
-  }
-  .pct-pill.st-unknown {
-    color: var(--text);
-  }
-  .beats.small .beat {
-    height: 16px;
-    max-width: 6px;
-  }
-  .beats.large .beat {
-    height: 30px;
-    max-width: 10px;
-  }
-  .pct-pill.st-up,
-  .status-big.st-up {
-    background: var(--up);
-  }
-  .pct-pill.st-degraded,
-  .status-big.st-degraded {
-    background: var(--warn);
-  }
-  .pct-pill.st-down,
-  .status-big.st-down {
-    background: var(--error);
-  }
-  .status-big {
-    flex-shrink: 0;
-    font-size: 22px;
-    font-weight: 800;
-    padding: 8px 20px;
-    border-radius: 999px;
-    color: #0f1115;
-    background: var(--unknown);
-  }
-  .status-big.st-unknown {
-    color: var(--text);
-  }
-  .status-tag {
-    display: inline-block;
-    padding: 2px 10px;
-    border-radius: 999px;
-    font-size: 11px;
-    font-weight: 700;
-    color: #0f1115;
-  }
-  .status-tag.st-up {
-    background: var(--up);
-  }
-  .status-tag.st-degraded {
-    background: var(--warn);
-  }
-  .status-tag.st-down {
-    background: var(--error);
-    color: white;
-  }
-  .page-title {
-    margin: 0;
-    font-size: 24px;
-  }
-  .card-title {
-    margin: 0 0 12px;
-    font-size: 15px;
-  }
-  .stat-row {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-    gap: 12px;
-    text-align: center;
-  }
-  .stat-label {
-    font-size: 16px;
-    font-weight: 600;
-  }
-  .stat-sub {
-    font-size: 11px;
-    color: var(--muted);
-  }
-  .stat-val {
-    font-size: 15px;
-    margin-top: 6px;
-  }
-  .stat-big {
-    font-size: 30px;
-    font-weight: 800;
-    margin-top: 6px;
-  }
-  .msg {
-    font-size: 12px;
-    color: #9aa4b8;
-    word-break: break-word;
-  }
-  .chart {
-    position: relative;
-    height: 260px;
-  }
-  .chart svg {
-    display: block;
-  }
-  .chart-tip {
-    position: absolute;
-    pointer-events: none;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 8px 10px;
-    font-size: 12px;
-    max-width: 280px;
-    transform: translate(-50%, calc(-100% - 12px));
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-  }
+  .monitor { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 24px; align-items: start; }
+  /* Narrow screens: the verdict/detail leads, the channel list follows. */
+  @media (max-width: 900px) { .monitor { grid-template-columns: 1fr; } .stage { order: -1; } .channels { position: static !important; max-height: none !important; } }
+  .stack { display: flex; flex-direction: column; gap: 16px; }
+
+  /* Channels */
+  .channels { position: sticky; top: 76px; max-height: calc(100vh - 100px); display: flex; flex-direction: column; gap: 8px; }
+  .channel-search { width: 100%; }
+  .channel-list { overflow-y: auto; display: flex; flex-direction: column; gap: 2px; margin: 0 -4px; padding: 0 4px; }
+  .channel { display: block; padding: 10px 12px; border-radius: 8px; text-decoration: none; color: var(--ink); border: 1px solid transparent; transition: background-color 120ms; }
+  .channel:hover { background: var(--bay); }
+  .channel.selected { background: var(--bay); border-color: var(--graticule); }
+  .channel-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .channel-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .channel-pct { font-size: 12px; color: var(--ink-2); }
+  .channel-beats .beat { height: 14px; max-width: 5px; }
+  .channel-empty { padding: 8px 12px; margin: 0; }
+
+  /* Overview */
+  .verdict { display: flex; align-items: center; gap: 16px; padding: 8px 0 4px; }
+  .vital-lg { width: 14px; height: 14px; }
+  .verdict-title { font-size: 28px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.15; }
+  .census { display: grid; grid-template-columns: repeat(4, 1fr); padding: 0; }
+  .census-cell { padding: 16px; }
+  .census-cell + .census-cell { border-left: 1px solid var(--graticule-soft); }
+  .census-value { font-size: 28px; font-weight: 500; line-height: 1.1; margin-top: 6px; color: var(--ink-2); }
+  @media (max-width: 640px) { .census { grid-template-columns: repeat(2, 1fr); } .census-cell:nth-child(3) { border-left: 0; } .census-cell:nth-child(n + 3) { border-top: 1px solid var(--graticule-soft); } }
+  .readout-label { font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); }
+  .alarm-list { display: flex; flex-direction: column; margin: 0 -8px; }
+  .alarm { display: grid; grid-template-columns: 8px minmax(120px, auto) auto minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 10px 8px; border-radius: 6px; text-decoration: none; color: var(--ink); }
+  .alarm:hover { background: var(--bay-raised); }
+  .alarm-name { font-weight: 500; }
+  .alarm-state { font-size: 12px; font-weight: 500; }
+  .alarm-msg { font-size: 12px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .alarm-go { color: var(--ink-4); }
+  .alarm:hover .alarm-go { color: var(--ink-2); }
+
+  /* Timeline */
+  .timeline { list-style: none; margin: 0; padding: 0; }
+  .more { margin-top: 8px; padding: 6px 0; background: none; border: 0; color: var(--ink-3); font: 500 12px var(--font-sans); cursor: pointer; }
+  .more:hover { color: var(--ink); }
+  .event { display: grid; grid-template-columns: 130px 110px minmax(100px, 200px) minmax(0, 1fr); gap: 12px; align-items: baseline; padding: 8px 0; border-top: 1px solid var(--graticule-soft); font-size: 13px; }
+  .event:first-child { border-top: 0; }
+  .event-app-less { grid-template-columns: 130px 110px minmax(0, 1fr); }
+  .event-time { font-size: 12px; color: var(--ink-3); }
+  .event-state { display: inline-flex; align-items: center; gap: 8px; }
+  .event-state .vital { transform: translateY(-1px); }
+  .event-app { color: var(--ink); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .event-app:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .event-msg { font-size: 12px; color: var(--ink-3); word-break: break-word; }
+  @media (max-width: 720px) { .event, .event-app-less { grid-template-columns: 1fr auto; } .event-msg { grid-column: 1 / -1; } }
+
+  /* Detail */
+  .app-url { color: var(--ink-3); word-break: break-all; }
+  .head-actions { display: flex; gap: 8px; }
+  .vitals { display: grid; grid-template-columns: auto 1fr; gap: 0 32px; padding: 20px; }
+  .vital-primary { padding-right: 32px; border-right: 1px solid var(--graticule-soft); }
+  .vital-state { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; letter-spacing: 0.02em; }
+  .vital-reading { font-size: 44px; font-weight: 500; line-height: 1; letter-spacing: -0.03em; margin: 12px 0 8px; }
+  .vital-unit { font-size: 16px; color: var(--ink-3); margin-left: 6px; letter-spacing: 0; }
+  .vital-secondary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-content: center; }
+  .readout-value { font-size: 22px; font-weight: 500; margin-top: 6px; letter-spacing: -0.01em; }
+  .vital-strip { grid-column: 1 / -1; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--graticule-soft); }
+  .strip-beats { gap: 2px; }
+  .strip-beats .beat { height: 32px; min-width: 2px; }
+  .strip-axis { display: flex; justify-content: space-between; margin-top: 8px; font-size: 11px; color: var(--ink-3); }
+  @media (max-width: 720px) { .vitals { grid-template-columns: 1fr; } .vital-primary { border-right: 0; padding-right: 0; padding-bottom: 16px; margin-bottom: 16px; border-bottom: 1px solid var(--graticule-soft); } }
+
+  .chart-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; gap: 12px; }
+  .segmented { display: inline-flex; padding: 2px; gap: 2px; background: var(--well); border: 1px solid var(--graticule); border-radius: 8px; }
+  .segmented button { height: 26px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: var(--ink-3); font: 500 12px var(--font-mono); cursor: pointer; transition: color 120ms, background-color 120ms; }
+  .segmented button:hover { color: var(--ink); }
+  .segmented button[aria-pressed="true"] { background: var(--bay-raised); color: var(--ink); box-shadow: 0 0 0 1px var(--graticule-strong); }
+  .chart { position: relative; height: 260px; }
+  .chart svg { display: block; }
+  .chart-tip { position: absolute; pointer-events: none; background: var(--bay-raised); border: 1px solid var(--graticule-strong); border-radius: 8px; padding: 8px 10px; font-size: 12px; max-width: 280px; transform: translate(-50%, calc(-100% - 14px)); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); }
+  .tip-time { color: var(--ink-3); }
+  .tip-row { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+  .tip-row strong { margin-left: auto; font-weight: 500; }
+  .tip-msg { color: var(--ink-3); margin-top: 4px; word-break: break-word; }
 </style>
 {% endblock %}

@@ -1,84 +1,120 @@
 # Heartbeat
 
-Dashboard interno para ver los logs de las apps de Adquiere que exponen un endpoint tipo
-`GET /admin/logs` (ver `pulso-backend`'s `GET /api/v1/admin/logs` para la referencia de
-contrato). Registras cada app con un nombre + la URL de su endpoint de logs, y desde un
-solo lugar ves/filtras/parseas el JSON de stdout y el texto crudo de stderr de todas.
+Monitor de uptime y visor de logs para tus servicios, autohospedado. Registras cada app
+con una URL de health y una de logs. Desde un solo lugar ves:
+
+- si está arriba, degradada o caída;
+- su historial de 30 días y su latencia;
+- su stdout y stderr en vivo.
+
+Además puedes publicar su estado en cualquier web con un componente embebible.
 
 ## Cómo funciona
 
-- **Login**: el formulario en `/login` reenvía email/password a `LOGIN_URL` (por defecto,
-  el login de `pulso-backend`). Esa respuesta ya trae `is_admin` — calculado ahí mismo
-  contra su base de datos, no a partir de lo que diga el JWT — así que esta app no
-  reimplementa la verificación de admin, solo lee el veredicto. Si `is_admin` es `false`,
-  no entra.
-- **Sesión**: el `access_token` que regresa el login se guarda tal cual en una cookie
-  HttpOnly (`heartbeat_session`). Nunca llega a JavaScript del navegador.
-- **Apps registradas**: en `/apps`, agregas `{ nombre, url del endpoint de logs }`.
-  Se guardan en un archivo JSON (`APPS_FILE`, por defecto `./data/apps.json`) — no hay
-  base de datos, son un puñado de filas que casi no cambian.
-- **Uptime**: cada app registrada lleva una URL de health. Un loop en background la
-  consulta cada `UPTIME_INTERVAL_SECS` (60 por defecto), como semáforo: 2xx = up (verde),
-  2xx pero más lento que `UPTIME_DEGRADED_MS` (1000 por defecto) = degradado (amarillo, cuenta
-  como disponible para el % de uptime), cualquier otra cosa
-  (status no-2xx, timeout de 10 s, error de conexión) = down. El historial de los últimos
-  30 días se guarda en `UPTIME_DIR/<slug>.jsonl`. `/` muestra el dashboard de uptime
-  (estado, % de uptime 24 h / 30 días, latencia, gráfica y eventos); `/logs` muestra una
-  card por app con sus últimos heartbeats.
-- **Embed en otras webs**: cada app tiene un `embed_token` secreto (se genera al
-  registrarla). En `/apps` está la vista previa y el botón "Copiar código", que da:
+- **Login**: el formulario en `/login` reenvía email y password a `LOGIN_URL`. La
+  respuesta debe traer `is_admin`, que decide el servidor de login (idealmente consultando
+  su base de datos, no un claim del JWT). Heartbeat no reimplementa esa verificación: solo
+  lee el veredicto. Si `is_admin` es `false`, no entra.
+- **Sesión**: el `access_token` que regresa el login se queda en memoria del servidor. El
+  navegador solo recibe una cookie HttpOnly (`heartbeat_session`) con un ID de sesión
+  aleatorio (ver [Seguridad](#seguridad)).
+- **Apps registradas**: en `/apps` agregas `{ nombre, URL de logs, URL de health }`. Se
+  guardan en un archivo JSON (`APPS_FILE`, por defecto `./data/apps.json`). No hay base de
+  datos: son pocas filas que casi no cambian.
+- **Uptime**: un loop en background consulta la URL de health de cada app cada
+  `UPTIME_INTERVAL_SECS` segundos (60 por defecto). Funciona como semáforo:
+  - **Up (verde)**: responde 2xx.
+  - **Degradado (amarillo)**: responde 2xx pero tarda más que `UPTIME_DEGRADED_MS` (800
+    por defecto). Cuenta como disponible para el % de uptime.
+  - **Down (rojo)**: cualquier otra cosa (status no-2xx, timeout de 10 s o error de
+    conexión).
+
+  El historial de 30 días se guarda en `UPTIME_DIR/<slug>.jsonl`. `/` es el dashboard de
+  uptime y `/logs` lista las apps con sus últimos checks.
+- **Ver logs**: el navegador solo le pide logs a Heartbeat (`/api/apps/{slug}/logs`,
+  mismo origen, con la cookie). El servidor reenvía la llamada a la URL registrada.
+- **Embed en otras webs**: cada app tiene un `embed_token` secreto, que se genera al
+  registrarla. En `/apps` está la vista previa y el botón "Copiar código", que da:
   ```html
   <script src="https://HEARTBEAT_HOST/static/embed.js" defer></script>
   <heartbeat-status app="SLUG" token="EMBED_TOKEN"></heartbeat-status>
   ```
-  Atributos opcionales: `label="Mi API"` (texto en lugar del nombre de la app),
-  `theme="light"`, `bars="N"` (máximo de barras; por defecto las que quepan en el ancho,
-  hasta 100), `refresh="30"` (segundos) y colores — `color-up`, `color-degraded`,
-  `color-down`, `color-empty`, `color-bg`, `color-text`, `color-border`,
-  `color-pill-text` — con cualquier color CSS. Los colores también se pueden poner desde
-  el CSS de la página con variables (`heartbeat-status { --hb-up: #22c55e; }`); el
-  atributo gana. El
-  componente usa Shadow DOM (el CSS de la otra web no lo afecta) y solo habla con
-  `GET /embed/{slug}?token=...` — público, con CORS, sin sesión — que devuelve nombre,
-  estado, % de uptime 24 h y los últimos heartbeats; nunca la URL de health ni los
-  mensajes de error. El token queda visible en el HTML de la página que lo incruste: si se
-  filtra donde no debe, "Rotar token" en `/apps` invalida todos los embeds viejos.
-- **Ver logs**: el navegador solo le pide logs a esta misma app (`/api/apps/{slug}/logs`,
-  mismo origen, cookie automática). El servidor reenvía esa llamada a la URL real
-  registrada.
-- **Por qué no basta con reenviar el token del usuario**: cada ambiente (test, prod) tiene
-  su propia base de datos de usuarios/roles, provisionada por separado — un JWT emitido por
-  el login de prod no tiene fila correspondiente en la base de test, aunque sea la misma
-  persona. Reenviar solo el token del usuario funcionaría para apps del MISMO ambiente que
-  `LOGIN_URL`, pero fallaría (401/403) contra cualquier otro. Por eso, además del token,
-  cada llamada manda el header `X-Admin-Logs-Key` con `ADMIN_LOGS_KEY` — una llave
-  compartida que cada app registrada puede aceptar sin depender de su propia tabla de
-  usuarios (ver `pulso-backend`'s `routes::logs::admin_logs_key_matches`). Ser admin en el
-  ambiente donde hiciste login basta para ver logs de cualquier app registrada, sea cual
-  sea su ambiente. Una app que no reconozca el header simplemente sigue validando por el
-  token del usuario, como antes.
+  Atributos opcionales:
+  - `label="Mi API"`: texto en lugar del nombre de la app.
+  - `theme="light"`: el tema por defecto es oscuro.
+  - `bars="N"`: máximo de barras; por defecto las que quepan en el ancho, hasta 100.
+  - `refresh="30"`: segundos entre actualizaciones.
+  - Colores: `color-up`, `color-degraded`, `color-down`, `color-empty`, `color-bg`,
+    `color-text`, `color-border`, con cualquier color CSS. También se pueden poner desde el
+    CSS de la página con variables (`heartbeat-status { --hb-up: #22c55e; }`); si hay
+    ambos, gana el atributo.
+
+  El componente usa Shadow DOM, así que el CSS de la otra web no lo afecta. Solo habla con
+  `GET /embed/{slug}?token=...`, que es público, con CORS y sin sesión. Ese endpoint
+  devuelve nombre, estado, % de uptime de 24 h y los últimos checks; nunca la URL de health
+  ni los mensajes de error. El token queda visible en el HTML de la página que lo incrusta:
+  si se filtra, "Rotar token" en `/apps` invalida todos los embeds anteriores.
+
+## Contrato de los endpoints
+
+Lo que tus apps deben exponer para registrarse en Heartbeat.
+
+**Health** (`GET`, sin autenticación): cualquier respuesta 2xx cuenta como arriba. El
+cuerpo se ignora.
+
+**Logs** (`GET`): Heartbeat manda estos parámetros y headers:
+
+- `stream=out|error|both` y `lines=N` (query).
+- `Authorization: Bearer <access_token del admin>`.
+- `X-Admin-Logs-Key: <ADMIN_LOGS_KEY>`, si está configurada.
+
+Y espera JSON con esta forma (las líneas, de la más vieja a la más nueva, como `tail -n`):
+
+```json
+{
+  "out":   { "lines": ["{\"timestamp\":\"...\",\"level\":\"INFO\",\"target\":\"...\",\"fields\":{...}}"], "error": null },
+  "error": { "lines": ["texto crudo de stderr"], "error": null }
+}
+```
+
+- `out.lines`: una línea JSON por evento, en el formato de
+  [`tracing_subscriber::fmt::format::Json`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/fmt/format/struct.Json.html).
+  El visor las parsea para filtrar por nivel y módulo.
+- `error.lines`: texto crudo.
+- Un `error` por stream (string) indica que ese stream no se pudo leer.
+
+La app debe autorizar la llamada. Puede validar el JWT del usuario o, para ver logs entre
+ambientes, aceptar la llave compartida del header `X-Admin-Logs-Key`, comparándola en
+tiempo constante con su propio `ADMIN_LOGS_KEY`.
+
+**Por qué existe la llave compartida**: si cada ambiente (test, prod) tiene su propia base
+de usuarios, un JWT emitido por el login de prod no significa nada en test. Reenviar solo
+el token funciona para apps del mismo ambiente que `LOGIN_URL`, pero falla contra
+cualquier otro. Con `ADMIN_LOGS_KEY`, ser admin en el ambiente donde hiciste login basta
+para ver los logs de cualquier app registrada.
 
 ## Seguridad
 
 - **Sesiones del lado del servidor**: la cookie solo lleva un ID aleatorio de 256 bits; el
-  JWT del upstream se queda en memoria del proceso. Una cookie inventada no da acceso, y
-  "Salir" invalida la sesión de verdad. Reiniciar el proceso cierra todas las sesiones.
+  JWT se queda en memoria del proceso. Una cookie inventada no da acceso y "Salir"
+  invalida la sesión de verdad. Reiniciar el proceso cierra todas las sesiones.
 - **Política de salida** (`src/outbound.rs`): el proxy de logs y el monitor de uptime solo
-  hacen requests a URLs `https://` cuyo host esté en `ALLOWED_HOSTS` (por defecto
-  `*.adquiere.co`), no siguen redirects y rechazan nombres que resuelvan a IPs privadas,
-  loopback o link-local (incluida la de metadatos de AWS, `169.254.169.254`). Se valida al
-  registrar la app y otra vez en cada request, así que entradas viejas tampoco pasan. Esas
-  requests llevan `ADMIN_LOGS_KEY` y el JWT del admin: nunca salen hacia otro host ni en
-  texto plano.
+  hacen requests a URLs `https://` cuyo host esté en `ALLOWED_HOSTS`, no siguen redirects
+  y rechazan nombres que resuelvan a IPs privadas, loopback o link-local (incluida la de
+  metadatos de la nube, `169.254.169.254`).
+  - Se valida al registrar la app y otra vez en cada request, así que las entradas viejas
+    tampoco pasan.
+  - Esas requests llevan `ADMIN_LOGS_KEY` y el JWT del admin, que nunca salen hacia otro
+    host ni en texto plano.
 - El proxy de logs no devuelve el cuerpo crudo cuando la respuesta no es JSON.
-- En EC2, forzar IMDSv2 en la instancia como defensa extra
+- En AWS, forzar IMDSv2 en la instancia como defensa extra
   (`aws ec2 modify-instance-metadata-options --http-tokens required`).
 
 ## Correr localmente
 
 ```bash
 cp .env.example .env
-# para desarrollo sin TLS:
+# editar LOGIN_URL y ALLOWED_HOSTS (obligatorias); para desarrollo sin TLS:
 #   COOKIE_SECURE=false
 cargo run
 ```
@@ -87,60 +123,54 @@ Abre `http://localhost:8090`.
 
 ## Variables de entorno (`.env`)
 
-```env
-HOST=0.0.0.0
-PORT=8090
-LOGIN_URL=https://api-pulso-test.adquiere.co/api/v1/auth/login
-APPS_FILE=./data/apps.json
-COOKIE_SECURE=true
-ADMIN_LOGS_KEY=
-UPTIME_DIR=./data/uptime
-UPTIME_INTERVAL_SECS=60
-UPTIME_DEGRADED_MS=1000
-ALLOWED_HOSTS=*.adquiere.co
-```
+| Variable | Por defecto | |
+|---|---|---|
+| `LOGIN_URL` | — | **Obligatoria.** Endpoint de login (ver arriba). |
+| `ALLOWED_HOSTS` | — | **Obligatoria.** Hosts permitidos para las URLs registradas, separados por comas; `*.dominio` = cualquier subdominio. |
+| `HOST` / `PORT` | `0.0.0.0` / `8090` | |
+| `APPS_FILE` | `./data/apps.json` | Registro de apps. |
+| `COOKIE_SECURE` | `true` | Ponerla en `false` solo en desarrollo sin TLS. |
+| `ADMIN_LOGS_KEY` | — | Llave compartida para ver logs entre ambientes. |
+| `UPTIME_DIR` | `./data/uptime` | Historial de checks. |
+| `UPTIME_INTERVAL_SECS` | `60` | Segundos entre checks. |
+| `UPTIME_DEGRADED_MS` | `800` | Umbral de "degradado". |
 
-## Despliegue en EC2 (Ubuntu 24.04)
+## Despliegue (Ubuntu 24.04)
 
-Misma forma que `pulso-backend`: binario Rust corriendo bajo pm2, nginx como reverse proxy
-con TLS de Let's Encrypt. Puerto de la app: `8090` (interno, nunca expuesto directo —
-solo nginx habla con `localhost:8090`).
+Binario Rust bajo pm2, con nginx como reverse proxy y TLS de Let's Encrypt. La app
+escucha en `8090`; ese puerto nunca se expone directo, solo nginx habla con
+`localhost:8090`.
 
 ```bash
-# En el servidor, con el código ya ahí (git clone o transferido):
-./prepare_ec2.sh /arena/heartbeat   # instala nginx/certbot/node/pm2/rust, compila
+# En el servidor, con el código ya ahí:
+./prepare_ec2.sh /arena/heartbeat   # instala nginx/certbot/node/pm2/rust y compila
 
 cp .env.example .env
-# editar .env con valores reales de PROD -- en particular:
-#   LOGIN_URL=https://api-pulso.adquiere.co/api/v1/auth/login   (prod: la fuente real de
-#     "quién es admin" -- ver la sección de arriba sobre por qué no importa en qué
-#     ambiente vive la app que vas a registrar)
-#   COOKIE_SECURE=true
-#   ADMIN_LOGS_KEY=<mismo valor que en cada app registrada>
+# editar .env: LOGIN_URL, ALLOWED_HOSTS, COOKIE_SECURE=true y, si aplica, ADMIN_LOGS_KEY
 
 pm2 start ./target/release/heartbeat --name heartbeat --cwd /arena/heartbeat
 pm2 save && pm2 startup   # para que sobreviva a un reboot
 ```
 
-Luego, nginx + certbot (ver `deploy/nginx.conf.example`):
+Luego, nginx y certbot (ver `deploy/nginx.conf.example`):
 
 ```bash
-sudo cp deploy/nginx.conf.example /etc/nginx/sites-available/logs.adquiere.co
-# editar REPLACE_ME_DOMAIN -> el subdominio real elegido
-sudo ln -s /etc/nginx/sites-available/logs.adquiere.co /etc/nginx/sites-enabled/
+sudo cp deploy/nginx.conf.example /etc/nginx/sites-available/status.example.com
+# editar REPLACE_ME_DOMAIN -> tu dominio
+sudo ln -s /etc/nginx/sites-available/status.example.com /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
-sudo certbot --nginx -d logs.adquiere.co
+sudo certbot --nginx -d status.example.com
 ```
 
-Y en el proveedor de DNS: registro A del subdominio elegido apuntando a la IP pública de
-esta instancia.
+En tu proveedor de DNS, crea un registro A del dominio apuntando a la IP pública del
+servidor.
 
-Después de un `git pull`/actualización de código: `cargo build --release && pm2 restart heartbeat`.
+Para actualizar: `git pull && cargo build --release && pm2 restart heartbeat`.
 
 ## Stack
 
-- `actix-web` — servidor HTTP.
-- `tera` — templates server-side (`templates/*.html`).
-- Alpine.js (vendorizado en `libs/alpinejs/`) — interactividad del dashboard (filtros,
-  auto-refresh, expandir línea) sin build step ni framework de frontend.
-- Sin base de datos: el registro de apps es un archivo JSON en disco.
+- `actix-web`: servidor HTTP.
+- `tera`: templates del lado del servidor (`templates/*.html`).
+- Alpine.js (vendorizado en `libs/alpinejs/`): interactividad sin build step ni framework
+  de frontend.
+- Sin base de datos: el registro de apps y el historial de uptime son archivos en disco.

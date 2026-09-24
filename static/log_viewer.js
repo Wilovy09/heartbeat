@@ -132,7 +132,7 @@ function logViewer(slug) {
         .sort((a, b) => b.count - a.count || a.target.localeCompare(b.target));
     },
 
-    // outRaw/errorRaw arrive oldest-first (tail -n order, see pulso-backend's tail_lines) --
+    // outRaw/errorRaw arrive oldest-first (tail -n order, per the logs endpoint contract) --
     // reversed here, at the one place every rendering path goes through, so the newest
     // line reads first without disturbing the underlying order distinctTargets()/
     // levelCounts() rely on.
