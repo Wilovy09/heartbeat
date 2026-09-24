@@ -8,7 +8,7 @@
 use actix_web::cookie::{Cookie, SameSite, time::Duration as CookieDuration};
 use actix_web::{HttpRequest, HttpResponse};
 
-pub const SESSION_COOKIE: &str = "adquiere_logs_session";
+pub const SESSION_COOKIE: &str = "heartbeat_session";
 
 /// The cookie only bounds how long the browser holds onto the token: if the token itself
 /// expires sooner, every proxied logs call starts coming back 401 and the dashboard sends

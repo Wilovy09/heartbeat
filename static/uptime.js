@@ -8,10 +8,11 @@ const REFRESH_MS = 30000;
 // changes, not on every auto-refresh tick.
 const LIVE_DETAIL_MAX_HOURS = 24;
 const CHART = { height: 260, left: 48, right: 12, top: 12, bottom: 26 };
+const COLOR = { up: '#3ecf8e', degraded: '#e0a940', down: '#e05a5a', muted: '#7d8598', grid: '#262b36' };
 
 function uptimeDashboard() {
   return {
-    overview: { interval_secs: 60, monitors: [], events: [] },
+    overview: { interval_secs: 60, degraded_after_ms: 1000, monitors: [], events: [] },
     detail: { beats: [], events: [] },
     selected: null,
     hours: 6,
@@ -95,7 +96,7 @@ function uptimeDashboard() {
       return status || 'unknown';
     },
     statusLabel(status) {
-      return { up: 'Up', down: 'Down' }[status] || 'Sin datos';
+      return { up: 'Up', degraded: 'Degradado', down: 'Down' }[status] || 'Sin datos';
     },
     beatTitle(b) {
       return `${this.fmtDateTime(b.at)} — ${this.statusLabel(b.status)} — ${this.fmtMs(b.latency_ms)}\n${b.message}`;
@@ -128,7 +129,7 @@ function uptimeDashboard() {
       const plotW = Math.max(1, this.chartWidth - CHART.left - CHART.right);
       const plotH = CHART.height - CHART.top - CHART.bottom;
       // reduce, not Math.max(...beats): a 30-day window can exceed the engine's argument limit.
-      const maxLatency = this.detail.beats.reduce((max, b) => (b.status === 'up' ? Math.max(max, b.latency_ms || 0) : max), 0);
+      const maxLatency = this.detail.beats.reduce((max, b) => (b.status !== 'down' ? Math.max(max, b.latency_ms || 0) : max), 0);
       const yMax = niceCeil(maxLatency || 100);
       return {
         from, now, plotW, plotH, yMax,
@@ -154,7 +155,7 @@ function uptimeDashboard() {
       }
 
       // One bucket per 2px column so a 30-day window (tens of thousands of beats) still
-      // draws a path the browser can handle: average latency of the Up beats, and a red
+      // draws a path the browser can handle: average latency of the Up/Degraded beats, and a red
       // band if any beat in the column was Down.
       const cols = Math.max(1, Math.floor(s.plotW / 2));
       const span = (s.now - s.from) / cols;
@@ -194,13 +195,28 @@ function uptimeDashboard() {
       });
       flush();
 
-      parts.push(`<path d="${area}" fill="rgba(62,207,142,0.12)" stroke="none"/>`);
-      parts.push(`<path d="${line}" fill="none" stroke="#3ecf8e" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`);
+      // The line turns yellow above the "degraded" threshold: a vertical gradient with a
+      // hard stop at the threshold's y, in user space so it lines up with the axis.
+      const threshold = this.overview.degraded_after_ms;
+      const cut = threshold < s.yMax ? (s.y(threshold) - CHART.top) / s.plotH : 0;
+      parts.push(`<defs>
+        <linearGradient id="lat-stroke" gradientUnits="userSpaceOnUse" x1="0" x2="0" y1="${CHART.top}" y2="${baseY}">
+          <stop offset="0" stop-color="${COLOR.degraded}"/><stop offset="${cut}" stop-color="${COLOR.degraded}"/>
+          <stop offset="${cut}" stop-color="${COLOR.up}"/><stop offset="1" stop-color="${COLOR.up}"/>
+        </linearGradient>
+      </defs>`);
+      parts.push(`<path d="${area}" fill="url(#lat-stroke)" fill-opacity="0.12" stroke="none"/>`);
+      parts.push(`<path d="${line}" fill="none" stroke="url(#lat-stroke)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`);
+      if (threshold < s.yMax) {
+        const ty = s.y(threshold);
+        parts.push(`<line x1="${CHART.left}" x2="${w - CHART.right}" y1="${ty}" y2="${ty}" stroke="${COLOR.degraded}" stroke-width="1" stroke-dasharray="4 4" opacity="0.7"/>`);
+        parts.push(`<text x="${w - CHART.right}" y="${ty - 5}" text-anchor="end" font-size="11" fill="${COLOR.degraded}">Degradado &gt; ${threshold} ms</text>`);
+      }
 
       if (this.hover) {
         parts.push(`<line x1="${this.hover.x}" x2="${this.hover.x}" y1="${CHART.top}" y2="${baseY}" stroke="#7d8598" stroke-width="1" stroke-dasharray="3 3"/>`);
         if (this.hover.dotY != null) {
-          parts.push(`<circle cx="${this.hover.x}" cy="${this.hover.dotY}" r="5" fill="#3ecf8e" stroke="#171a21" stroke-width="2"/>`);
+          parts.push(`<circle cx="${this.hover.x}" cy="${this.hover.dotY}" r="5" fill="${COLOR[this.hover.beat.status]}" stroke="#171a21" stroke-width="2"/>`);
         }
       }
       if (this.detail.beats.length === 0) {
@@ -219,7 +235,7 @@ function uptimeDashboard() {
       const at = s.from + ((px - CHART.left) / s.plotW) * (s.now - s.from);
       const beat = nearestBeat(beats, at);
       const x = s.x(beat.at);
-      const dotY = beat.status === 'up' && beat.latency_ms != null ? s.y(beat.latency_ms) : null;
+      const dotY = beat.status !== 'down' && beat.latency_ms != null ? s.y(beat.latency_ms) : null;
       this.hover = {
         beat, x, dotY,
         left: Math.min(Math.max(x, 140), this.chartWidth - 140),

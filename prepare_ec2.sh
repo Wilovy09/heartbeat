@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# One-time bootstrap for a fresh Ubuntu 24.04 EC2 box that will run adquiere-logs under
+# One-time bootstrap for a fresh Ubuntu 24.04 EC2 box that will run heartbeat under
 # pm2, behind nginx with a Let's Encrypt cert -- same pattern as pulso-backend's own
 # prepare_ec2.sh, adapted (no PHP/ONNX bits, this app has none of that).
 #
-# Usage: ./prepare_ec2.sh [project_dir]   (default: /arena/adquiere-logs)
+# Usage: ./prepare_ec2.sh [project_dir]   (default: /arena/heartbeat)
 set -e
-PROJECT_DIR="${1:-/arena/adquiere-logs}"
+PROJECT_DIR="${1:-/arena/heartbeat}"
 
 sudo apt update
 sudo apt install -y nginx certbot python3-certbot-nginx nodejs npm
@@ -25,6 +25,6 @@ cargo build --release
 echo
 echo "Build done. Next steps (see README.md 'Despliegue en EC2'):"
 echo "  1. cp .env.example .env   # then fill in real prod values (LOGIN_URL, COOKIE_SECURE=true)"
-echo "  2. pm2 start ./target/release/adquiere-logs --name adquiere-logs --cwd $PROJECT_DIR"
+echo "  2. pm2 start ./target/release/heartbeat --name heartbeat --cwd $PROJECT_DIR"
 echo "  3. pm2 save && pm2 startup   # survive reboots"
 echo "  4. Add an nginx server block (see deploy/nginx.conf.example) and run certbot"

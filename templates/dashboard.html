@@ -79,6 +79,14 @@
             ></div>
           </div>
           <div class="stat">
+            <div class="stat-label">Degradado</div>
+            <div
+              class="stat-big"
+              style="color: var(--warn)"
+              x-text="count('degraded')"
+            ></div>
+          </div>
+          <div class="stat">
             <div class="stat-label">Down</div>
             <div
               class="stat-big"
@@ -429,6 +437,10 @@
   .status-big.st-up {
     background: var(--up);
   }
+  .pct-pill.st-degraded,
+  .status-big.st-degraded {
+    background: var(--warn);
+  }
   .pct-pill.st-down,
   .status-big.st-down {
     background: var(--error);
@@ -455,6 +467,9 @@
   }
   .status-tag.st-up {
     background: var(--up);
+  }
+  .status-tag.st-degraded {
+    background: var(--warn);
   }
   .status-tag.st-down {
     background: var(--error);

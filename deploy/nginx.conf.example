@@ -1,4 +1,4 @@
-# Template nginx server block for adquiere-logs, following the same shape used for
+# Template nginx server block for heartbeat, following the same shape used for
 # api-test.adquiere.co (see /etc/nginx/sites-available/ on the shared box). Copy this to
 # /etc/nginx/sites-available/<your-domain>, replace REPLACE_ME_DOMAIN, symlink it into
 # sites-enabled, then run:

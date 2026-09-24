@@ -12,7 +12,7 @@ use tracing_subscriber::EnvFilter;
 
 use config::Config;
 use registry::AppRegistry;
-use uptime::UptimeMonitor;
+use uptime::{CheckPolicy, UptimeMonitor};
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -34,7 +34,10 @@ async fn main() -> std::io::Result<()> {
 
     let monitor = UptimeMonitor::load(
         &cfg.uptime_dir,
-        Duration::from_secs(cfg.uptime_interval_secs),
+        CheckPolicy {
+            interval: Duration::from_secs(cfg.uptime_interval_secs),
+            degraded_after_ms: cfg.uptime_degraded_ms,
+        },
     )
     .await
     .unwrap_or_else(|e| panic!("error cargando {}: {e}", cfg.uptime_dir));
@@ -42,7 +45,7 @@ async fn main() -> std::io::Result<()> {
     let host = cfg.host.clone();
     let port = cfg.port;
 
-    tracing::info!(host = %host, port, login_url = %cfg.login_url, "adquiere-logs starting");
+    tracing::info!(host = %host, port, login_url = %cfg.login_url, "heartbeat starting");
 
     let cfg_data = web::Data::new(cfg);
     let tera_data = web::Data::new(tera);

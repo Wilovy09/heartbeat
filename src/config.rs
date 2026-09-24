@@ -17,6 +17,8 @@ pub struct Config {
     pub uptime_dir: String,
     /// Seconds between health checks of every registered app.
     pub uptime_interval_secs: u64,
+    /// A 2xx health check slower than this many ms is "degraded" (yellow), not "up".
+    pub uptime_degraded_ms: u32,
     /// Mark the session cookie `Secure` (HTTPS-only). Only turn off for local http dev.
     pub cookie_secure: bool,
     /// Shared secret sent as `X-Admin-Logs-Key` on every proxied call to a registered
@@ -50,6 +52,10 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .filter(|&secs| secs > 0)
                 .unwrap_or(60),
+            uptime_degraded_ms: env::var("UPTIME_DEGRADED_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(800),
             cookie_secure: env::var("COOKIE_SECURE")
                 .ok()
                 .and_then(|v| v.parse().ok())

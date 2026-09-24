@@ -13,12 +13,14 @@ solo lugar ves/filtras/parseas el JSON de stdout y el texto crudo de stderr de t
   reimplementa la verificación de admin, solo lee el veredicto. Si `is_admin` es `false`,
   no entra.
 - **Sesión**: el `access_token` que regresa el login se guarda tal cual en una cookie
-  HttpOnly (`adquiere_logs_session`). Nunca llega a JavaScript del navegador.
+  HttpOnly (`heartbeat_session`). Nunca llega a JavaScript del navegador.
 - **Apps registradas**: en `/apps`, agregas `{ nombre, url del endpoint de logs }`.
   Se guardan en un archivo JSON (`APPS_FILE`, por defecto `./data/apps.json`) — no hay
   base de datos, son un puñado de filas que casi no cambian.
 - **Uptime**: cada app registrada lleva una URL de health. Un loop en background la
-  consulta cada `UPTIME_INTERVAL_SECS` (60 por defecto); 2xx = up, cualquier otra cosa
+  consulta cada `UPTIME_INTERVAL_SECS` (60 por defecto), como semáforo: 2xx = up (verde),
+  2xx pero más lento que `UPTIME_DEGRADED_MS` (1000 por defecto) = degradado (amarillo, cuenta
+  como disponible para el % de uptime), cualquier otra cosa
   (status no-2xx, timeout de 10 s, error de conexión) = down. El historial de los últimos
   30 días se guarda en `UPTIME_DIR/<slug>.jsonl`. `/` muestra el dashboard de uptime
   (estado, % de uptime 24 h / 30 días, latencia, gráfica y eventos); `/logs` muestra una
@@ -60,6 +62,7 @@ COOKIE_SECURE=true
 ADMIN_LOGS_KEY=
 UPTIME_DIR=./data/uptime
 UPTIME_INTERVAL_SECS=60
+UPTIME_DEGRADED_MS=1000
 ```
 
 ## Despliegue en EC2 (Ubuntu 24.04)
@@ -70,7 +73,7 @@ solo nginx habla con `localhost:8090`).
 
 ```bash
 # En el servidor, con el código ya ahí (git clone o transferido):
-./prepare_ec2.sh /arena/adquiere-logs   # instala nginx/certbot/node/pm2/rust, compila
+./prepare_ec2.sh /arena/heartbeat   # instala nginx/certbot/node/pm2/rust, compila
 
 cp .env.example .env
 # editar .env con valores reales de PROD -- en particular:
@@ -80,7 +83,7 @@ cp .env.example .env
 #   COOKIE_SECURE=true
 #   ADMIN_LOGS_KEY=<mismo valor que en cada app registrada>
 
-pm2 start ./target/release/adquiere-logs --name adquiere-logs --cwd /arena/adquiere-logs
+pm2 start ./target/release/heartbeat --name heartbeat --cwd /arena/heartbeat
 pm2 save && pm2 startup   # para que sobreviva a un reboot
 ```
 
@@ -97,7 +100,7 @@ sudo certbot --nginx -d logs.adquiere.co
 Y en el proveedor de DNS: registro A del subdominio elegido apuntando a la IP pública de
 esta instancia.
 
-Después de un `git pull`/actualización de código: `cargo build --release && pm2 restart adquiere-logs`.
+Después de un `git pull`/actualización de código: `cargo build --release && pm2 restart heartbeat`.
 
 ## Stack
 

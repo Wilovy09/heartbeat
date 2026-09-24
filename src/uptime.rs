@@ -46,11 +46,41 @@ impl UptimeError {
     }
 }
 
+/// Traffic-light state of one check: green, yellow, red.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
     Up,
+    /// Answered 2xx, but slower than `CheckPolicy::degraded_after_ms`.
+    Degraded,
     Down,
+}
+
+impl Status {
+    #[must_use]
+    fn classify(success: bool, latency_ms: u32, degraded_after_ms: u32) -> Self {
+        match (success, latency_ms > degraded_after_ms) {
+            (false, _) => Self::Down,
+            (true, true) => Self::Degraded,
+            (true, false) => Self::Up,
+        }
+    }
+
+    /// Whether the app was serving requests -- slow still counts toward uptime.
+    #[must_use]
+    fn is_available(self) -> bool {
+        match self {
+            Self::Up | Self::Degraded => true,
+            Self::Down => false,
+        }
+    }
+}
+
+/// How often apps are checked and what counts as "slow".
+#[derive(Debug, Clone, Copy)]
+pub struct CheckPolicy {
+    pub interval: Duration,
+    pub degraded_after_ms: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,7 +94,7 @@ pub struct Heartbeat {
 }
 
 impl Heartbeat {
-    async fn probe(client: &reqwest::Client, url: &str) -> Self {
+    async fn probe(client: &reqwest::Client, url: &str, degraded_after_ms: u32) -> Self {
         let started = Instant::now();
         let result = client.get(url).send().await;
         let latency_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
@@ -74,11 +104,7 @@ impl Heartbeat {
                 let code = resp.status();
                 Self {
                     at,
-                    status: if code.is_success() {
-                        Status::Up
-                    } else {
-                        Status::Down
-                    },
+                    status: Status::classify(code.is_success(), latency_ms, degraded_after_ms),
                     latency_ms: Some(latency_ms),
                     message: format!("HTTP {code}"),
                 }
@@ -131,10 +157,11 @@ impl History {
         self.0.iter().filter(move |b| b.at >= cutoff)
     }
 
-    /// Share of `Up` heartbeats since `cutoff`, as a percentage. `None` with no data.
+    /// Share of available (up or degraded) heartbeats since `cutoff`, as a percentage.
+    /// `None` with no data.
     fn uptime_pct(&self, cutoff: u64) -> Option<f64> {
         let (up, total) = self.since(cutoff).fold((0u32, 0u32), |(up, total), b| {
-            (up + u32::from(b.status == Status::Up), total + 1)
+            (up + u32::from(b.status.is_available()), total + 1)
         });
         (total > 0).then(|| f64::from(up) * 100.0 / f64::from(total))
     }
@@ -142,7 +169,7 @@ impl History {
     fn avg_latency_ms(&self, cutoff: u64) -> Option<u32> {
         let (sum, n) = self
             .since(cutoff)
-            .filter(|b| b.status == Status::Up)
+            .filter(|b| b.status.is_available())
             .filter_map(|b| b.latency_ms)
             .fold((0u64, 0u64), |(sum, n), ms| (sum + u64::from(ms), n + 1));
         (n > 0).then(|| u32::try_from(sum / n).unwrap_or(u32::MAX))
@@ -200,6 +227,7 @@ pub struct AppEvent {
 #[derive(Debug, Serialize)]
 pub struct Overview {
     pub interval_secs: u64,
+    pub degraded_after_ms: u32,
     pub monitors: Vec<MonitorSummary>,
     /// Status changes across every app, newest first.
     pub events: Vec<AppEvent>,
@@ -213,7 +241,7 @@ pub struct MonitorDetail {
 
 pub struct UptimeMonitor {
     dir: PathBuf,
-    interval: Duration,
+    policy: CheckPolicy,
     client: reqwest::Client,
     histories: RwLock<HashMap<String, History>>,
 }
@@ -221,14 +249,14 @@ pub struct UptimeMonitor {
 impl UptimeMonitor {
     /// Loads (and compacts) every `<slug>.jsonl` found in `dir`. Malformed lines are skipped
     /// with a warning rather than failing startup over one torn write.
-    pub async fn load(dir: impl Into<PathBuf>, interval: Duration) -> Result<Self, UptimeError> {
+    pub async fn load(dir: impl Into<PathBuf>, policy: CheckPolicy) -> Result<Self, UptimeError> {
         let dir = dir.into();
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(UptimeError::io(&dir))?;
         let client = reqwest::Client::builder()
             .timeout(PROBE_TIMEOUT)
-            .user_agent("adquiere-logs-uptime")
+            .user_agent("heartbeat")
             .build()?;
 
         let mut histories = HashMap::new();
@@ -264,7 +292,7 @@ impl UptimeMonitor {
 
         let monitor = Self {
             dir,
-            interval,
+            policy,
             client,
             histories: RwLock::new(histories),
         };
@@ -278,7 +306,7 @@ impl UptimeMonitor {
 
     /// Runs forever: one check round per interval, compaction once an hour.
     pub async fn run(self: Arc<Self>, registry: Arc<AppRegistry>) {
-        let mut ticker = tokio::time::interval(self.interval);
+        let mut ticker = tokio::time::interval(self.policy.interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_compact = Instant::now();
         loop {
@@ -301,7 +329,11 @@ impl UptimeMonitor {
             };
             let client = self.client.clone();
             let slug = app.slug.clone();
-            probes.spawn(async move { (slug, Heartbeat::probe(&client, &url).await) });
+            let degraded_after_ms = self.policy.degraded_after_ms;
+            probes.spawn(async move {
+                let beat = Heartbeat::probe(&client, &url, degraded_after_ms).await;
+                (slug, beat)
+            });
         }
         while let Some(joined) = probes.join_next().await {
             match joined {
@@ -316,8 +348,14 @@ impl UptimeMonitor {
     }
 
     async fn record(&self, slug: &str, beat: Heartbeat) -> Result<(), UptimeError> {
-        if beat.status == Status::Down {
-            tracing::warn!(app = %slug, message = %beat.message, "uptime: app is down");
+        match beat.status {
+            Status::Down => {
+                tracing::warn!(app = %slug, message = %beat.message, "uptime: app is down");
+            }
+            Status::Degraded => {
+                tracing::warn!(app = %slug, latency_ms = ?beat.latency_ms, "uptime: app is slow");
+            }
+            Status::Up => {}
         }
         let mut line = serde_json::to_string(&beat)?;
         line.push('\n');
@@ -417,7 +455,8 @@ impl UptimeMonitor {
         events.truncate(MAX_EVENTS);
 
         Overview {
-            interval_secs: self.interval.as_secs(),
+            interval_secs: self.policy.interval.as_secs(),
+            degraded_after_ms: self.policy.degraded_after_ms,
             monitors,
             events,
         }
@@ -457,14 +496,24 @@ mod tests {
         let history = History(VecDeque::from([
             beat(10, Status::Down, None),
             beat(20, Status::Up, Some(100)),
-            beat(30, Status::Up, Some(200)),
+            beat(30, Status::Degraded, Some(1400)),
             beat(40, Status::Down, Some(900)),
         ]));
+        // Degraded still counts as available.
         assert_eq!(history.uptime_pct(0), Some(50.0));
         assert_eq!(history.uptime_pct(20), Some(200.0 / 3.0));
-        // Down heartbeats' latency is excluded from the average.
-        assert_eq!(history.avg_latency_ms(0), Some(150));
+        // Down heartbeats' latency is excluded from the average; degraded ones are not.
+        assert_eq!(history.avg_latency_ms(0), Some(750));
         assert_eq!(History::default().uptime_pct(0), None);
+    }
+
+    #[test]
+    fn classify_is_a_traffic_light() {
+        assert_eq!(Status::classify(true, 200, 1000), Status::Up);
+        assert_eq!(Status::classify(true, 1000, 1000), Status::Up);
+        assert_eq!(Status::classify(true, 1001, 1000), Status::Degraded);
+        assert_eq!(Status::classify(false, 50, 1000), Status::Down);
+        assert_eq!(Status::classify(false, 5000, 1000), Status::Down);
     }
 
     #[test]
@@ -473,11 +522,11 @@ mod tests {
             beat(1, Status::Up, None),
             beat(2, Status::Up, None),
             beat(3, Status::Down, None),
-            beat(4, Status::Down, None),
+            beat(4, Status::Degraded, None),
             beat(5, Status::Up, None),
         ]));
         let ats: Vec<u64> = history.events().iter().map(|b| b.at).collect();
-        assert_eq!(ats, [5, 3, 1]);
+        assert_eq!(ats, [5, 4, 3, 1]);
     }
 
     #[test]
@@ -495,15 +544,18 @@ mod tests {
     #[tokio::test]
     async fn records_persist_across_a_reload_and_forget_removes_them() {
         let dir = tempfile::tempdir().unwrap();
-        let interval = Duration::from_secs(60);
+        let policy = CheckPolicy {
+            interval: Duration::from_secs(60),
+            degraded_after_ms: 1000,
+        };
         {
-            let monitor = UptimeMonitor::load(dir.path(), interval).await.unwrap();
+            let monitor = UptimeMonitor::load(dir.path(), policy).await.unwrap();
             monitor
                 .record("app", beat(unix_now(), Status::Up, Some(12)))
                 .await
                 .unwrap();
         }
-        let monitor = UptimeMonitor::load(dir.path(), interval).await.unwrap();
+        let monitor = UptimeMonitor::load(dir.path(), policy).await.unwrap();
         assert_eq!(
             monitor
                 .detail("app", Duration::from_secs(3600))
