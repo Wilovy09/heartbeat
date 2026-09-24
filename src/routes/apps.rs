@@ -27,6 +27,8 @@ async fn render_apps(
         .filter(|h| !h.is_empty())
         .collect();
     ctx.insert("allowed_hosts", &allowed_hosts.join(", "));
+    ctx.insert("uptime_interval_secs", &cfg.uptime_interval_secs);
+    ctx.insert("uptime_degraded_ms", &cfg.uptime_degraded_ms);
     match tera.render("apps.html", &ctx) {
         Ok(html) => HttpResponse::Ok().content_type("text/html").body(html),
         Err(e) => HttpResponse::InternalServerError().body(format!("template error: {e}")),

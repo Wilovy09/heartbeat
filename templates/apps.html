@@ -24,7 +24,7 @@
     <div class="field">
       <label for="health_url">URL de health</label>
       <input id="health_url" name="health_url" type="url" class="mono-input" placeholder="https://api.example.com/health" required value="{% if form %}{{ form.health_url }}{% endif %}">
-      <p class="hint">Se consulta cada minuto: 2xx es up, lento es degradado, lo demás es down.</p>
+      <p class="hint">Se consulta cada {{ uptime_interval_secs }} s: 2xx es up, más de {{ uptime_degraded_ms }} ms es degradado, lo demás es down.</p>
     </div>
     <p class="rule">Solo <span class="mono">https://</span> en <span class="mono">{{ allowed_hosts }}</span></p>
     <button class="btn intake-submit" type="submit">Registrar</button>
