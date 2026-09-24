@@ -77,3 +77,21 @@ pub async fn delete(
         Err(e) => render_apps(&tera, &registry, Some(&e.to_string())).await,
     }
 }
+
+/// POST /apps/{slug}/rotate-token -- invalidates every embed using the app's current token.
+pub async fn rotate_token(
+    req: HttpRequest,
+    tera: web::Data<Tera>,
+    registry: web::Data<AppRegistry>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(resp) = auth::require_session(&req) {
+        return resp;
+    }
+    match registry.rotate_embed_token(&path.into_inner()).await {
+        Ok(()) => HttpResponse::Found()
+            .append_header(("Location", "/apps"))
+            .finish(),
+        Err(e) => render_apps(&tera, &registry, Some(&e.to_string())).await,
+    }
+}

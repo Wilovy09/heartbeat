@@ -25,6 +25,24 @@ solo lugar ves/filtras/parseas el JSON de stdout y el texto crudo de stderr de t
   30 días se guarda en `UPTIME_DIR/<slug>.jsonl`. `/` muestra el dashboard de uptime
   (estado, % de uptime 24 h / 30 días, latencia, gráfica y eventos); `/logs` muestra una
   card por app con sus últimos heartbeats.
+- **Embed en otras webs**: cada app tiene un `embed_token` secreto (se genera al
+  registrarla). En `/apps` está la vista previa y el botón "Copiar código", que da:
+  ```html
+  <script src="https://HEARTBEAT_HOST/static/embed.js" defer></script>
+  <heartbeat-status app="SLUG" token="EMBED_TOKEN"></heartbeat-status>
+  ```
+  Atributos opcionales: `label="Mi API"` (texto en lugar del nombre de la app),
+  `theme="light"`, `bars="N"` (máximo de barras; por defecto las que quepan en el ancho,
+  hasta 100), `refresh="30"` (segundos) y colores — `color-up`, `color-degraded`,
+  `color-down`, `color-empty`, `color-bg`, `color-text`, `color-border`,
+  `color-pill-text` — con cualquier color CSS. Los colores también se pueden poner desde
+  el CSS de la página con variables (`heartbeat-status { --hb-up: #22c55e; }`); el
+  atributo gana. El
+  componente usa Shadow DOM (el CSS de la otra web no lo afecta) y solo habla con
+  `GET /embed/{slug}?token=...` — público, con CORS, sin sesión — que devuelve nombre,
+  estado, % de uptime 24 h y los últimos heartbeats; nunca la URL de health ni los
+  mensajes de error. El token queda visible en el HTML de la página que lo incruste: si se
+  filtra donde no debe, "Rotar token" en `/apps` invalida todos los embeds viejos.
 - **Ver logs**: el navegador solo le pide logs a esta misma app (`/api/apps/{slug}/logs`,
   mismo origen, cookie automática). El servidor reenvía esa llamada a la URL real
   registrada.

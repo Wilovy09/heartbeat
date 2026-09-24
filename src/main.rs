@@ -77,6 +77,11 @@ async fn main() -> std::io::Result<()> {
             .route("/apps", web::post().to(routes::apps::add))
             .route("/apps/{slug}/delete", web::post().to(routes::apps::delete))
             .route(
+                "/apps/{slug}/rotate-token",
+                web::post().to(routes::apps::rotate_token),
+            )
+            .route("/embed/{slug}", web::get().to(routes::embed::status))
+            .route(
                 "/api/apps/{slug}/logs",
                 web::get().to(routes::api::get_logs),
             )

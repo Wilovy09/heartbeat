@@ -1,4 +1,20 @@
-{% extends "base.html" %} {% block title %}Apps — Heartbeat{% endblock %} {%
+{% extends "base.html" %} {% block title %}Apps — Heartbeat{% endblock %} {% block head %}
+<script src="/static/embed.js" defer></script>
+<script src="/static/clipboard.js"></script>
+<script>
+  // The snippet uses this page's own origin, so it's right whatever domain Heartbeat is
+  // deployed on.
+  async function copyEmbed(btn) {
+    const { slug, token } = btn.dataset;
+    const snippet =
+      `<script src="${location.origin}/static/embed.js" defer><\/script>\n` +
+      `<heartbeat-status app="${slug}" token="${token}"></heartbeat-status>`;
+    const label = btn.textContent;
+    btn.textContent = (await copyToClipboard(snippet)) ? "¡Copiado!" : "No se pudo copiar";
+    setTimeout(() => (btn.textContent = label), 1500);
+  }
+</script>
+{% endblock %} {%
 block content %}
 <div class="card" style="margin-bottom: 20px">
   <h2 style="margin-top: 0; font-size: 15px">Registrar app</h2>
@@ -59,6 +75,7 @@ block content %}
         <th>Slug</th>
         <th>URL de logs</th>
         <th>URL de health</th>
+        <th style="min-width: 280px">Embed</th>
         <th></th>
       </tr>
     </thead>
@@ -73,6 +90,31 @@ block content %}
             style="color: #7d8598"
             >—</span
           >{% endif %}
+        </td>
+        <td>
+          <heartbeat-status
+            app="{{ app.slug }}"
+            token="{{ app.embed_token }}"
+          ></heartbeat-status>
+          <div style="display: flex; gap: 8px; margin-top: 8px">
+            <button
+              class="btn secondary"
+              type="button"
+              data-slug="{{ app.slug }}"
+              data-token="{{ app.embed_token }}"
+              onclick="copyEmbed(this)"
+            >
+              Copiar código
+            </button>
+            <form
+              method="post"
+              action="/apps/{{ app.slug }}/rotate-token"
+              onsubmit="return confirm('¿Rotar el token de {{ app.name }}? Los embeds que ya están publicados dejarán de funcionar hasta actualizar el token.');"
+              style="display: inline"
+            >
+              <button class="btn secondary" type="submit">Rotar token</button>
+            </form>
+          </div>
         </td>
         <td style="text-align: right">
           <form

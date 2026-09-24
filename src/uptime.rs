@@ -18,8 +18,9 @@ use crate::registry::{AppRegistry, RegisteredApp};
 const RETENTION: Duration = Duration::from_secs(30 * 24 * 3600);
 const COMPACT_EVERY: Duration = Duration::from_secs(3600);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
-/// How many of the latest heartbeats the summary carries for each app's bar strip.
-const RECENT_BEATS: usize = 40;
+/// How many of the latest heartbeats the summary carries for each app's bar strip. The
+/// dashboard draws 40; the embed fits as many as its width allows, up to this.
+const RECENT_BEATS: usize = 100;
 /// How many status changes the summary/detail event tables show.
 const MAX_EVENTS: usize = 30;
 
@@ -191,6 +192,21 @@ impl History {
         events.reverse();
         events.truncate(MAX_EVENTS);
         events
+    }
+
+    fn summary(&self, app: &RegisteredApp, day_ago: u64) -> MonitorSummary {
+        let last = self.0.back();
+        MonitorSummary {
+            slug: app.slug.clone(),
+            name: app.name.clone(),
+            health_url: app.health_url.clone(),
+            status: last.map(|b| b.status),
+            latency_ms: last.and_then(|b| b.latency_ms),
+            avg_latency_24h_ms: self.avg_latency_ms(day_ago),
+            uptime_24h: self.uptime_pct(day_ago),
+            uptime_30d: self.uptime_pct(0),
+            recent: self.recent(RECENT_BEATS),
+        }
     }
 
     fn recent(&self, n: usize) -> Vec<Heartbeat> {
@@ -432,23 +448,12 @@ impl UptimeMonitor {
             .iter()
             .map(|app| {
                 let history = histories.get(&app.slug).unwrap_or(&empty);
-                let last = history.0.back();
                 events.extend(history.events().into_iter().map(|beat| AppEvent {
                     slug: app.slug.clone(),
                     name: app.name.clone(),
                     beat,
                 }));
-                MonitorSummary {
-                    slug: app.slug.clone(),
-                    name: app.name.clone(),
-                    health_url: app.health_url.clone(),
-                    status: last.map(|b| b.status),
-                    latency_ms: last.and_then(|b| b.latency_ms),
-                    avg_latency_24h_ms: history.avg_latency_ms(day_ago),
-                    uptime_24h: history.uptime_pct(day_ago),
-                    uptime_30d: history.uptime_pct(0),
-                    recent: history.recent(RECENT_BEATS),
-                }
+                history.summary(app, day_ago)
             })
             .collect();
         events.sort_by(|a, b| b.beat.at.cmp(&a.beat.at));
@@ -460,6 +465,16 @@ impl UptimeMonitor {
             monitors,
             events,
         }
+    }
+
+    /// One app's summary -- what the public embed endpoint serves.
+    pub async fn summary(&self, app: &RegisteredApp) -> MonitorSummary {
+        let histories = self.histories.read().await;
+        let day_ago = unix_now().saturating_sub(24 * 3600);
+        histories
+            .get(&app.slug)
+            .unwrap_or(&History::default())
+            .summary(app, day_ago)
     }
 
     pub async fn detail(&self, slug: &str, window: Duration) -> MonitorDetail {

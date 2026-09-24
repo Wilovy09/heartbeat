@@ -19,6 +19,35 @@ pub struct RegisteredApp {
     /// existed -- `add` requires it for every new registration.
     #[serde(default)]
     pub health_url: Option<String>,
+    /// Secret that authorizes the public, read-only status embed (`<heartbeat-status>`).
+    /// Never empty after `AppRegistry::load` -- entries saved before this field existed get
+    /// one generated there.
+    #[serde(default)]
+    pub embed_token: String,
+}
+
+impl RegisteredApp {
+    /// Constant-time comparison, so response timing doesn't leak how much of a guessed
+    /// token was right.
+    #[must_use]
+    pub fn embed_token_matches(&self, candidate: &str) -> bool {
+        let expected = self.embed_token.as_bytes();
+        let candidate = candidate.as_bytes();
+        !expected.is_empty()
+            && expected.len() == candidate.len()
+            && expected
+                .iter()
+                .zip(candidate)
+                .fold(0u8, |diff, (a, b)| diff | (a ^ b))
+                == 0
+    }
+}
+
+/// 24 random bytes, hex-encoded (48 chars).
+fn new_embed_token() -> anyhow::Result<String> {
+    let mut bytes = [0u8; 24];
+    getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("no se pudo generar el token: {e}"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 pub struct AppRegistry {
@@ -56,15 +85,24 @@ fn validate_url(url: &str, label: &str) -> anyhow::Result<()> {
 impl AppRegistry {
     pub async fn load(path: impl Into<PathBuf>) -> anyhow::Result<Self> {
         let path = path.into();
-        let apps = match tokio::fs::read_to_string(&path).await {
+        let mut apps: Vec<RegisteredApp> = match tokio::fs::read_to_string(&path).await {
             Ok(raw) => serde_json::from_str(&raw)?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(e.into()),
         };
-        Ok(Self {
+        let mut backfilled = false;
+        for app in apps.iter_mut().filter(|a| a.embed_token.is_empty()) {
+            app.embed_token = new_embed_token()?;
+            backfilled = true;
+        }
+        let registry = Self {
             path,
             apps: RwLock::new(apps),
-        })
+        };
+        if backfilled {
+            registry.persist(&registry.apps.read().await).await?;
+        }
+        Ok(registry)
     }
 
     async fn persist(&self, apps: &[RegisteredApp]) -> anyhow::Result<()> {
@@ -120,9 +158,20 @@ impl AppRegistry {
             name: name.to_string(),
             logs_url: logs_url.to_string(),
             health_url: Some(health_url.to_string()),
+            embed_token: new_embed_token()?,
         });
         self.persist(&apps).await?;
         Ok(slug)
+    }
+
+    /// Replaces the app's embed token, invalidating every embed that uses the old one.
+    pub async fn rotate_embed_token(&self, slug: &str) -> anyhow::Result<()> {
+        let mut apps = self.apps.write().await;
+        let Some(app) = apps.iter_mut().find(|a| a.slug == slug) else {
+            anyhow::bail!("No se encontró la app '{slug}'");
+        };
+        app.embed_token = new_embed_token()?;
+        self.persist(&apps).await
     }
 
     pub async fn remove(&self, slug: &str) -> anyhow::Result<()> {
@@ -213,6 +262,50 @@ mod tests {
         .unwrap();
         let registry = AppRegistry::load(&file).await.unwrap();
         assert_eq!(registry.find("old").await.unwrap().health_url, None);
+    }
+
+    #[tokio::test]
+    async fn add_generates_an_embed_token_and_rotate_replaces_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = AppRegistry::load(dir.path().join("apps.json"))
+            .await
+            .unwrap();
+        let slug = registry
+            .add("Pulso Test", "https://x/logs", "https://x/health")
+            .await
+            .unwrap();
+        let app = registry.find(&slug).await.unwrap();
+        assert_eq!(app.embed_token.len(), 48);
+        assert!(app.embed_token_matches(&app.embed_token.clone()));
+        assert!(!app.embed_token_matches(""));
+        assert!(!app.embed_token_matches(&"0".repeat(48)));
+
+        registry.rotate_embed_token(&slug).await.unwrap();
+        let rotated = registry.find(&slug).await.unwrap();
+        assert_ne!(rotated.embed_token, app.embed_token);
+        assert!(!rotated.embed_token_matches(&app.embed_token));
+    }
+
+    #[tokio::test]
+    async fn load_backfills_missing_embed_tokens_and_persists_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("apps.json");
+        tokio::fs::write(
+            &file,
+            r#"[{"slug":"old","name":"Old","logs_url":"https://x/logs"}]"#,
+        )
+        .await
+        .unwrap();
+        let token = AppRegistry::load(&file)
+            .await
+            .unwrap()
+            .find("old")
+            .await
+            .unwrap()
+            .embed_token;
+        assert_eq!(token.len(), 48);
+        let reloaded = AppRegistry::load(&file).await.unwrap();
+        assert_eq!(reloaded.find("old").await.unwrap().embed_token, token);
     }
 
     #[tokio::test]
