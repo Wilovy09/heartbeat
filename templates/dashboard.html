@@ -1,0 +1,519 @@
+{% extends "base.html" %} {% block title %}Dashboard — Heartbeat{% endblock %}
+{% block content %} {% if apps | length == 0 %}
+<div class="card">
+  <p style="color: #7d8598; font-size: 13px">
+    No hay apps registradas todavía. Ve a
+    <a href="/apps" style="color: #4f8cff">Apps</a> para agregar una.
+  </p>
+</div>
+{% else %}
+<div class="uptime" x-data="uptimeDashboard()" x-init="init()">
+  <aside class="card monitor-list">
+    <input
+      type="text"
+      x-model="search"
+      placeholder="Buscar..."
+      style="width: 100%; margin-bottom: 10px"
+    />
+    <template x-for="m in filteredMonitors()" :key="m.slug">
+      <a
+        class="monitor-row"
+        :href="'#' + m.slug"
+        :class="selected === m.slug ? 'selected' : ''"
+      >
+        <div
+          style="
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 6px;
+          "
+        >
+          <span
+            class="pct-pill"
+            :class="'st-' + statusKey(m.status)"
+            x-text="fmtPct(m.uptime_24h)"
+          ></span>
+          <span class="monitor-name" x-text="m.name"></span>
+        </div>
+        <div class="beats small">
+          <template x-for="(b, i) in padBeats(m.recent)" :key="i">
+            <span
+              class="beat"
+              :class="b ? 'st-' + b.status : ''"
+              :title="b ? beatTitle(b) : ''"
+            ></span>
+          </template>
+        </div>
+      </a>
+    </template>
+    <p
+      x-show="filteredMonitors().length === 0"
+      style="color: var(--muted); font-size: 13px"
+    >
+      Sin resultados.
+    </p>
+  </aside>
+
+  <section
+    style="min-width: 0; display: flex; flex-direction: column; gap: 16px"
+  >
+    <div
+      class="error-box"
+      x-show="loadError"
+      x-text="loadError"
+      style="margin: 0"
+    ></div>
+
+    <!-- Quick stats: nothing selected -->
+    <template x-if="!current()">
+      <div style="display: flex; flex-direction: column; gap: 16px">
+        <h1 class="page-title">Resumen</h1>
+        <div class="card stat-row">
+          <div class="stat">
+            <div class="stat-label">Up</div>
+            <div
+              class="stat-big"
+              style="color: var(--up)"
+              x-text="count('up')"
+            ></div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Down</div>
+            <div
+              class="stat-big"
+              style="color: var(--error)"
+              x-text="count('down')"
+            ></div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Sin datos</div>
+            <div
+              class="stat-big"
+              style="color: var(--muted)"
+              x-text="count('unknown')"
+            ></div>
+          </div>
+        </div>
+        <div class="card">
+          <h2 class="card-title">Eventos recientes</h2>
+          <template x-if="overview.events.length === 0">
+            <p style="color: var(--muted); font-size: 13px">
+              Todavía no hay eventos.
+            </p>
+          </template>
+          <template x-if="overview.events.length > 0">
+            <table>
+              <thead>
+                <tr>
+                  <th>App</th>
+                  <th>Estado</th>
+                  <th>Fecha</th>
+                  <th>Mensaje</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="e in overview.events" :key="e.slug + e.at">
+                  <tr>
+                    <td>
+                      <a
+                        :href="'#' + e.slug"
+                        style="color: var(--text)"
+                        x-text="e.name"
+                      ></a>
+                    </td>
+                    <td>
+                      <span
+                        class="status-tag"
+                        :class="'st-' + e.status"
+                        x-text="statusLabel(e.status)"
+                      ></span>
+                    </td>
+                    <td
+                      class="mono"
+                      style="white-space: nowrap"
+                      x-text="fmtDateTime(e.at)"
+                    ></td>
+                    <td class="mono msg" x-text="e.message"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </template>
+        </div>
+      </div>
+    </template>
+
+    <!-- One app selected -->
+    <template x-if="current()">
+      <div style="display: flex; flex-direction: column; gap: 16px">
+        <div>
+          <h1 class="page-title" x-text="current().name"></h1>
+          <div
+            class="mono"
+            style="
+              font-size: 12px;
+              color: var(--up);
+              margin-top: 4px;
+              word-break: break-all;
+            "
+            x-text="current().health_url || 'Sin URL de health'"
+          ></div>
+          <div style="display: flex; gap: 8px; margin-top: 12px">
+            <a class="btn secondary" :href="'/logs/' + current().slug"
+              >Ver logs</a
+            >
+            <a class="btn secondary" href="#">← Resumen</a>
+          </div>
+        </div>
+
+        <template x-if="!current().health_url">
+          <div class="card" style="color: var(--muted); font-size: 13px">
+            Esta app se registró sin URL de health, así que no se monitorea.
+            Vuelve a registrarla en
+            <a href="/apps" style="color: var(--accent)">Apps</a> con una URL de
+            health.
+          </div>
+        </template>
+
+        <template x-if="current().health_url">
+          <div style="display: flex; flex-direction: column; gap: 16px">
+            <div
+              class="card"
+              style="display: flex; align-items: center; gap: 20px"
+            >
+              <div style="flex: 1; min-width: 0">
+                <div class="beats large">
+                  <template
+                    x-for="(b, i) in padBeats(current().recent)"
+                    :key="i"
+                  >
+                    <span
+                      class="beat"
+                      :class="b ? 'st-' + b.status : ''"
+                      :title="b ? beatTitle(b) : ''"
+                    ></span>
+                  </template>
+                </div>
+                <div
+                  style="
+                    display: flex;
+                    justify-content: space-between;
+                    font-size: 11px;
+                    color: var(--muted);
+                    margin-top: 6px;
+                  "
+                >
+                  <span
+                    x-text="current().recent.length ? fmtAgo(current().recent[0].at) : ''"
+                  ></span>
+                  <span>ahora</span>
+                </div>
+                <div
+                  style="font-size: 12px; color: var(--muted); margin-top: 8px"
+                  x-text="'Chequeo cada ' + overview.interval_secs + ' segundos'"
+                ></div>
+              </div>
+              <span
+                class="status-big"
+                :class="'st-' + statusKey(current().status)"
+                x-text="statusLabel(current().status)"
+              ></span>
+            </div>
+
+            <div class="card stat-row">
+              <div class="stat">
+                <div class="stat-label">Latencia</div>
+                <div class="stat-sub">(actual)</div>
+                <div
+                  class="stat-val"
+                  x-text="fmtMs(current().latency_ms)"
+                ></div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">Latencia prom.</div>
+                <div class="stat-sub">(24 h)</div>
+                <div
+                  class="stat-val"
+                  x-text="fmtMs(current().avg_latency_24h_ms)"
+                ></div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">Uptime</div>
+                <div class="stat-sub">(24 h)</div>
+                <div
+                  class="stat-val"
+                  x-text="fmtPct(current().uptime_24h)"
+                ></div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">Uptime</div>
+                <div class="stat-sub">(30 días)</div>
+                <div
+                  class="stat-val"
+                  x-text="fmtPct(current().uptime_30d)"
+                ></div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div
+                style="
+                  display: flex;
+                  justify-content: space-between;
+                  align-items: center;
+                  margin-bottom: 8px;
+                "
+              >
+                <h2 class="card-title" style="margin: 0">
+                  Tiempo de respuesta (ms)
+                </h2>
+                <select x-model.number="hours" @change="loadDetail()">
+                  <option value="1">1 h</option>
+                  <option value="6">6 h</option>
+                  <option value="24">24 h</option>
+                  <option value="168">7 días</option>
+                  <option value="720">30 días</option>
+                </select>
+              </div>
+              <div
+                class="chart"
+                x-init="observeChart($el)"
+                @mousemove="onChartMove($event)"
+                @mouseleave="hover = null"
+              >
+                <div x-html="chartSvg()"></div>
+                <div
+                  class="chart-tip"
+                  x-show="hover"
+                  :style="hover ? `left:${hover.left}px;top:${hover.top}px;` : ''"
+                >
+                  <template x-if="hover">
+                    <div>
+                      <div
+                        class="mono"
+                        style="color: var(--muted)"
+                        x-text="fmtDateTime(hover.beat.at)"
+                      ></div>
+                      <div
+                        style="
+                          display: flex;
+                          gap: 8px;
+                          align-items: center;
+                          margin-top: 4px;
+                        "
+                      >
+                        <span
+                          class="status-tag"
+                          :class="'st-' + hover.beat.status"
+                          x-text="statusLabel(hover.beat.status)"
+                        ></span>
+                        <strong x-text="fmtMs(hover.beat.latency_ms)"></strong>
+                      </div>
+                      <div
+                        class="mono"
+                        style="color: var(--muted); margin-top: 4px"
+                        x-text="hover.beat.message"
+                      ></div>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </div>
+
+            <div class="card">
+              <h2 class="card-title">Eventos</h2>
+              <template x-if="detail.events.length === 0">
+                <p style="color: var(--muted); font-size: 13px">
+                  Todavía no hay eventos.
+                </p>
+              </template>
+              <template x-if="detail.events.length > 0">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Estado</th>
+                      <th>Fecha</th>
+                      <th>Mensaje</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="e in detail.events" :key="e.at">
+                      <tr>
+                        <td>
+                          <span
+                            class="status-tag"
+                            :class="'st-' + e.status"
+                            x-text="statusLabel(e.status)"
+                          ></span>
+                        </td>
+                        <td
+                          class="mono"
+                          style="white-space: nowrap"
+                          x-text="fmtDateTime(e.at)"
+                        ></td>
+                        <td class="mono msg" x-text="e.message"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </template>
+            </div>
+          </div>
+        </template>
+      </div>
+    </template>
+  </section>
+</div>
+{% endif %} {% endblock %} {% block head %}
+<script src="/static/uptime.js"></script>
+<style>
+  .uptime {
+    display: grid;
+    grid-template-columns: 340px 1fr;
+    gap: 20px;
+    align-items: start;
+  }
+  @media (max-width: 860px) {
+    .uptime {
+      grid-template-columns: 1fr;
+    }
+  }
+  .monitor-list {
+    position: sticky;
+    top: 20px;
+    max-height: calc(100vh - 100px);
+    overflow-y: auto;
+    padding: 12px;
+  }
+  .monitor-row {
+    display: block;
+    padding: 10px;
+    border-radius: 8px;
+    text-decoration: none;
+    color: var(--text);
+  }
+  .monitor-row:hover {
+    background: rgba(255, 255, 255, 0.03);
+  }
+  .monitor-row.selected {
+    background: rgba(62, 207, 142, 0.1);
+  }
+  .monitor-name {
+    font-size: 14px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pct-pill {
+    flex-shrink: 0;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 999px;
+    color: #0f1115;
+    background: var(--unknown);
+  }
+  .pct-pill.st-unknown {
+    color: var(--text);
+  }
+  .beats.small .beat {
+    height: 16px;
+    max-width: 6px;
+  }
+  .beats.large .beat {
+    height: 30px;
+    max-width: 10px;
+  }
+  .pct-pill.st-up,
+  .status-big.st-up {
+    background: var(--up);
+  }
+  .pct-pill.st-down,
+  .status-big.st-down {
+    background: var(--error);
+  }
+  .status-big {
+    flex-shrink: 0;
+    font-size: 22px;
+    font-weight: 800;
+    padding: 8px 20px;
+    border-radius: 999px;
+    color: #0f1115;
+    background: var(--unknown);
+  }
+  .status-big.st-unknown {
+    color: var(--text);
+  }
+  .status-tag {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    color: #0f1115;
+  }
+  .status-tag.st-up {
+    background: var(--up);
+  }
+  .status-tag.st-down {
+    background: var(--error);
+    color: white;
+  }
+  .page-title {
+    margin: 0;
+    font-size: 24px;
+  }
+  .card-title {
+    margin: 0 0 12px;
+    font-size: 15px;
+  }
+  .stat-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 12px;
+    text-align: center;
+  }
+  .stat-label {
+    font-size: 16px;
+    font-weight: 600;
+  }
+  .stat-sub {
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .stat-val {
+    font-size: 15px;
+    margin-top: 6px;
+  }
+  .stat-big {
+    font-size: 30px;
+    font-weight: 800;
+    margin-top: 6px;
+  }
+  .msg {
+    font-size: 12px;
+    color: #9aa4b8;
+    word-break: break-word;
+  }
+  .chart {
+    position: relative;
+    height: 260px;
+  }
+  .chart svg {
+    display: block;
+  }
+  .chart-tip {
+    position: absolute;
+    pointer-events: none;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 12px;
+    max-width: 280px;
+    transform: translate(-50%, calc(-100% - 12px));
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  }
+</style>
+{% endblock %}

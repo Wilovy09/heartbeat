@@ -1,0 +1,29 @@
+# Template nginx server block for adquiere-logs, following the same shape used for
+# api-test.adquiere.co (see /etc/nginx/sites-available/ on the shared box). Copy this to
+# /etc/nginx/sites-available/<your-domain>, replace REPLACE_ME_DOMAIN, symlink it into
+# sites-enabled, then run:
+#
+#   sudo certbot --nginx -d REPLACE_ME_DOMAIN
+#
+# certbot rewrites the listen/ssl_certificate lines itself on first run -- the block below
+# is the pre-certbot (HTTP-only) starting point, not the final file.
+
+server {
+    server_name REPLACE_ME_DOMAIN;
+
+    client_max_body_size 2M;
+
+    location / {
+        proxy_pass http://localhost:8090;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 30s;
+        proxy_send_timeout 30s;
+        proxy_read_timeout 30s;
+    }
+
+    listen 80;
+}

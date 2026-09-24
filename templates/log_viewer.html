@@ -1,0 +1,447 @@
+{% extends "base.html" %} {% block title %}{{ app.name }} — Heartbeat{% endblock
+%} {% block content %}
+<div x-data="logViewer('{{ app.slug }}')" x-init="init()">
+  <div
+    style="display: flex; align-items: center; gap: 10px; margin-bottom: 16px"
+  >
+    <a
+      href="/logs"
+      style="color: var(--muted); text-decoration: none; font-size: 13px"
+      >← Logs</a
+    >
+    <h1 style="margin: 0; font-size: 18px; color: var(--text)">
+      {{ app.name }}
+    </h1>
+    <span class="mono" style="color: var(--muted); font-size: 11px"
+      >{{ app.logs_url }}</span
+    >
+  </div>
+
+  <div
+    class="card"
+    style="
+      margin-bottom: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    "
+  >
+    <div
+      style="
+        display: flex;
+        gap: 16px;
+        align-items: end;
+        justify-content: space-between;
+        flex-wrap: wrap;
+      "
+    >
+      <div
+        style="
+          display: flex;
+          gap: 12px;
+          align-items: end;
+          flex-wrap: wrap;
+          flex: 1;
+          min-width: 0;
+        "
+      >
+        <div>
+          <label for="stream-select">Stream</label>
+          <select id="stream-select" x-model="stream" @change="load()">
+            <option value="both">out + error</option>
+            <option value="out">solo out</option>
+            <option value="error">solo error</option>
+          </select>
+        </div>
+        <div>
+          <label for="lines-input">Líneas</label>
+          <input
+            id="lines-input"
+            type="number"
+            x-model.number="lines"
+            min="1"
+            max="5000"
+            style="width: 90px"
+            @change="load()"
+          />
+        </div>
+        <div style="flex: 1; min-width: 160px; max-width: 320px">
+          <label for="search-input">Buscar</label>
+          <input
+            id="search-input"
+            type="text"
+            x-model="search"
+            placeholder="filtrar por texto..."
+            style="width: 100%"
+          />
+        </div>
+        <div>
+          <label>Niveles (stdout)</label>
+          <div class="chip-row">
+            <template x-for="level in ALL_LEVELS" :key="level">
+              <button
+                type="button"
+                class="tag filter-chip"
+                :class="['tag-' + level.toLowerCase(), excludedLevels.includes(level) ? 'chip-off' : '']"
+                @click="toggleLevel(level)"
+              >
+                <span x-text="level"></span
+                ><span
+                  class="chip-count"
+                  x-text="'(' + levelCounts()[level] + ')'"
+                ></span>
+              </button>
+            </template>
+          </div>
+        </div>
+      </div>
+      <div style="display: flex; gap: 8px; align-items: center; shrink: 0">
+        <button
+          type="button"
+          class="icon-btn"
+          :class="autoRefresh ? 'active' : ''"
+          @click="autoRefresh = !autoRefresh; toggleAutoRefresh()"
+          :title="autoRefresh ? 'Auto-refresh activo (5s) — click para apagar' : 'Activar auto-refresh (5s)'"
+        >
+          <svg
+            :class="autoRefresh ? 'spin' : ''"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path>
+            <path d="M3 3v5h5"></path>
+            <path
+              d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"
+            ></path>
+            <path d="M16 16h5v5"></path>
+          </svg>
+        </button>
+        <button
+          type="button"
+          class="icon-btn"
+          @click="load()"
+          :disabled="loading"
+          title="Refrescar ahora"
+        >
+          <svg
+            :class="loading ? 'spin' : ''"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path>
+            <path d="M3 3v5h5"></path>
+            <path
+              d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"
+            ></path>
+            <path d="M16 16h5v5"></path>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <div
+      style="
+        border-top: 1px solid var(--border);
+        padding-top: 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      "
+    >
+      <div
+        style="
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+        "
+      >
+        <span class="section-label">Módulos de stdout</span>
+        <button
+          type="button"
+          class="reset-link"
+          x-show="excludedLevels.length || excludedTargets.length"
+          @click="resetFilters()"
+        >
+          Quitar filtros
+        </button>
+      </div>
+
+      <div x-show="distinctTargets().length">
+        <label>Click para excluir</label>
+        <div class="chip-row">
+          <template x-for="item in distinctTargets()" :key="item.target">
+            <button
+              type="button"
+              class="tag filter-chip module-chip"
+              :class="excludedTargets.includes(item.target) ? 'chip-off' : ''"
+              @click="toggleTarget(item.target)"
+            >
+              <span x-text="item.target"></span
+              ><span class="chip-count" x-text="'(' + item.count + ')'"></span>
+            </button>
+          </template>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div
+    class="error-box"
+    x-show="fetchError"
+    x-text="fetchError"
+    style="margin-bottom: 16px"
+  ></div>
+
+  <div
+    style="display: grid; gap: 16px"
+    :style="stream === 'both' ? 'grid-template-columns:1fr 1fr' : 'grid-template-columns:1fr'"
+  >
+    <div class="card" x-show="stream === 'both' || stream === 'out'">
+      <h3
+        style="
+          margin-top: 0;
+          font-size: 12px;
+          color: var(--muted);
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+        "
+      >
+        stdout (<span x-text="filteredOut().length"></span> /
+        <span x-text="outRaw.length"></span>)
+      </h3>
+      <div style="max-height: 72vh; overflow: auto">
+        <template x-for="(line, idx) in filteredOut()" :key="'out-' + idx">
+          <div class="logline" @click="line._open = !line._open">
+            <button
+              type="button"
+              class="copy-btn"
+              @click.stop="copyLine(line.raw, 'out-' + idx)"
+              :title="copiedKey === ('out-' + idx) ? 'Copiado' : 'Copiar raw'"
+            >
+              <svg
+                x-show="copiedKey !== ('out-' + idx)"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                <path
+                  d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
+                ></path>
+              </svg>
+              <svg
+                x-show="copiedKey === ('out-' + idx)"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M20 6 9 17l-5-5"></path>
+              </svg>
+            </button>
+            <span
+              x-show="line.timestamp"
+              x-text="line.timestamp"
+              style="color: var(--muted); margin-right: 8px"
+            ></span>
+            <span
+              class="tag"
+              :class="'tag-' + (line.level || 'info').toLowerCase()"
+              x-text="line.level || '—'"
+            ></span>
+            <span
+              x-show="line.target"
+              x-text="' ' + line.target"
+              style="color: var(--muted)"
+            ></span>
+            <span x-text="' ' + line.message"></span>
+            <pre x-show="line._open" x-text="line.raw"></pre>
+          </div>
+        </template>
+        <p
+          x-show="filteredOut().length === 0"
+          style="color: var(--muted); font-size: 13px"
+        >
+          Sin líneas.
+        </p>
+      </div>
+    </div>
+    <div class="card" x-show="stream === 'both' || stream === 'error'">
+      <h3
+        style="
+          margin-top: 0;
+          font-size: 12px;
+          color: var(--muted);
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+        "
+      >
+        stderr (<span x-text="filteredError().length"></span> /
+        <span x-text="errorRaw.length"></span>)
+      </h3>
+      <div style="max-height: 72vh; overflow: auto">
+        <template x-for="(line, idx) in filteredError()" :key="'err-' + idx">
+          <div class="logline" style="white-space: pre-wrap; cursor: default">
+            <button
+              type="button"
+              class="copy-btn"
+              @click.stop="copyLine(line, 'err-' + idx)"
+              :title="copiedKey === ('err-' + idx) ? 'Copiado' : 'Copiar raw'"
+            >
+              <svg
+                x-show="copiedKey !== ('err-' + idx)"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                <path
+                  d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
+                ></path>
+              </svg>
+              <svg
+                x-show="copiedKey === ('err-' + idx)"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M20 6 9 17l-5-5"></path>
+              </svg>
+            </button>
+            <span x-text="line"></span>
+          </div>
+        </template>
+        <p
+          x-show="filteredError().length === 0"
+          style="color: var(--muted); font-size: 13px"
+        >
+          Sin líneas.
+        </p>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="/static/log_viewer.js"></script>
+{% endblock %} {% block head %}
+<style>
+  .section-label {
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 600;
+  }
+  .reset-link {
+    background: none;
+    border: none;
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    padding: 0;
+  }
+  .reset-link:hover {
+    text-decoration: underline;
+  }
+  .chip-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .chip-count {
+    opacity: 0.65;
+    margin-left: 4px;
+    font-weight: 400;
+  }
+  .filter-chip {
+    border: 1px solid transparent;
+    cursor: pointer;
+    font-family: inherit;
+    opacity: 1;
+    transition:
+      opacity 0.12s,
+      border-color 0.12s;
+  }
+  .filter-chip:hover {
+    border-color: currentColor;
+  }
+  .filter-chip.chip-off {
+    opacity: 0.35;
+  }
+  .module-chip {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .module-chip:hover {
+    border-color: var(--accent);
+  }
+
+  .icon-btn {
+    width: 34px;
+    height: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--muted);
+    cursor: pointer;
+    transition:
+      color 0.12s,
+      border-color 0.12s,
+      background 0.12s;
+  }
+  .icon-btn svg {
+    width: 16px;
+    height: 16px;
+  }
+  .icon-btn:hover {
+    color: var(--text);
+    border-color: var(--accent);
+  }
+  .icon-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  /* Active = auto-refresh is on: same accent tint used for a "currently applying" state
+     elsewhere (see the vigente rule chip in the other Pulso apps) -- a filled, colored
+     button reads as "always on" without needing a separate badge or text label. */
+  .icon-btn.active {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: rgba(79, 140, 255, 0.12);
+  }
+  @keyframes icon-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  .icon-btn svg.spin {
+    animation: icon-spin 0.9s linear infinite;
+  }
+</style>
+{% endblock %}

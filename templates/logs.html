@@ -1,0 +1,58 @@
+{% extends "base.html" %} {% block title %}Logs — Heartbeat{% endblock %} {%
+block content %} {% if apps | length == 0 %}
+<div class="card">
+  <p style="color: #7d8598; font-size: 13px">
+    No hay apps registradas todavía. Ve a
+    <a href="/apps" style="color: #4f8cff">Apps</a> para agregar una.
+  </p>
+</div>
+{% else %}
+<div
+  x-data="uptimeDashboard()"
+  x-init="init()"
+  style="
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 16px;
+  "
+>
+  {% for app in apps %}
+  <a href="/logs/{{ app.slug }}" class="card app-card">
+    <h2 style="margin: 0 0 14px; font-size: 16px; color: var(--text)">
+      {{ app.name }}
+    </h2>
+    <div class="beats">
+      <template
+        x-for="(b, i) in padBeats(recentFor('{{ app.slug }}'))"
+        :key="i"
+      >
+        <span
+          class="beat"
+          :class="b ? 'st-' + b.status : ''"
+          :title="b ? beatTitle(b) : 'Sin datos'"
+        ></span>
+      </template>
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% endif %} {% endblock %} {% block head %}
+<script src="/static/uptime.js"></script>
+<style>
+  .app-card {
+    display: block;
+    text-decoration: none;
+    transition:
+      border-color 0.12s,
+      transform 0.12s;
+  }
+  .app-card:hover {
+    border-color: var(--accent);
+    transform: translateY(-1px);
+  }
+  .app-card .beat {
+    height: 28px;
+    border-radius: 4px;
+  }
+</style>
+{% endblock %}

@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Heartbeat{% endblock %}</title>
+  <script defer src="/libs/alpinejs/alpine.js"></script>
+  <style>
+    :root {
+      --bg: #0f1115; --panel: #171a21; --border: #262b36; --text: #d6dae3; --muted: #7d8598;
+      --accent: #4f8cff; --info: #6b93ff; --warn: #e0a940; --error: #e05a5a; --debug: #6b7688;
+      --up: #3ecf8e; --unknown: #3a4150;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    nav { display: flex; align-items: center; gap: 20px; padding: 12px 20px; background: var(--panel); border-bottom: 1px solid var(--border); }
+    nav a { color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 600; }
+    nav a.active, nav a:hover { color: var(--text); }
+    nav .brand { color: var(--text); font-weight: 800; margin-right: auto; }
+    main { padding: 20px; max-width: 1400px; margin: 0 auto; }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+    .btn { display: inline-flex; align-items: center; gap: 6px; background: var(--accent); color: white; border: none; padding: 8px 14px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; text-decoration: none; }
+    .btn.secondary { background: transparent; border: 1px solid var(--border); color: var(--text); }
+    .btn.danger { background: var(--error); }
+    .btn:disabled { opacity: 0.5; cursor: default; }
+    input, select { background: #0f1115; border: 1px solid var(--border); color: var(--text); padding: 8px 10px; border-radius: 6px; font-size: 13px; }
+    input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px; }
+    label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; display: block; margin-bottom: 4px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 13px; }
+    th { color: var(--muted); text-transform: uppercase; font-size: 11px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .error-box { background: rgba(224,90,90,0.12); color: var(--error); border: 1px solid rgba(224,90,90,0.3); padding: 10px 12px; border-radius: 8px; font-size: 13px; margin-bottom: 14px; }
+    .tag { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+    .tag-info { background: rgba(107,147,255,0.15); color: var(--info); }
+    .tag-warn { background: rgba(224,169,64,0.15); color: var(--warn); }
+    .tag-error { background: rgba(224,90,90,0.15); color: var(--error); }
+    .tag-debug, .tag-trace { background: rgba(107,118,136,0.15); color: var(--debug); }
+    .logline { position: relative; border-bottom: 1px solid var(--border); padding: 6px 30px 6px 2px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; cursor: pointer; }
+    .logline:hover { background: rgba(255,255,255,0.02); }
+    .logline pre { white-space: pre-wrap; word-break: break-word; margin: 6px 0 0; color: #9aa4b8; }
+    /* Heartbeat strip (uptime): one pill per health check, gray = no data yet. */
+    .beats { display: flex; gap: 3px; }
+    .beat { flex: 1; min-width: 3px; border-radius: 999px; background: var(--unknown); }
+    .beat.st-up { background: var(--up); }
+    .beat.st-down { background: var(--error); }
+    .copy-btn {
+      position: absolute; top: 4px; right: 4px; width: 22px; height: 22px;
+      display: flex; align-items: center; justify-content: center;
+      background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+      color: var(--muted); cursor: pointer; opacity: 0; transition: opacity .1s, color .1s, border-color .1s;
+    }
+    .copy-btn svg { width: 12px; height: 12px; }
+    .logline:hover .copy-btn { opacity: 1; }
+    .copy-btn:hover { color: var(--text); border-color: var(--accent); }
+  </style>
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <nav>
+    <span class="brand">Heartbeat</span>
+    <a href="/" class="{% if active == "dashboard" %}active{% endif %}">Dashboard</a>
+    <a href="/logs" class="{% if active == "logs" %}active{% endif %}">Logs</a>
+    <a href="/apps" class="{% if active == "apps" %}active{% endif %}">Apps</a>
+    <a href="/logout" style="margin-left:auto;">Salir</a>
+  </nav>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>
