@@ -1,7 +1,10 @@
 //! Uptime monitoring: a background loop hits every registered app's `health_url` on a
 //! fixed interval and records one heartbeat per check. History is kept in memory (bounded
-//! to `RETENTION`) and mirrored to one JSONL file per app -- appended on every check,
-//! rewritten ("compacted") on startup and periodically so the files don't grow forever.
+//! to `CheckPolicy::retention`) and mirrored to one JSONL file per app -- appended on every
+//! check, rewritten ("compacted") on startup and periodically so files don't grow forever.
+//!
+//! A failed check is retried before it's recorded as down, and every confirmed status
+//! change is handed to `alerts` (when webhooks are configured).
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -13,12 +16,18 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 
+use crate::alerts::{Alerter, StatusChange};
 use crate::outbound::Outbound;
 use crate::registry::{AppRegistry, RegisteredApp};
 
-const RETENTION: Duration = Duration::from_secs(30 * 24 * 3600);
 const COMPACT_EVERY: Duration = Duration::from_secs(3600);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const RETRY_DELAY: Duration = Duration::from_secs(5);
+/// Max bytes of a health response read when looking for `expect_body`.
+const BODY_LIMIT: usize = 256 * 1024;
+/// Most points the detail endpoint returns; longer windows are aggregated server-side.
+const MAX_DETAIL_POINTS: usize = 600;
+const DAY_SECS: u64 = 24 * 3600;
 /// How many of the latest heartbeats the summary carries for each app's bar strip. The
 /// dashboard draws 40; the embed fits as many as its width allows, up to this.
 const RECENT_BEATS: usize = 100;
@@ -66,6 +75,16 @@ impl Status {
         }
     }
 
+    /// Ordering for "worst of": down > degraded > up.
+    #[must_use]
+    fn severity(self) -> u8 {
+        match self {
+            Self::Up => 0,
+            Self::Degraded => 1,
+            Self::Down => 2,
+        }
+    }
+
     /// Whether the app was serving requests -- slow still counts toward uptime.
     #[must_use]
     fn is_available(self) -> bool {
@@ -76,11 +95,64 @@ impl Status {
     }
 }
 
-/// How often apps are checked and what counts as "slow".
+/// How apps are checked and how long their history is kept.
 #[derive(Debug, Clone, Copy)]
 pub struct CheckPolicy {
     pub interval: Duration,
+    /// Global "slow" threshold; an app's own `degraded_after_ms` overrides it.
     pub degraded_after_ms: u32,
+    /// Extra attempts (`RETRY_DELAY` apart) before a failed check is recorded as down.
+    pub retries: u32,
+    /// A certificate expiring within this many days marks the app degraded.
+    pub cert_warn_days: u32,
+    pub retention: Duration,
+}
+
+/// What a single probe needs to know about one app.
+struct ProbeTarget {
+    url: String,
+    degraded_after_ms: u32,
+    expect_body: Option<String>,
+    cert_warn_days: u32,
+}
+
+/// Outcome of one probe: the heartbeat, plus the TLS certificate's expiry when the
+/// connection got far enough to see one.
+struct ProbeResult {
+    beat: Heartbeat,
+    cert_expires_at: Option<u64>,
+}
+
+/// Unix-seconds expiry (`notAfter`) of a DER-encoded X.509 certificate.
+fn cert_not_after(der: &[u8]) -> Option<u64> {
+    let (_, cert) = x509_parser::parse_x509_certificate(der).ok()?;
+    u64::try_from(cert.validity().not_after.timestamp()).ok()
+}
+
+/// Reads at most `BODY_LIMIT` bytes of the body, lossily as text.
+async fn read_body_prefix(mut resp: reqwest::Response) -> String {
+    let mut body = Vec::new();
+    while let Ok(Some(chunk)) = resp.chunk().await {
+        body.extend_from_slice(&chunk);
+        if body.len() >= BODY_LIMIT {
+            body.truncate(BODY_LIMIT);
+            break;
+        }
+    }
+    String::from_utf8_lossy(&body).into_owned()
+}
+
+fn error_chain(e: &reqwest::Error) -> String {
+    // reqwest's top-level message is just "error sending request" -- the useful part
+    // (connection refused, dns, timeout) lives down the source chain.
+    let mut message = e.to_string();
+    let mut source = e.source();
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,17 +166,26 @@ pub struct Heartbeat {
 }
 
 impl Heartbeat {
-    async fn probe(outbound: &Outbound, url: &str, degraded_after_ms: u32) -> Self {
+    fn down(message: String, latency_ms: Option<u32>) -> Self {
+        Self {
+            at: unix_now(),
+            status: Status::Down,
+            latency_ms,
+            message,
+        }
+    }
+}
+
+impl ProbeTarget {
+    async fn probe(&self, outbound: &Outbound) -> ProbeResult {
         // Re-checked on every probe, not just at registration: entries saved before the
         // allowlist existed, or before ALLOWED_HOSTS was narrowed, must not slip through.
-        let url = match outbound.check(url) {
+        let url = match outbound.check(&self.url) {
             Ok(url) => url,
             Err(e) => {
-                return Self {
-                    at: unix_now(),
-                    status: Status::Down,
-                    latency_ms: None,
-                    message: format!("URL de health no permitida: {e}"),
+                return ProbeResult {
+                    beat: Heartbeat::down(format!("URL de health no permitida: {e}"), None),
+                    cert_expires_at: None,
                 };
             }
         };
@@ -116,35 +197,68 @@ impl Heartbeat {
             .send()
             .await;
         let latency_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
-        let at = unix_now();
-        match result {
-            Ok(resp) => {
-                let code = resp.status();
-                Self {
-                    at,
-                    status: Status::classify(code.is_success(), latency_ms, degraded_after_ms),
-                    latency_ms: Some(latency_ms),
-                    message: format!("HTTP {code}"),
-                }
-            }
+        let resp = match result {
+            Ok(resp) => resp,
             Err(e) => {
-                // reqwest's top-level message is just "error sending request" -- the useful
-                // part (connection refused, dns, timeout) lives down the source chain.
-                let mut message = e.to_string();
-                let mut source = e.source();
-                while let Some(cause) = source {
-                    message.push_str(": ");
-                    message.push_str(&cause.to_string());
-                    source = cause.source();
-                }
-                Self {
-                    at,
-                    status: Status::Down,
-                    latency_ms: None,
-                    message,
-                }
+                return ProbeResult {
+                    beat: Heartbeat::down(error_chain(&e), None),
+                    cert_expires_at: None,
+                };
+            }
+        };
+
+        let cert_expires_at = resp
+            .extensions()
+            .get::<reqwest::tls::TlsInfo>()
+            .and_then(reqwest::tls::TlsInfo::peer_certificate)
+            .and_then(cert_not_after);
+        let code = resp.status();
+        let mut status = Status::classify(code.is_success(), latency_ms, self.degraded_after_ms);
+        let mut message = format!("HTTP {code}");
+
+        if status != Status::Down
+            && let Some(expected) = &self.expect_body
+            && !read_body_prefix(resp).await.contains(expected.as_str())
+        {
+            status = Status::Down;
+            message = format!("La respuesta no contiene «{expected}»");
+        }
+        if status == Status::Up
+            && let Some(expires) = cert_expires_at
+        {
+            let days_left = expires.saturating_sub(unix_now()) / DAY_SECS;
+            if days_left < u64::from(self.cert_warn_days) {
+                status = Status::Degraded;
+                message = format!("El certificado vence en {days_left} días");
             }
         }
+
+        ProbeResult {
+            beat: Heartbeat {
+                at: unix_now(),
+                status,
+                latency_ms: Some(latency_ms),
+                message,
+            },
+            cert_expires_at,
+        }
+    }
+
+    /// Probes, retrying a failure up to `retries` times before accepting it: one dropped
+    /// packet shouldn't paint an app red (or page anyone).
+    async fn probe_confirmed(&self, outbound: &Outbound, retries: u32) -> ProbeResult {
+        let mut result = self.probe(outbound).await;
+        for attempt in 1..=retries {
+            if result.beat.status != Status::Down {
+                break;
+            }
+            tokio::time::sleep(RETRY_DELAY).await;
+            result = self.probe(outbound).await;
+            if result.beat.status == Status::Down && attempt == retries {
+                result.beat.message = format!("{} ({} intentos)", result.beat.message, retries + 1);
+            }
+        }
+        result
     }
 }
 
@@ -159,13 +273,13 @@ fn unix_now() -> u64 {
 struct History(VecDeque<Heartbeat>);
 
 impl History {
-    fn push(&mut self, beat: Heartbeat) {
+    fn push(&mut self, beat: Heartbeat, retention: Duration) {
         self.0.push_back(beat);
-        self.prune(unix_now());
+        self.prune(unix_now(), retention);
     }
 
-    fn prune(&mut self, now: u64) {
-        let cutoff = now.saturating_sub(RETENTION.as_secs());
+    fn prune(&mut self, now: u64, retention: Duration) {
+        let cutoff = now.saturating_sub(retention.as_secs());
         while self.0.front().is_some_and(|b| b.at < cutoff) {
             self.0.pop_front();
         }
@@ -211,19 +325,73 @@ impl History {
         events
     }
 
-    fn summary(&self, app: &RegisteredApp, day_ago: u64) -> MonitorSummary {
+    fn summary(
+        &self,
+        app: &RegisteredApp,
+        now: u64,
+        cert_expires_at: Option<u64>,
+    ) -> MonitorSummary {
         let last = self.0.back();
+        let day_ago = now.saturating_sub(DAY_SECS);
         MonitorSummary {
             slug: app.slug.clone(),
             name: app.name.clone(),
             health_url: app.health_url.clone(),
+            paused: app.paused,
             status: last.map(|b| b.status),
             latency_ms: last.and_then(|b| b.latency_ms),
             avg_latency_24h_ms: self.avg_latency_ms(day_ago),
             uptime_24h: self.uptime_pct(day_ago),
-            uptime_30d: self.uptime_pct(0),
+            uptime_30d: self.uptime_pct(now.saturating_sub(30 * DAY_SECS)),
+            cert_expires_at,
             recent: self.recent(RECENT_BEATS),
         }
+    }
+
+    /// Beats since `cutoff`, aggregated into at most `max_points` time buckets when there
+    /// are more: each bucket reports its worst status (with that beat's message) and the
+    /// average latency of its available beats -- so an outage never averages away.
+    fn downsampled(&self, cutoff: u64, now: u64, max_points: usize) -> Vec<Heartbeat> {
+        let beats: Vec<&Heartbeat> = self.since(cutoff).collect();
+        if beats.len() <= max_points {
+            return beats.into_iter().cloned().collect();
+        }
+        let span = now.saturating_sub(cutoff).max(1);
+        let bucket_secs = span.div_ceil(max_points as u64).max(1);
+        let mut out: Vec<Heartbeat> = Vec::with_capacity(max_points);
+        let mut current: Option<(u64, Heartbeat, u64, u64)> = None; // (bucket, worst, sum, n)
+        let flush = |out: &mut Vec<Heartbeat>,
+                     (bucket, mut worst, sum, n): (u64, Heartbeat, u64, u64)| {
+            worst.at = cutoff + bucket * bucket_secs + bucket_secs / 2;
+            worst.latency_ms = (n > 0).then(|| u32::try_from(sum / n).unwrap_or(u32::MAX));
+            out.push(worst);
+        };
+        for beat in beats {
+            let bucket = beat.at.saturating_sub(cutoff) / bucket_secs;
+            let latency = beat.latency_ms.filter(|_| beat.status.is_available());
+            match &mut current {
+                Some((b, worst, sum, n)) if *b == bucket => {
+                    if beat.status.severity() > worst.status.severity() {
+                        *worst = beat.clone();
+                    }
+                    if let Some(ms) = latency {
+                        *sum += u64::from(ms);
+                        *n += 1;
+                    }
+                }
+                _ => {
+                    if let Some(done) = current.take() {
+                        flush(&mut out, done);
+                    }
+                    let (sum, n) = latency.map_or((0, 0), |ms| (u64::from(ms), 1));
+                    current = Some((bucket, beat.clone(), sum, n));
+                }
+            }
+        }
+        if let Some(done) = current {
+            flush(&mut out, done);
+        }
+        out
     }
 
     fn recent(&self, n: usize) -> Vec<Heartbeat> {
@@ -240,12 +408,16 @@ pub struct MonitorSummary {
     pub slug: String,
     pub name: String,
     pub health_url: Option<String>,
+    /// Paused apps aren't probed; `status` is then the last reading before the pause.
+    pub paused: bool,
     /// Status of the latest heartbeat; `None` = no health URL or not checked yet.
     pub status: Option<Status>,
     pub latency_ms: Option<u32>,
     pub avg_latency_24h_ms: Option<u32>,
     pub uptime_24h: Option<f64>,
     pub uptime_30d: Option<f64>,
+    /// Unix seconds when the health endpoint's TLS certificate expires (last check).
+    pub cert_expires_at: Option<u64>,
     pub recent: Vec<Heartbeat>,
 }
 
@@ -272,11 +444,23 @@ pub struct MonitorDetail {
     pub events: Vec<Heartbeat>,
 }
 
+/// Where a monitor reports to, besides its own dashboard.
+#[derive(Clone, Default)]
+pub struct Notifiers {
+    pub alerter: Option<Alerter>,
+    /// Pinged after every round of checks, so an external dead man's switch notices when
+    /// this monitor itself stops (e.g. a healthchecks.io URL).
+    pub ping_url: Option<String>,
+}
+
 pub struct UptimeMonitor {
     dir: PathBuf,
     policy: CheckPolicy,
     outbound: Outbound,
+    notifiers: Notifiers,
     histories: RwLock<HashMap<String, History>>,
+    /// Latest TLS certificate expiry per app (memory only; refreshed every check).
+    certs: RwLock<HashMap<String, u64>>,
 }
 
 impl UptimeMonitor {
@@ -286,6 +470,7 @@ impl UptimeMonitor {
         dir: impl Into<PathBuf>,
         policy: CheckPolicy,
         outbound: Outbound,
+        notifiers: Notifiers,
     ) -> Result<Self, UptimeError> {
         let dir = dir.into();
         tokio::fs::create_dir_all(&dir)
@@ -319,7 +504,7 @@ impl UptimeMonitor {
                     })
                     .collect(),
             );
-            history.prune(unix_now());
+            history.prune(unix_now(), policy.retention);
             histories.insert(slug.to_string(), history);
         }
 
@@ -327,7 +512,9 @@ impl UptimeMonitor {
             dir,
             policy,
             outbound,
+            notifiers,
             histories: RwLock::new(histories),
+            certs: RwLock::default(),
         };
         monitor.compact_all().await?;
         Ok(monitor)
@@ -342,9 +529,22 @@ impl UptimeMonitor {
         let mut ticker = tokio::time::interval(self.policy.interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_compact = Instant::now();
+        let ping_client = reqwest::Client::builder()
+            .timeout(PROBE_TIMEOUT)
+            .build()
+            .ok();
         loop {
             ticker.tick().await;
             self.check_all(&registry.list().await).await;
+            if let (Some(url), Some(client)) = (&self.notifiers.ping_url, &ping_client)
+                && let Err(e) = client
+                    .get(url)
+                    .send()
+                    .await
+                    .and_then(reqwest::Response::error_for_status)
+            {
+                tracing::warn!(error = %e, "uptime: dead man's switch ping failed");
+            }
             if last_compact.elapsed() >= COMPACT_EVERY {
                 if let Err(e) = self.compact_all().await {
                     tracing::error!(error = %e, "uptime: compaction failed");
@@ -356,31 +556,65 @@ impl UptimeMonitor {
 
     async fn check_all(&self, apps: &[RegisteredApp]) {
         let mut probes = JoinSet::new();
-        for app in apps {
+        for app in apps.iter().filter(|a| !a.paused) {
             let Some(url) = app.health_url.clone() else {
                 continue;
             };
+            let target = ProbeTarget {
+                url,
+                degraded_after_ms: app
+                    .degraded_after_ms
+                    .unwrap_or(self.policy.degraded_after_ms),
+                expect_body: app.expect_body.clone(),
+                cert_warn_days: self.policy.cert_warn_days,
+            };
             let outbound = self.outbound.clone();
-            let slug = app.slug.clone();
-            let degraded_after_ms = self.policy.degraded_after_ms;
+            let retries = self.policy.retries;
+            let (slug, name) = (app.slug.clone(), app.name.clone());
             probes.spawn(async move {
-                let beat = Heartbeat::probe(&outbound, &url, degraded_after_ms).await;
-                (slug, beat)
+                let result = target.probe_confirmed(&outbound, retries).await;
+                (slug, name, result)
             });
         }
         while let Some(joined) = probes.join_next().await {
-            match joined {
-                Ok((slug, beat)) => {
-                    if let Err(e) = self.record(&slug, beat).await {
-                        tracing::error!(app = %slug, error = %e, "uptime: failed to persist heartbeat");
-                    }
+            let (slug, name, result) = match joined {
+                Ok(done) => done,
+                Err(e) => {
+                    tracing::error!(error = %e, "uptime: probe task panicked");
+                    continue;
                 }
-                Err(e) => tracing::error!(error = %e, "uptime: probe task panicked"),
+            };
+            if let Some(expires) = result.cert_expires_at {
+                self.certs.write().await.insert(slug.clone(), expires);
+            }
+            let beat = result.beat;
+            match self.record(&slug, beat.clone()).await {
+                Ok(Some(previous)) => self.maybe_alert(&slug, &name, previous, beat),
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!(app = %slug, error = %e, "uptime: failed to persist heartbeat");
+                }
             }
         }
     }
 
-    async fn record(&self, slug: &str, beat: Heartbeat) -> Result<(), UptimeError> {
+    fn maybe_alert(&self, slug: &str, name: &str, previous: Status, beat: Heartbeat) {
+        let Some(alerter) = &self.notifiers.alerter else {
+            return;
+        };
+        if alerter.worth_alerting(previous, beat.status) {
+            alerter.send(&StatusChange {
+                slug: slug.to_string(),
+                name: name.to_string(),
+                from: previous,
+                to: beat.status,
+                beat,
+            });
+        }
+    }
+
+    /// Stores a heartbeat; returns the status it follows (`None` for an app's first ever).
+    async fn record(&self, slug: &str, beat: Heartbeat) -> Result<Option<Status>, UptimeError> {
         match beat.status {
             Status::Down => {
                 tracing::warn!(app = %slug, message = %beat.message, "uptime: app is down");
@@ -392,12 +626,13 @@ impl UptimeMonitor {
         }
         let mut line = serde_json::to_string(&beat)?;
         line.push('\n');
-        self.histories
-            .write()
-            .await
-            .entry(slug.to_string())
-            .or_default()
-            .push(beat);
+        let previous = {
+            let mut histories = self.histories.write().await;
+            let history = histories.entry(slug.to_string()).or_default();
+            let previous = history.0.back().map(|b| b.status);
+            history.push(beat, self.policy.retention);
+            previous
+        };
 
         let path = self.file_for(slug);
         let mut file = tokio::fs::OpenOptions::new()
@@ -408,7 +643,8 @@ impl UptimeMonitor {
             .map_err(UptimeError::io(&path))?;
         file.write_all(line.as_bytes())
             .await
-            .map_err(UptimeError::io(&path))
+            .map_err(UptimeError::io(&path))?;
+        Ok(previous)
     }
 
     /// Rewrites every app's file with only its retained heartbeats (temp file + rename, so a
@@ -420,7 +656,7 @@ impl UptimeMonitor {
             histories
                 .iter_mut()
                 .map(|(slug, history)| {
-                    history.prune(now);
+                    history.prune(now, self.policy.retention);
                     let body = history
                         .0
                         .iter()
@@ -456,8 +692,8 @@ impl UptimeMonitor {
 
     pub async fn overview(&self, apps: &[RegisteredApp]) -> Overview {
         let histories = self.histories.read().await;
+        let certs = self.certs.read().await;
         let now = unix_now();
-        let day_ago = now.saturating_sub(24 * 3600);
         let empty = History::default();
 
         let mut events = Vec::new();
@@ -470,10 +706,10 @@ impl UptimeMonitor {
                     name: app.name.clone(),
                     beat,
                 }));
-                history.summary(app, day_ago)
+                history.summary(app, now, certs.get(&app.slug).copied())
             })
             .collect();
-        events.sort_by(|a, b| b.beat.at.cmp(&a.beat.at));
+        events.sort_by_key(|e| std::cmp::Reverse(e.beat.at));
         events.truncate(MAX_EVENTS);
 
         Overview {
@@ -487,11 +723,11 @@ impl UptimeMonitor {
     /// One app's summary -- what the public embed endpoint serves.
     pub async fn summary(&self, app: &RegisteredApp) -> MonitorSummary {
         let histories = self.histories.read().await;
-        let day_ago = unix_now().saturating_sub(24 * 3600);
+        let cert = self.certs.read().await.get(&app.slug).copied();
         histories
             .get(&app.slug)
             .unwrap_or(&History::default())
-            .summary(app, day_ago)
+            .summary(app, unix_now(), cert)
     }
 
     pub async fn detail(&self, slug: &str, window: Duration) -> MonitorDetail {
@@ -502,9 +738,10 @@ impl UptimeMonitor {
                 events: Vec::new(),
             };
         };
-        let cutoff = unix_now().saturating_sub(window.as_secs());
+        let now = unix_now();
+        let cutoff = now.saturating_sub(window.as_secs());
         MonitorDetail {
-            beats: history.since(cutoff).cloned().collect(),
+            beats: history.downsampled(cutoff, now, MAX_DETAIL_POINTS),
             events: history.events(),
         }
     }
@@ -514,8 +751,29 @@ impl UptimeMonitor {
 mod tests {
     use super::*;
 
+    const RETENTION: Duration = Duration::from_hours(720);
+
     fn outbound() -> Outbound {
         Outbound::new("*.example.com").unwrap()
+    }
+
+    fn policy() -> CheckPolicy {
+        CheckPolicy {
+            interval: Duration::from_secs(60),
+            degraded_after_ms: 1000,
+            retries: 0,
+            cert_warn_days: 14,
+            retention: RETENTION,
+        }
+    }
+
+    fn target(url: &str) -> ProbeTarget {
+        ProbeTarget {
+            url: url.to_string(),
+            degraded_after_ms: 1000,
+            expect_body: None,
+            cert_warn_days: 14,
+        }
     }
 
     #[tokio::test]
@@ -524,7 +782,7 @@ mod tests {
             "http://127.0.0.1:1/health",
             "https://169.254.169.254/latest/meta-data/",
         ] {
-            let beat = Heartbeat::probe(&outbound(), url, 1000).await;
+            let beat = target(url).probe(&outbound()).await.beat;
             assert_eq!(beat.status, Status::Down);
             assert!(
                 beat.message.starts_with("URL de health no permitida"),
@@ -587,7 +845,7 @@ mod tests {
             beat(500, Status::Up, None),
             beat(1500, Status::Up, None),
         ]));
-        history.prune(now);
+        history.prune(now, RETENTION);
         assert_eq!(history.0.len(), 1);
         assert_eq!(history.0[0].at, 1500);
     }
@@ -595,20 +853,23 @@ mod tests {
     #[tokio::test]
     async fn records_persist_across_a_reload_and_forget_removes_them() {
         let dir = tempfile::tempdir().unwrap();
-        let policy = CheckPolicy {
-            interval: Duration::from_secs(60),
-            degraded_after_ms: 1000,
-        };
         {
-            let monitor = UptimeMonitor::load(dir.path(), policy, outbound())
-                .await
-                .unwrap();
-            monitor
+            let monitor =
+                UptimeMonitor::load(dir.path(), policy(), outbound(), Notifiers::default())
+                    .await
+                    .unwrap();
+            let first = monitor
                 .record("app", beat(unix_now(), Status::Up, Some(12)))
                 .await
                 .unwrap();
+            assert_eq!(first, None, "an app's first heartbeat has no predecessor");
+            let second = monitor
+                .record("app", beat(unix_now(), Status::Down, None))
+                .await
+                .unwrap();
+            assert_eq!(second, Some(Status::Up));
         }
-        let monitor = UptimeMonitor::load(dir.path(), policy, outbound())
+        let monitor = UptimeMonitor::load(dir.path(), policy(), outbound(), Notifiers::default())
             .await
             .unwrap();
         assert_eq!(
@@ -617,10 +878,55 @@ mod tests {
                 .await
                 .beats
                 .len(),
-            1
+            2
         );
         monitor.forget("app").await.unwrap();
         assert!(!dir.path().join("app.jsonl").exists());
         assert!(monitor.detail("app", RETENTION).await.beats.is_empty());
+    }
+
+    #[test]
+    fn downsampling_keeps_the_worst_status_and_averages_latency() {
+        // 1000 one-second beats, one outage at t=500: 10 buckets of 100 beats each.
+        let history = History(
+            (0..1000)
+                .map(|t| {
+                    if t == 500 {
+                        beat(t, Status::Down, None)
+                    } else {
+                        beat(
+                            t,
+                            Status::Up,
+                            Some(100 + u32::try_from(t % 2).unwrap() * 100),
+                        )
+                    }
+                })
+                .collect(),
+        );
+        let points = history.downsampled(0, 1000, 10);
+        assert_eq!(points.len(), 10);
+        assert_eq!(
+            points.iter().filter(|b| b.status == Status::Down).count(),
+            1
+        );
+        assert_eq!(
+            points[5].status,
+            Status::Down,
+            "the outage survives aggregation"
+        );
+        assert_eq!(points[0].latency_ms, Some(150));
+        // Few beats: returned as-is.
+        assert_eq!(history.downsampled(990, 1000, 600).len(), 10);
+    }
+
+    #[tokio::test]
+    async fn retries_are_skipped_when_the_first_probe_is_final() {
+        // A URL outside the policy fails instantly; with retries = 0 there's no sleep and
+        // no "(N intentos)" suffix.
+        let result = target("http://127.0.0.1:1/")
+            .probe_confirmed(&outbound(), 0)
+            .await;
+        assert_eq!(result.beat.status, Status::Down);
+        assert!(!result.beat.message.contains("intentos"));
     }
 }

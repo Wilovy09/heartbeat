@@ -24,13 +24,10 @@ pub async fn get_logs(
     path: web::Path<String>,
     query: web::Query<LogsQuery>,
 ) -> HttpResponse {
-    let token = match auth::session_token(&req) {
-        Some(t) => t,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "No hay sesión activa"
-            }));
-        }
+    let Some(token) = auth::session_token(&req) else {
+        return HttpResponse::Unauthorized().json(serde_json::json!({
+            "error": "No hay sesión activa"
+        }));
     };
 
     let slug = path.into_inner();
@@ -55,7 +52,11 @@ pub async fn get_logs(
     // The user's own token still goes along (harmless, and it's what authorizes a
     // registered app that hasn't opted into the shared-key path) -- ADMIN_LOGS_KEY, when
     // configured, is what actually authorizes across environments. See Config::admin_logs_key.
-    let mut req_builder = outbound.client().get(logs_url).bearer_auth(&token);
+    let mut req_builder = outbound.client().get(logs_url);
+    // Empty in AuthMode::Password: there's no upstream JWT, only ADMIN_LOGS_KEY.
+    if !token.is_empty() {
+        req_builder = req_builder.bearer_auth(&token);
+    }
     if let Some(key) = &cfg.admin_logs_key {
         req_builder = req_builder.header("X-Admin-Logs-Key", key);
     }

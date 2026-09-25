@@ -30,6 +30,17 @@ pub enum OutboundError {
     Client(#[from] reqwest::Error),
 }
 
+impl crate::i18n::Localize for OutboundError {
+    fn localize(&self, i18n: &crate::i18n::I18n) -> String {
+        match self {
+            Self::InvalidUrl(e) => i18n.text("err.url_parse", &[("error", &e.to_string())]),
+            Self::NotHttps => i18n.text("err.not_https", &[]),
+            Self::HostNotAllowed(host) => i18n.text("err.host_not_allowed", &[("host", host)]),
+            Self::Client(e) => i18n.text("err.internal", &[("error", &e.to_string())]),
+        }
+    }
+}
+
 /// One `ALLOWED_HOSTS` entry: `api.example.com` (exact) or `*.example.com` (any subdomain,
 /// not the bare domain itself).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +135,8 @@ impl Outbound {
         let client = Client::builder()
             .dns_resolver(Arc::new(PublicOnlyResolver))
             .redirect(reqwest::redirect::Policy::none())
+            // Lets uptime probes read the peer certificate's expiry.
+            .tls_info(true)
             .timeout(DEFAULT_TIMEOUT)
             .user_agent("heartbeat")
             .build()?;
