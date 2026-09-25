@@ -67,6 +67,12 @@ Un solo binario de Rust, sin base de datos: todo se guarda en archivos bajo `dat
   `{mentions}`, envía una prueba de cada una y consulta la configuración actual (los
   secretos solo aparecen como configurados o no). Los textos editados se guardan en
   `ALERT_TEMPLATES_FILE` y aplican sin reiniciar; los de por defecto siguen `APP_LANG`.
+- **Frontends y SPAs**: la URL de logs es opcional, así que una app puede ser solo de
+  monitoreo. Para SPAs (Vue, React…), "Verificar bundles JS/CSS" lee las referencias
+  `<script>`/`<link rel="stylesheet">` de la página y confirma que cada una cargue como
+  JS/CSS de verdad. El servidor de una SPA responde 200 con el mismo `index.html` en
+  todas las rutas (muchas veces incluso para un bundle que no existe), así que un deploy
+  incompleto que deja la página en blanco se vería como arriba.
 - **Pausa y mantenimiento**: una app pausada no se consulta, y ese tiempo no cuenta para
   su uptime.
 - **Edición**: nombre, URLs, umbral y palabra clave se cambian sin perder el historial ni
@@ -128,7 +134,7 @@ Lo que tus apps deben exponer para registrarse.
 **Health** (`GET`, sin autenticación): cualquier 2xx cuenta como arriba. Si configuras una
 palabra clave, el cuerpo debe contenerla (se leen hasta 256 KB).
 
-**Logs** (`GET`): Heartbeat manda:
+**Logs** (`GET`, opcional: las apps sin él son solo de monitoreo): Heartbeat manda:
 
 - `stream=out|error|both` y `lines=N` (query).
 - `Authorization: Bearer <access_token del admin>` (modo `upstream`).

@@ -37,9 +37,15 @@ pub async fn get_logs(
         }));
     };
 
+    let Some(logs_url) = app.logs_url.as_deref() else {
+        return HttpResponse::NotFound().json(serde_json::json!({
+            "error": format!("'{}' es una app solo de monitoreo: no tiene endpoint de logs", app.name)
+        }));
+    };
+
     // Checked before anything is sent: this request carries the admin's JWT and
     // ADMIN_LOGS_KEY, which must only ever reach allowlisted https hosts.
-    let logs_url = match outbound.check(&app.logs_url) {
+    let logs_url = match outbound.check(logs_url) {
         Ok(url) => url,
         Err(e) => {
             tracing::warn!(app = %slug, error = %e, "logs proxy: refused non-allowlisted url");

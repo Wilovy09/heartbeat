@@ -66,6 +66,12 @@ A single Rust binary, no database: everything is stored in files under `data/`.
   each, and review the current configuration (secrets shown only as set / not set). Edited
   texts are stored in `ALERT_TEMPLATES_FILE` and apply without a restart; the defaults
   follow `APP_LANG`.
+- **Frontends and single-page apps**: the logs URL is optional, so an app can be
+  monitor-only. For SPAs (Vue, React…), "Verify JS/CSS bundles" reads the page's
+  `<script>`/`<link rel="stylesheet">` references and checks each one really loads as
+  JS/CSS. An SPA server answers 200 with the same `index.html` for every path -- often
+  even for a missing bundle -- so an incomplete deploy that leaves users a blank page
+  would otherwise look up.
 - **Pause and maintenance**: a paused app isn't checked, and that time doesn't count
   against its uptime.
 - **Editing**: name, URLs, threshold and keyword can change without losing the history or
@@ -126,7 +132,7 @@ What your apps must expose to be registered.
 **Health** (`GET`, no authentication): any 2xx counts as up. If you set a keyword, the
 body must contain it (up to 256 KB is read).
 
-**Logs** (`GET`): Heartbeat sends:
+**Logs** (`GET`, optional -- apps without one are monitor-only): Heartbeat sends:
 
 - `stream=out|error|both` and `lines=N` (query).
 - `Authorization: Bearer <admin's access_token>` (`upstream` mode).

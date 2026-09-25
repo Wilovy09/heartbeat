@@ -61,6 +61,12 @@ pub async fn show_app(
     let Some(app) = registry.find(&slug).await else {
         return HttpResponse::NotFound().body(format!("App '{slug}' no está registrada"));
     };
+    // Monitor-only app: nothing to show here, its dashboard page is the useful view.
+    if app.logs_url.is_none() {
+        return HttpResponse::Found()
+            .append_header(("Location", format!("/#{slug}")))
+            .finish();
+    }
 
     let mut ctx = Context::new();
     ctx.insert("active", "logs");

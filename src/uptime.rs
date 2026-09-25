@@ -17,6 +17,7 @@ use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 
 use crate::alerts::{Alerter, StatusChange};
+use crate::bundles;
 use crate::outbound::Outbound;
 use crate::registry::{AppRegistry, RegisteredApp};
 
@@ -114,6 +115,8 @@ struct ProbeTarget {
     degraded_after_ms: u32,
     expect_body: Option<String>,
     cert_warn_days: u32,
+    /// Also verify the page's JS/CSS bundles (single-page apps, see `bundles`).
+    check_assets: bool,
 }
 
 /// Outcome of one probe: the heartbeat, plus the TLS certificate's expiry when the
@@ -213,15 +216,29 @@ impl ProbeTarget {
             .and_then(reqwest::tls::TlsInfo::peer_certificate)
             .and_then(cert_not_after);
         let code = resp.status();
+        let page_url = resp.url().clone();
         let mut status = Status::classify(code.is_success(), latency_ms, self.degraded_after_ms);
         let mut message = format!("HTTP {code}");
 
-        if status != Status::Down
-            && let Some(expected) = &self.expect_body
-            && !read_body_prefix(resp).await.contains(expected.as_str())
+        // The body is only read when something needs it, and only once.
+        let body = if status != Status::Down && (self.expect_body.is_some() || self.check_assets) {
+            Some(read_body_prefix(resp).await)
+        } else {
+            None
+        };
+        if let (Some(expected), Some(body)) = (&self.expect_body, &body)
+            && !body.contains(expected.as_str())
         {
             status = Status::Down;
             message = format!("La respuesta no contiene «{expected}»");
+        }
+        if status != Status::Down
+            && self.check_assets
+            && let Some(body) = &body
+            && let Some(why) = bundles::verify(outbound, &bundles::extract(body, &page_url)).await
+        {
+            status = Status::Down;
+            message = why;
         }
         if status == Status::Up
             && let Some(expires) = cert_expires_at
@@ -337,6 +354,7 @@ impl History {
             slug: app.slug.clone(),
             name: app.name.clone(),
             health_url: app.health_url.clone(),
+            has_logs: app.logs_url.is_some(),
             paused: app.paused,
             status: last.map(|b| b.status),
             latency_ms: last.and_then(|b| b.latency_ms),
@@ -408,6 +426,8 @@ pub struct MonitorSummary {
     pub slug: String,
     pub name: String,
     pub health_url: Option<String>,
+    /// `false` for monitor-only apps (no logs endpoint).
+    pub has_logs: bool,
     /// Paused apps aren't probed; `status` is then the last reading before the pause.
     pub paused: bool,
     /// Status of the latest heartbeat; `None` = no health URL or not checked yet.
@@ -566,6 +586,7 @@ impl UptimeMonitor {
                     .degraded_after_ms
                     .unwrap_or(self.policy.degraded_after_ms),
                 expect_body: app.expect_body.clone(),
+                check_assets: app.check_assets,
                 cert_warn_days: self.policy.cert_warn_days,
             };
             let outbound = self.outbound.clone();
@@ -773,6 +794,7 @@ mod tests {
             degraded_after_ms: 1000,
             expect_body: None,
             cert_warn_days: 14,
+            check_assets: false,
         }
     }
 

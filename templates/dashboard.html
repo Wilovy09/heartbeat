@@ -112,7 +112,7 @@
           <div class="head-actions">
             <a class="btn ghost" href="#">{{ t(k="dash.back") }}</a>
             <a class="btn ghost" :href="'/apps#app-' + current().slug">{{ t(k="dash.edit") }}</a>
-            <a class="btn secondary" :href="'/logs/' + current().slug">{{ t(k="dash.view_logs") }}</a>
+            <a class="btn secondary" x-show="current().has_logs" :href="'/logs/' + current().slug">{{ t(k="dash.view_logs") }}</a>
           </div>
         </header>
 

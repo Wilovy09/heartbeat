@@ -24,6 +24,9 @@ pub struct AppForm {
     degraded_after_ms: String,
     #[serde(default)]
     expect_body: String,
+    /// Checkbox: present ("on") when ticked, absent otherwise.
+    #[serde(default)]
+    check_assets: Option<String>,
 }
 
 impl AppForm {
@@ -41,16 +44,21 @@ impl AppForm {
             health_url: self.health_url.clone(),
             degraded_after_ms,
             expect_body: Some(self.expect_body.clone()),
+            check_assets: self.check_assets.is_some(),
         })
     }
 
-    /// Both URLs must pass the outbound policy before they're ever stored.
+    /// Both URLs must pass the outbound policy before they're ever stored (a blank logs
+    /// URL is fine: monitor-only app).
     fn check_urls(&self, outbound: &Outbound, i18n: &I18n) -> Result<(), String> {
         let fields = [
             ("err.label_logs", &self.logs_url),
             ("err.label_health", &self.health_url),
         ];
         for (label_key, url) in fields {
+            if label_key == "err.label_logs" && url.trim().is_empty() {
+                continue;
+            }
             outbound.check(url).map_err(|e| {
                 let label = i18n.text(label_key, &[]);
                 i18n.text(

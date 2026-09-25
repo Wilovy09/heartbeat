@@ -19,8 +19,9 @@
       <input id="name" name="name" placeholder="Billing API (staging)" required value="{% if register_values %}{{ register_values.name }}{% endif %}">
     </div>
     <div class="field">
-      <label for="logs_url">{{ t(k="apps.logs_url") }}</label>
-      <input id="logs_url" name="logs_url" type="url" class="mono-input" placeholder="https://api.example.com/admin/logs" required value="{% if register_values %}{{ register_values.logs_url }}{% endif %}">
+      <label for="logs_url">{{ t(k="apps.logs_url") }} <span class="optional">· {{ t(k="apps.logs_optional") }}</span></label>
+      <input id="logs_url" name="logs_url" type="url" class="mono-input" placeholder="https://api.example.com/admin/logs" value="{% if register_values %}{{ register_values.logs_url }}{% endif %}">
+      <p class="hint">{{ t(k="apps.logs_empty_hint") }}</p>
       <p class="hint">{{ t(k="apps.logs_hint_a") }} <span class="mono">/admin/logs</span> {{ t(k="apps.logs_hint_b") }} <a href="https://docs.rs/tracing-subscriber/latest/tracing_subscriber/fmt/format/struct.Json.html" target="_blank" rel="noopener noreferrer">JSON</a>.</p>
     </div>
     <div class="field">
@@ -28,7 +29,7 @@
       <input id="health_url" name="health_url" type="url" class="mono-input" placeholder="https://api.example.com/health" required value="{% if register_values %}{{ register_values.health_url }}{% endif %}">
       <p class="hint">{{ t(k="apps.health_hint", secs=uptime_interval_secs, ms=uptime_degraded_ms) }}</p>
     </div>
-    <details class="advanced"{% if register_values and (register_values.degraded_after_ms or register_values.expect_body) %} open{% endif %}>
+    <details class="advanced"{% if register_values and (register_values.degraded_after_ms or register_values.expect_body or register_values.check_assets) %} open{% endif %}>
       <summary>{{ t(k="apps.advanced") }}</summary>
       <div class="field">
         <label for="degraded_after_ms">{{ t(k="apps.threshold_long") }}</label>
@@ -38,6 +39,10 @@
         <label for="expect_body">{{ t(k="apps.keyword_long") }}</label>
         <input id="expect_body" name="expect_body" class="mono-input" placeholder="&quot;status&quot;:&quot;ok&quot;" value="{% if register_values %}{{ register_values.expect_body }}{% endif %}">
         <p class="hint">{{ t(k="apps.keyword_hint") }}</p>
+      </div>
+      <div class="field">
+        <label class="check"><input type="checkbox" name="check_assets"{% if register_values and register_values.check_assets %} checked{% endif %}> {{ t(k="apps.check_assets") }}</label>
+        <p class="hint">{{ t(k="apps.check_assets_hint") }}</p>
       </div>
     </details>
     <p class="rule">{{ t(k="apps.rule_a") }} <span class="mono">https://</span> {{ t(k="apps.rule_b") }} <span class="mono">{{ allowed_hosts }}</span></p>
@@ -76,7 +81,7 @@
 
       <dl class="entry-urls">
         <dt>{{ t(k="apps.dt_logs") }}</dt>
-        <dd class="mono">{{ app.logs_url }}</dd>
+        {% if app.logs_url %}<dd class="mono">{{ app.logs_url }}</dd>{% else %}<dd class="entry-muted">{{ t(k="apps.monitor_only") }}</dd>{% endif %}
         <dt>{{ t(k="apps.dt_health") }}</dt>
         {% if app.health_url %}
         <dd class="mono">{{ app.health_url }}</dd>
@@ -85,6 +90,7 @@
         {% endif %}
         {% if app.degraded_after_ms %}<dt>{{ t(k="apps.dt_threshold") }}</dt><dd class="mono">{{ app.degraded_after_ms }} ms</dd>{% endif %}
         {% if app.expect_body %}<dt>{{ t(k="apps.dt_keyword") }}</dt><dd class="mono">{{ app.expect_body }}</dd>{% endif %}
+        {% if app.check_assets %}<dt>{{ t(k="apps.dt_bundles") }}</dt><dd class="entry-muted">{{ t(k="apps.bundles_checked") }}</dd>{% endif %}
       </dl>
 
       {% set editing = edit_slug == app.slug %}
@@ -97,8 +103,8 @@
             <input id="name-{{ app.slug }}" name="name" required value="{% if editing %}{{ edit_values.name }}{% else %}{{ app.name }}{% endif %}">
           </div>
           <div class="field">
-            <label for="logs-{{ app.slug }}">{{ t(k="apps.logs_url") }}</label>
-            <input id="logs-{{ app.slug }}" name="logs_url" type="url" class="mono-input" required value="{% if editing %}{{ edit_values.logs_url }}{% else %}{{ app.logs_url }}{% endif %}">
+            <label for="logs-{{ app.slug }}">{{ t(k="apps.logs_url") }} <span class="optional">· {{ t(k="apps.logs_optional") }}</span></label>
+            <input id="logs-{{ app.slug }}" name="logs_url" type="url" class="mono-input" value="{% if editing %}{{ edit_values.logs_url }}{% elif app.logs_url %}{{ app.logs_url }}{% endif %}">
           </div>
           <div class="field">
             <label for="health-{{ app.slug }}">{{ t(k="apps.health_url") }}</label>
@@ -114,6 +120,7 @@
               <input id="expect-{{ app.slug }}" name="expect_body" class="mono-input" placeholder="{{ t(k="apps.optional") }}" value="{% if editing %}{{ edit_values.expect_body }}{% elif app.expect_body %}{{ app.expect_body }}{% endif %}">
             </div>
           </div>
+          <label class="check"><input type="checkbox" name="check_assets"{% if editing %}{% if edit_values.check_assets %} checked{% endif %}{% elif app.check_assets %} checked{% endif %}> {{ t(k="apps.check_assets") }}</label>
           <p class="hint">{{ t(k="apps.edit_hint") }}</p>
           <div class="edit-actions">
             <button class="btn" type="submit">{{ t(k="apps.save") }}</button>
@@ -184,6 +191,9 @@
   .rule { margin: 0; padding: 10px 12px; border-radius: 6px; background: var(--well); border: 1px solid var(--graticule); font-size: 12px; color: var(--ink-2); }
   .rule .mono { color: var(--ink); }
   .intake-submit { height: 36px; }
+  .optional { text-transform: none; letter-spacing: 0; color: var(--ink-4); }
+  .check { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; font-weight: 500; letter-spacing: 0; text-transform: none; color: var(--ink); cursor: pointer; }
+  .entry-muted { color: var(--ink-3) !important; font-family: var(--font-sans); }
 
   /* Entries */
   .entries { display: flex; flex-direction: column; gap: 12px; }

@@ -3,6 +3,7 @@ mod alerts;
 #[cfg(test)]
 mod app_tests;
 mod auth;
+mod bundles;
 mod config;
 mod i18n;
 mod outbound;

@@ -14,7 +14,7 @@
 {% else %}
 <div class="bay source-list" x-data="uptimeDashboard()" x-init="init()">
   {% for app in apps %}
-  <a class="source" href="/logs/{{ app.slug }}">
+  {% if app.logs_url %}<a class="source" href="/logs/{{ app.slug }}">{% else %}<a class="source source-off" href="/#{{ app.slug }}">{% endif %}
     <span class="vital" :class="'st-' + stateOf(monitorFor('{{ app.slug }}'))"></span>
     <span class="source-id">
       <span class="source-name">{{ app.name }}</span>
@@ -26,7 +26,7 @@
       </template>
     </span>
     <span class="source-pct mono" x-text="fmtPct(monitorFor('{{ app.slug }}')?.uptime_24h)"></span>
-    <span class="source-go">{{ t(k="logs.open") }} <span aria-hidden="true">→</span></span>
+    {% if app.logs_url %}<span class="source-go">{{ t(k="logs.open") }} <span aria-hidden="true">→</span></span>{% else %}<span class="source-go source-na">{{ t(k="logs.monitor_only") }}</span>{% endif %}
   </a>
   {% endfor %}
 </div>
@@ -47,6 +47,8 @@
   .source-pct { font-size: 12px; color: var(--ink-2); text-align: right; }
   .source-go { font-size: 13px; color: var(--ink-3); white-space: nowrap; transition: color 120ms; }
   .source:hover .source-go { color: var(--ink); }
+  .source-off .source-name { color: var(--ink-2); }
+  .source-na, .source:hover .source-na { color: var(--ink-4); }
   @media (max-width: 720px) {
     .source { grid-template-columns: 8px minmax(0, 1fr) auto; row-gap: 10px; }
     .source-beats { grid-column: 2 / -1; grid-row: 2; }

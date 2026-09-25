@@ -70,7 +70,9 @@ pub struct RegisteredApp {
     /// it by (`/api/apps/{slug}/logs`), since `name` itself may contain spaces/accents.
     pub slug: String,
     pub name: String,
-    pub logs_url: String,
+    /// `/admin/logs`-shaped endpoint; `None` = a monitor-only app (e.g. a frontend).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logs_url: Option<String>,
     /// Endpoint an uptime check can hit. `None` only for apps registered before this field
     /// existed -- `add` requires it for every new registration.
     #[serde(default)]
@@ -92,6 +94,10 @@ pub struct RegisteredApp {
     /// Text the health response body must contain to count as up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expect_body: Option<String>,
+    /// For single-page apps: also check that every JS/CSS bundle the health page
+    /// references actually loads as JS/CSS (see `uptime::check_assets`).
+    #[serde(default)]
+    pub check_assets: bool,
 }
 
 /// What an admin sets when registering or editing an app. The slug and embed token are
@@ -99,33 +105,48 @@ pub struct RegisteredApp {
 #[derive(Debug, Clone, Default)]
 pub struct AppSettings {
     pub name: String,
+    /// Blank = monitor-only app.
     pub logs_url: String,
     pub health_url: String,
     pub degraded_after_ms: Option<u32>,
     pub expect_body: Option<String>,
+    pub check_assets: bool,
+}
+
+/// `AppSettings` after `normalized`: trimmed, validated, blanks turned into `None`.
+struct ValidSettings {
+    name: String,
+    logs_url: Option<String>,
+    health_url: String,
+    degraded_after_ms: Option<u32>,
+    expect_body: Option<String>,
+    check_assets: bool,
 }
 
 impl AppSettings {
     /// Trims every field, turns blank optionals into `None`, and validates.
-    fn normalized(self) -> Result<Self> {
+    fn normalized(self) -> Result<ValidSettings> {
         let name = self.name.trim().to_string();
         if name.is_empty() {
             return Err(RegistryError::EmptyName);
         }
-        let logs_url = self.logs_url.trim().to_string();
+        let logs_url = Some(self.logs_url.trim().to_string()).filter(|u| !u.is_empty());
         let health_url = self.health_url.trim().to_string();
-        validate_url(&logs_url, "logs")?;
+        if let Some(url) = &logs_url {
+            validate_url(url, "logs")?;
+        }
         validate_url(&health_url, "health")?;
         let expect_body = self
             .expect_body
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        Ok(Self {
+        Ok(ValidSettings {
             name,
             logs_url,
             health_url,
             degraded_after_ms: self.degraded_after_ms.filter(|&ms| ms > 0),
             expect_body,
+            check_assets: self.check_assets,
         })
     }
 }
@@ -263,6 +284,7 @@ impl AppRegistry {
             public: false,
             degraded_after_ms: settings.degraded_after_ms,
             expect_body: settings.expect_body,
+            check_assets: settings.check_assets,
         });
         self.persist(&apps).await?;
         Ok(slug)
@@ -292,6 +314,7 @@ impl AppRegistry {
             app.health_url = Some(settings.health_url);
             app.degraded_after_ms = settings.degraded_after_ms;
             app.expect_body = settings.expect_body;
+            app.check_assets = settings.check_assets;
             Ok(())
         })
         .await
@@ -412,7 +435,7 @@ mod tests {
         assert_eq!(slug, "billing-api");
         let found = registry.find(&slug).await.unwrap();
         assert_eq!(found.name, "Billing API");
-        assert_eq!(found.logs_url, "https://x/logs");
+        assert_eq!(found.logs_url.as_deref(), Some("https://x/logs"));
         assert_eq!(found.health_url.as_deref(), Some("https://x/health"));
     }
 
@@ -560,5 +583,25 @@ mod tests {
         assert!(registry.list().await.is_empty());
         let reloaded = AppRegistry::load(&file).await.unwrap();
         assert!(reloaded.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn monitor_only_apps_have_no_logs_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("apps.json");
+        let registry = AppRegistry::load(&file).await.unwrap();
+        let mut frontend = settings("Frontend", "   ", "https://x/");
+        frontend.check_assets = true;
+        let slug = registry.add(frontend).await.unwrap();
+        let app = AppRegistry::load(&file)
+            .await
+            .unwrap()
+            .find(&slug)
+            .await
+            .unwrap();
+        assert_eq!(app.logs_url, None);
+        assert!(app.check_assets);
+        // The field is left out of the file entirely.
+        assert!(!std::fs::read_to_string(&file).unwrap().contains("logs_url"));
     }
 }
