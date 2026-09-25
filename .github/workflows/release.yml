@@ -1,0 +1,32 @@
+name: Release
+
+# Push a tag like v1.2.0 to build a Linux x86_64 release and attach it to a GitHub release.
+# Servers install it with deploy/update.sh.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04 # older glibc: the binary runs on this and every newer Ubuntu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked
+      - name: Package
+        run: |
+          name="heartbeat-${GITHUB_REF_NAME}-x86_64-linux"
+          mkdir -p "dist/$name/target/release"
+          cp target/release/heartbeat "dist/$name/target/release/"
+          cp -r templates static libs deploy .env.example README.md "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          sha256sum "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.sha256 --generate-notes
