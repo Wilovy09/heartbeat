@@ -6,6 +6,7 @@
 // Optional attributes:
 //   label="Mi API"        text shown instead of the app's name
 //   theme="light"         default dark
+//   lang="en"             es | en (default: the Heartbeat server's APP_LANG)
 //   bars="N"              max bars (by default as many as fit the width, up to 100)
 //   refresh="30"          seconds between updates (min 10)
 //   color-up, color-degraded, color-down, color-empty, color-bg, color-text, color-border
@@ -28,7 +29,18 @@
     'color-border': '--hb-border',
   };
   const DATA_ATTRS = ['app', 'token', 'refresh'];
-  const LABELS = { up: 'Up', degraded: 'Degradado', down: 'Down' };
+  const STRINGS = {
+    es: {
+      up: 'Up', degraded: 'Degradado', down: 'Down', paused: 'Pausada', unknown: 'Sin datos',
+      missing: 'Faltan los atributos app y token', invalid: 'App o token inválido',
+      unavailable: 'Estado no disponible', uptime: 'Uptime últimas 24 h',
+    },
+    en: {
+      up: 'Up', degraded: 'Degraded', down: 'Down', paused: 'Paused', unknown: 'No data',
+      missing: 'Missing the app and token attributes', invalid: 'Invalid app or token',
+      unavailable: 'Status unavailable', uptime: 'Uptime, last 24 h',
+    },
+  };
   // Fixed bar size: a wider card shows more history instead of stretching the bars.
   const BAR_W = 6;
   const BAR_GAP = 3;
@@ -44,6 +56,7 @@
     .head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; min-width: 0; }
     .vital { position: relative; flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; background: var(--_empty); }
     .vital.st-down { box-shadow: 0 0 0 3px color-mix(in srgb, var(--_down) 22%, transparent); }
+    .vital.st-paused { background: transparent; box-shadow: inset 0 0 0 1.5px var(--_text); opacity: 0.5; }
     .vital.st-up::after, .vital.st-degraded::after { content: ""; position: absolute; inset: 0; border-radius: 50%; background: inherit; animation: beat 2.4s cubic-bezier(0.23, 1, 0.32, 1) infinite; }
     .vital.st-degraded::after { animation-duration: 3.6s; }
     @keyframes beat { 0% { transform: scale(1); opacity: 0.55; } 45%, 100% { transform: scale(2.6); opacity: 0; } }
@@ -74,14 +87,20 @@
     return v == null ? '—' : `${v.toFixed(v === 100 ? 0 : 2)}%`;
   }
 
-  function beatTitle(b) {
+  function beatTitle(b, strings) {
     const when = new Date(b.at * 1000).toLocaleString();
     const ms = b.latency_ms == null ? '' : ` — ${b.latency_ms} ms`;
-    return `${when} — ${LABELS[b.status]}${ms}`;
+    return `${when} — ${strings[b.status]}${ms}`;
   }
 
   class HeartbeatStatus extends HTMLElement {
-    static observedAttributes = [...DATA_ATTRS, 'label', 'theme', 'bars', ...Object.keys(COLOR_ATTRS)];
+    static observedAttributes = [...DATA_ATTRS, 'label', 'theme', 'bars', 'lang', ...Object.keys(COLOR_ATTRS)];
+
+    // The page's own `lang` attribute wins; otherwise the server's language; else Spanish.
+    get strings() {
+      const lang = this.getAttribute('lang') || this.data?.lang;
+      return STRINGS[lang] || STRINGS.es;
+    }
 
     constructor() {
       super();
@@ -133,18 +152,18 @@
       const app = this.getAttribute('app');
       const token = this.getAttribute('token');
       if (!app || !token) {
-        this.error = 'Faltan los atributos app y token';
+        this.error = this.strings.missing;
         this.render();
         return;
       }
       try {
         const url = `${ORIGIN}/embed/${encodeURIComponent(app)}?token=${encodeURIComponent(token)}`;
         const resp = await fetch(url);
-        if (!resp.ok) throw new Error(resp.status === 404 ? 'App o token inválido' : `HTTP ${resp.status}`);
+        if (!resp.ok) throw new Error(resp.status === 404 ? this.strings.invalid : `HTTP ${resp.status}`);
         this.data = await resp.json();
         this.error = '';
       } catch (e) {
-        this.error = `Estado no disponible (${e.message})`;
+        this.error = `${this.strings.unavailable} (${e.message})`;
       }
       this.render();
     }
@@ -167,21 +186,23 @@
       const head = document.createElement('div');
       head.className = 'head';
       const vital = document.createElement('span');
-      vital.className = d?.status ? `vital st-${d.status}` : 'vital';
+      // Paused apps show a hollow, still dot: the last reading is stale on purpose.
+      const state = d?.paused ? 'paused' : d?.status;
+      vital.className = state ? `vital st-${state}` : 'vital';
       const name = document.createElement('span');
       name.className = 'name';
       // textContent, never innerHTML: the name/label is rendered on third-party pages.
       name.textContent = this.getAttribute('label') || d?.name || this.getAttribute('app') || '';
       const reading = document.createElement('span');
       reading.className = 'reading';
-      const state = document.createElement('span');
-      state.className = d?.status ? `state st-${d.status}` : 'state';
-      state.textContent = d?.status ? LABELS[d.status] : 'Sin datos';
+      const stateText = document.createElement('span');
+      stateText.className = state && state !== 'paused' ? `state st-${state}` : 'state';
+      stateText.textContent = this.strings[state || 'unknown'];
       const pct = document.createElement('span');
       pct.className = 'pct';
       pct.textContent = fmtPct(d?.uptime_24h);
-      pct.title = 'Uptime últimas 24 h';
-      reading.append(state, pct);
+      pct.title = this.strings.uptime;
+      reading.append(stateText, pct);
       head.append(vital, name, reading);
       card.append(head);
 
@@ -192,7 +213,7 @@
         const b = recent[i - (slots - recent.length)];
         const bar = document.createElement('span');
         bar.className = b ? `bar st-${b.status}` : 'bar';
-        if (b) bar.title = beatTitle(b);
+        if (b) bar.title = beatTitle(b, this.strings);
         bars.append(bar);
       }
       card.append(bars);

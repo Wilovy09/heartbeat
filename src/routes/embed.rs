@@ -7,12 +7,13 @@ use actix_web::{HttpResponse, web};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    i18n::I18n,
     registry::AppRegistry,
     uptime::{Heartbeat, MonitorSummary, Status, UptimeMonitor},
 };
 
 #[derive(Serialize)]
-struct EmbedBeat {
+pub struct EmbedBeat {
     at: u64,
     status: Status,
     latency_ms: Option<u32>,
@@ -28,18 +29,31 @@ impl From<Heartbeat> for EmbedBeat {
     }
 }
 
+/// The public projection of an app's status -- also what `/status` renders. Only what the
+/// widgets draw: never the health URL or the check messages.
 #[derive(Serialize)]
-struct EmbedStatus {
-    name: String,
-    status: Option<Status>,
-    uptime_24h: Option<f64>,
-    recent: Vec<EmbedBeat>,
+pub struct EmbedStatus {
+    pub name: String,
+    pub paused: bool,
+    pub status: Option<Status>,
+    pub uptime_24h: Option<f64>,
+    pub recent: Vec<EmbedBeat>,
+}
+
+/// What the endpoint returns: the status plus the server's UI language, which the widget
+/// uses unless the embedding page sets its own `lang` attribute.
+#[derive(Serialize)]
+struct EmbedResponse {
+    #[serde(flatten)]
+    status: EmbedStatus,
+    lang: &'static str,
 }
 
 impl From<MonitorSummary> for EmbedStatus {
     fn from(summary: MonitorSummary) -> Self {
         Self {
             name: summary.name,
+            paused: summary.paused,
             status: summary.status,
             uptime_24h: summary.uptime_24h,
             recent: summary.recent.into_iter().map(EmbedBeat::from).collect(),
@@ -57,6 +71,7 @@ pub struct EmbedQuery {
 pub async fn status(
     registry: web::Data<AppRegistry>,
     monitor: web::Data<UptimeMonitor>,
+    i18n: web::Data<I18n>,
     path: web::Path<String>,
     query: web::Query<EmbedQuery>,
 ) -> HttpResponse {
@@ -72,5 +87,8 @@ pub async fn status(
     HttpResponse::Ok()
         .insert_header(("Access-Control-Allow-Origin", "*"))
         .insert_header(("Cache-Control", "public, max-age=15"))
-        .json(EmbedStatus::from(monitor.summary(&app).await))
+        .json(EmbedResponse {
+            status: EmbedStatus::from(monitor.summary(&app).await),
+            lang: i18n.lang().code(),
+        })
 }

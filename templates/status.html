@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}{{ t(k="status.title") }} — Heartbeat{% endblock %}
+{% block topbar %}
+<span class="brand"><img src="/static/icon.svg" alt=""><span>{{ t(k="status.header") }}</span></span>
+{% endblock %}
+{% block content %}
+<div class="status-page">
+  <header class="verdict">
+    <span class="vital vital-lg st-{{ verdict }}"></span>
+    <h1 class="verdict-title">
+      {{ t(k="status.verdict_" ~ verdict) }}
+    </h1>
+  </header>
+
+  {% if rows | length == 0 %}
+  <div class="bay empty">{{ t(k="status.empty") }}</div>
+  {% else %}
+  <div class="bay service-list">
+    {% for row in rows %}
+    <div class="service">
+      <div class="service-head">
+        <span class="vital st-{{ row.state }}"></span>
+        <span class="service-name">{{ row.name }}</span>
+        <span class="service-state st-text-{{ row.state }}">
+          {{ t(k="status.state_" ~ row.state) }}
+        </span>
+        <span class="service-pct mono" title="{{ t(k="status.uptime_title") }}">{{ row.uptime_24h }}</span>
+      </div>
+      <div class="beats service-beats" aria-hidden="true">
+        {% for beat in row.strip %}<span class="beat{% if beat %} st-{{ beat }}{% endif %}"></span>{% endfor %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+  <p class="status-foot">{{ t(k="status.foot") }}</p>
+</div>
+{% endblock %}
+{% block head %}
+<meta http-equiv="refresh" content="60">
+<style>
+  .status-page { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+  .verdict { display: flex; align-items: center; gap: 16px; padding: 16px 0 4px; }
+  .vital-lg { width: 14px; height: 14px; }
+  .verdict-title { font-size: 28px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.15; }
+  .service-list { padding: 0; }
+  .service { padding: 16px 20px; }
+  .service + .service { border-top: 1px solid var(--graticule-soft); }
+  .service-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .service-name { flex: 1; min-width: 0; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .service-state { font-size: 12px; font-weight: 500; }
+  .service-pct { font-size: 12px; color: var(--ink-3); }
+  .service-beats .beat { height: 24px; }
+  .status-foot { margin: 0; text-align: center; font-size: 12px; color: var(--ink-3); }
+  /* 60 bars don't fit a phone: keep the latest 30. */
+  @media (max-width: 560px) { .service-beats .beat:nth-child(-n + 30) { display: none; } .verdict-title { font-size: 22px; } }
+</style>
+{% endblock %}
