@@ -11,6 +11,36 @@ con una URL de health y una de logs, y desde un solo lugar:
 
 Un solo binario de Rust, sin base de datos: todo se guarda en archivos bajo `data/`.
 
+## Capturas
+
+### Dashboard
+
+<details open>
+  <summary>Ver captura</summary>
+<img src=".github/public/dashboard_demo.png" alt="Dashboard: estado de todas las apps, veredicto general y eventos recientes"/>
+</details>
+
+### Logs
+
+<details>
+  <summary>Ver captura</summary>
+<img src=".github/public/logs_demo.png" alt="Logs: lista de apps con su tira de checks para abrir su stdout y stderr"/>
+</details>
+
+### Apps
+
+<details>
+  <summary>Ver captura</summary>
+<img src=".github/public/apps_demo.png" alt="Apps: registro, edición y embed de cada app"/>
+</details>
+
+### Embebido
+
+<details>
+  <summary>Ver captura</summary>
+<img src=".github/public/embebed_demo.png" alt="Componente embebible con el estado y los últimos checks de una app"/>
+</details>
+
 ## Funciones
 
 - **Semáforo por app**, cada `UPTIME_INTERVAL_SECS` (60 por defecto):
