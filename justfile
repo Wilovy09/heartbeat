@@ -1,7 +1,16 @@
+# Local demo: fake data regenerated every run (scripts/demo_data.py) and a local admin,
+# no login server needed. Sign in at http://localhost:8090 as demo@example.com / demo.
 demo:
-    APPS_FILE=./data/demo/apps.json UPTIME_DIR=./data/demo/uptime COOKIE_SECURE=false \
-    LOGIN_URL="${LOGIN_URL:-http://127.0.0.1:8097/login}" \
-    ALLOWED_HOSTS="${ALLOWED_HOSTS:?set ALLOWED_HOSTS, e.g. *.example.com}" cargo run
+    #!/usr/bin/env bash
+    set -euo pipefail
+    python3 scripts/demo_data.py
+    cargo build -q
+    hash="$(echo demo | ./target/debug/heartbeat hash-password 2>/dev/null)"
+    echo "Heartbeat demo: http://localhost:8090  (demo@example.com / demo)"
+    AUTH_MODE=password ADMIN_EMAIL=demo@example.com ADMIN_PASSWORD_HASH="$hash" \
+      ALLOWED_HOSTS="httpbin.org,*.invalid" COOKIE_SECURE=false \
+      APPS_FILE=./data/demo/apps.json UPTIME_DIR=./data/demo/uptime \
+      SESSIONS_FILE=./data/demo/sessions.json ./target/debug/heartbeat
 
 run:
     cargo run

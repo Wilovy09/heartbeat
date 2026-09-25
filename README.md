@@ -147,6 +147,8 @@ Abre `http://localhost:8090`.
 
 Con [`just`](https://github.com/casey/just):
 
+- `just demo`: arranca con datos de ejemplo (una app en cada estado) y un admin local;
+  entra en `http://localhost:8090` con `demo@example.com` / `demo`. Requiere Python 3.
 - `just check`: formato, clippy pedantic y tests, lo mismo que el CI.
 - `just e2e`: smoke test en navegador contra un servidor temporal (requiere Node).
 
