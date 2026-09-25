@@ -25,7 +25,8 @@ jobs:
           cp target/release/heartbeat "dist/$name/target/release/"
           cp -r templates static libs deploy .env.example README.md "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
-          sha256sum "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"
+          # From inside dist/ so the checksum file names the bare file, not "dist/...".
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}

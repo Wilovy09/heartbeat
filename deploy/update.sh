@@ -48,7 +48,12 @@ trap 'rm -rf "$TMP"' EXIT
 echo "Downloading $TAG..."
 curl -fsSL -o "$TMP/$NAME.tar.gz" "$URL"
 curl -fsSL -o "$TMP/$NAME.tar.gz.sha256" "$URL.sha256"
-(cd "$TMP" && sha256sum -c "$NAME.tar.gz.sha256")
+# Compare the hash only: the checksum file's filename column isn't trusted (v0.1.0's
+# carries a "dist/" prefix).
+expected="$(cut -d' ' -f1 "$TMP/$NAME.tar.gz.sha256")"
+actual="$(sha256sum "$TMP/$NAME.tar.gz" | cut -d' ' -f1)"
+[[ -n "$expected" && "$expected" == "$actual" ]] || { echo "Checksum mismatch for $NAME.tar.gz" >&2; exit 1; }
+echo "Checksum OK"
 tar -C "$TMP" -xzf "$TMP/$NAME.tar.gz"
 
 mkdir -p target/release
