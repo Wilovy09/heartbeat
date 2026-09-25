@@ -1,5 +1,7 @@
 # Local demo: fake data regenerated every run (scripts/demo_data.py) and a local admin,
 # no login server needed. Sign in at http://localhost:8090 as demo@example.com / demo.
+# Alerts go to httpbin.org/post (a public echo endpoint), so /settings can ping and send
+# test alerts without a Slack workspace.
 demo:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -10,7 +12,9 @@ demo:
     AUTH_MODE=password ADMIN_EMAIL=demo@example.com ADMIN_PASSWORD_HASH="$hash" \
       ALLOWED_HOSTS="httpbin.org,*.invalid" COOKIE_SECURE=false \
       APPS_FILE=./data/demo/apps.json UPTIME_DIR=./data/demo/uptime \
-      SESSIONS_FILE=./data/demo/sessions.json ./target/debug/heartbeat
+      SESSIONS_FILE=./data/demo/sessions.json ALERT_TEMPLATES_FILE=./data/demo/alert_templates.json \
+      ALERT_WEBHOOK_URLS=https://httpbin.org/post ALERT_MENTIONS="here,U0123DEMO" \
+      PUBLIC_URL=http://localhost:8090 ./target/debug/heartbeat
 
 run:
     cargo run

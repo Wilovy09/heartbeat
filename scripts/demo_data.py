@@ -7,7 +7,7 @@ reserved .invalid TLD never resolves (down).
 Embed test from a different origin, the way a third-party site would load it:
     python3 -m http.server 8100 -d data/demo  ->  http://localhost:8100/embed-test.html
 """
-import json, math, random, secrets, time
+import base64, json, math, random, secrets, time
 from pathlib import Path
 
 random.seed(7)
@@ -102,6 +102,39 @@ for slug, name, health, start, fn in apps:
     beats = series(start, fn)
     (UP_DIR / f"{slug}.jsonl").write_text("".join(json.dumps(b) + "\n" for b in beats))
     registry.append({"slug": slug, "name": name, "logs_url": f"https://httpbin.org/anything/{slug}/logs", "health_url": health, "embed_token": secrets.token_hex(24)})
+    print(f"{slug:20} {len(beats):6} beats")
+
+# 8. Single-page frontends: monitor-only (no logs URL) with the bundle check on. httpbin
+#    serves the "index.html" (/base64/...) and its assets with whatever Content-Type the
+#    URL asks for, so one page's bundles load fine and the other's JS comes back as HTML --
+#    what an incomplete SPA deploy looks like.
+def spa_page(script, stylesheet):
+    html = (f'<!doctype html><html><head><title>Demo SPA</title>'
+            f'<script type="module" src="{script}"></script>'
+            f'<link rel="stylesheet" href="{stylesheet}"></head>'
+            f'<body><div id="app"></div></body></html>')
+    return "https://httpbin.org/base64/" + base64.urlsafe_b64encode(html.encode()).decode()
+
+GOOD_JS = "https://httpbin.org/response-headers?Content-Type=text/javascript"
+GOOD_CSS = "https://httpbin.org/response-headers?Content-Type=text/css"
+BROKEN_JS = "https://httpbin.org/html"   # 200 text/html: the missing-bundle fallback
+
+def frontend(at, ago):
+    return up(at, noise(120))
+
+def frontend_broken(at, ago):
+    if ago < 20 * 60:
+        return down(at, "Bundle roto: /html respondió text/html", noise(110))
+    return up(at, noise(110))
+
+for slug, name, health, fn in [
+    ("demo-frontend", "Demo · Frontend", spa_page(GOOD_JS, GOOD_CSS), frontend),
+    ("demo-frontend-roto", "Demo · Frontend roto", spa_page(BROKEN_JS, GOOD_CSS), frontend_broken),
+]:
+    beats = series(NOW - 3 * DAY, fn)
+    (UP_DIR / f"{slug}.jsonl").write_text("".join(json.dumps(b) + "\n" for b in beats))
+    registry.append({"slug": slug, "name": name, "health_url": health, "check_assets": True,
+                     "expect_body": "Demo SPA", "embed_token": secrets.token_hex(24)})
     print(f"{slug:20} {len(beats):6} beats")
 
 # 7. Legacy entry registered before health URLs existed: never monitored.
