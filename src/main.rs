@@ -18,7 +18,7 @@ use std::time::Duration;
 use tera::Tera;
 use tracing_subscriber::EnvFilter;
 
-use alerts::Alerter;
+use alerts::{AlertSettings, Alerter};
 use auth::SessionStore;
 use config::Config;
 use outbound::Outbound;
@@ -55,11 +55,12 @@ async fn main() -> std::io::Result<()> {
     let outbound = Outbound::new(&cfg.allowed_hosts)
         .unwrap_or_else(|e| panic!("error creando el cliente HTTP: {e}"));
 
-    let alerter = Alerter::new(
-        &cfg.alert_webhook_urls,
-        cfg.alert_on_degraded,
-        cfg.public_url.clone(),
-    )
+    let alerter = Alerter::new(AlertSettings {
+        webhook_urls: cfg.alert_webhook_urls.clone(),
+        on_degraded: cfg.alert_on_degraded,
+        public_url: cfg.public_url.clone(),
+        mentions: cfg.alert_mentions.clone(),
+    })
     .unwrap_or_else(|e| panic!("error creando el cliente de alertas: {e}"));
 
     let monitor = UptimeMonitor::load(
@@ -73,7 +74,7 @@ async fn main() -> std::io::Result<()> {
         },
         outbound.clone(),
         Notifiers {
-            alerter,
+            alerter: alerter.clone(),
             ping_url: cfg.heartbeat_ping_url.clone(),
         },
     )
@@ -105,6 +106,7 @@ async fn main() -> std::io::Result<()> {
     let sessions_data = web::Data::new(sessions);
     let login_limiter = web::Data::new(LoginLimiter::default());
     let i18n_data = web::Data::new(i18n);
+    let alerter_data = web::Data::new(alerter);
     let outbound_data = web::Data::new(outbound);
     let monitor_data = web::Data::new(monitor);
 
@@ -121,6 +123,7 @@ async fn main() -> std::io::Result<()> {
             .wrap(security::headers())
             .app_data(login_limiter.clone())
             .app_data(i18n_data.clone())
+            .app_data(alerter_data.clone())
             .app_data(cfg_data.clone())
             .app_data(tera_data.clone())
             .app_data(registry_data.clone())

@@ -31,6 +31,9 @@ window.HB_I18N = {
   "js.verdict_down_one": "{n} app down",
   "js.verdict_up": "All systems normal",
   "js.verdict_waiting": "Waiting for the first reading",
+  "settings.failed": "failed · {status}",
+  "settings.pong": "pong · {status} · {ms} ms",
+  "settings.sending": "Sending…",
   "viewer.auto_off": "Turn on auto-refresh (5s)",
   "viewer.auto_on": "Auto-refresh on (5s) — click to turn off",
   "viewer.copy_raw": "Copy raw"

@@ -148,6 +148,7 @@
       <a href="/" class="{% if active == "dashboard" %}active{% endif %}">{{ t(k="nav.dashboard") }}</a>
       <a href="/logs" class="{% if active == "logs" %}active{% endif %}">{{ t(k="nav.logs") }}</a>
       <a href="/apps" class="{% if active == "apps" %}active{% endif %}">{{ t(k="nav.apps") }}</a>
+      <a href="/settings" class="{% if active == "settings" %}active{% endif %}">{{ t(k="nav.settings") }}</a>
     </nav>
     <form class="logout" method="post" action="/logout"><button type="submit">{{ t(k="nav.logout") }}</button></form>
     {% endblock %}

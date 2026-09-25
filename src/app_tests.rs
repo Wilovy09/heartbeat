@@ -6,6 +6,7 @@ use actix_web::{App, http::StatusCode, http::header, test, web};
 use std::time::Duration;
 use tera::Tera;
 
+use crate::alerts::Alerter;
 use crate::auth::SessionStore;
 use crate::config::{AuthMode, Config};
 use crate::i18n::{I18n, Lang};
@@ -30,6 +31,7 @@ struct TestState {
     limiter: web::Data<LoginLimiter>,
     outbound: web::Data<Outbound>,
     monitor: web::Data<UptimeMonitor>,
+    alerter: web::Data<Option<Alerter>>,
 }
 
 async fn state() -> TestState {
@@ -52,6 +54,7 @@ async fn state() -> TestState {
         uptime_retention_days: 30,
         alert_webhook_urls: Vec::new(),
         alert_on_degraded: false,
+        alert_mentions: Vec::new(),
         heartbeat_ping_url: None,
         public_url: None,
         sessions_file: path("sessions.json"),
@@ -85,6 +88,7 @@ async fn state() -> TestState {
         limiter: web::Data::new(LoginLimiter::default()),
         outbound: web::Data::new(outbound),
         monitor: web::Data::new(monitor),
+        alerter: web::Data::new(None),
         tera: web::Data::new(tera),
         i18n: web::Data::new(i18n),
         cfg: web::Data::new(cfg),
@@ -106,6 +110,7 @@ macro_rules! app {
                 .app_data($s.limiter.clone())
                 .app_data($s.outbound.clone())
                 .app_data($s.monitor.clone())
+                .app_data($s.alerter.clone())
                 .configure(routes::configure),
         )
         .await
@@ -301,4 +306,52 @@ async fn status_page_lists_only_public_apps() {
     let body = String::from_utf8(test::read_body(resp).await.to_vec()).unwrap();
     assert!(body.contains("Visible API"));
     assert!(!body.contains("Internal API"));
+}
+
+#[actix_web::test]
+async fn settings_page_and_alert_tests_require_a_session() {
+    let s = state().await;
+    let app = app!(s);
+    let page =
+        test::call_service(&app, test::TestRequest::get().uri("/settings").to_request()).await;
+    assert_eq!(page.status(), StatusCode::FOUND);
+
+    let test_req = || {
+        test::TestRequest::post()
+            .uri("/settings/alerts/test")
+            .insert_header((header::HOST, HOST))
+            .insert_header((header::ORIGIN, ORIGIN))
+            .set_json(serde_json::json!({ "kind": "ping" }))
+    };
+    let resp = test::call_service(&app, test_req().to_request()).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let login = test::call_service(&app, login_request(ADMIN_PASSWORD).to_request()).await;
+    let cookie = login
+        .response()
+        .cookies()
+        .find(|c| c.name() == crate::auth::SESSION_COOKIE)
+        .unwrap()
+        .into_owned();
+    let page = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/settings")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(page.status(), StatusCode::OK);
+    let body = String::from_utf8(test::read_body(page).await.to_vec()).unwrap();
+    assert!(
+        body.contains("ALERT_WEBHOOK_URLS"),
+        "empty state explains how to enable alerts"
+    );
+
+    let resp = test::call_service(&app, test_req().cookie(cookie).to_request()).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "no webhooks configured"
+    );
 }

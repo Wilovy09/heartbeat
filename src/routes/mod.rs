@@ -6,6 +6,7 @@ pub mod dashboard;
 pub mod embed;
 pub mod health;
 pub mod login;
+pub mod settings;
 pub mod status;
 pub mod uptime;
 
@@ -36,6 +37,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         )
         .route("/embed/{slug}", web::get().to(embed::status))
         .route("/api/apps/{slug}/logs", web::get().to(api::get_logs))
+        .route("/settings", web::get().to(settings::show))
+        .route(
+            "/settings/alerts/test",
+            web::post().to(settings::test_alert),
+        )
         .route("/api/uptime", web::get().to(uptime::overview))
         .route("/api/uptime/{slug}", web::get().to(uptime::detail));
 }

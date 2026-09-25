@@ -31,6 +31,9 @@ window.HB_I18N = {
   "js.verdict_down_one": "{n} app caída",
   "js.verdict_up": "Todo en orden",
   "js.verdict_waiting": "Esperando la primera lectura",
+  "settings.failed": "falló · {status}",
+  "settings.pong": "pong · {status} · {ms} ms",
+  "settings.sending": "Enviando…",
   "viewer.auto_off": "Activar auto-refresh (5s)",
   "viewer.auto_on": "Auto-refresh activo (5s) — click para apagar",
   "viewer.copy_raw": "Copiar raw"

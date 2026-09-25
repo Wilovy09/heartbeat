@@ -56,8 +56,13 @@ A single Rust binary, no database: everything is stored in files under `data/`.
   A failure is retried `UPTIME_RETRIES` times (5 s apart) before it's recorded, so a
   dropped packet doesn't paint the app red or send an alert.
 - **Alerts** (`ALERT_WEBHOOK_URLS`): only on confirmed status changes (down and recovery;
-  degraded is optional with `ALERT_ON_DEGRADED`). Slack and Discord get their native
-  format; any other URL gets a JSON event.
+  degraded is optional with `ALERT_ON_DEGRADED`), naming the app and linking to it. Slack
+  and Discord get their native format; any other URL gets a JSON event. `ALERT_MENTIONS`
+  pings people when an app goes down: `here`, `channel`, Slack user (`U…`) or user group
+  (`S…`) IDs, Discord user IDs or roles (`&…`); see `.env.example`.
+- **Settings page** (`/settings`): ping each webhook and see its answer ("pong"),
+  preview and send a test of every alert kind (down, degraded, recovery) with its
+  mentions, and review the current configuration (secrets shown only as set / not set).
 - **Pause and maintenance**: a paused app isn't checked, and that time doesn't count
   against its uptime.
 - **Editing**: name, URLs, threshold and keyword can change without losing the history or

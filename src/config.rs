@@ -94,6 +94,8 @@ pub struct Config {
     pub alert_webhook_urls: Vec<String>,
     /// Also alert on up <-> degraded changes (off: only down and recovery).
     pub alert_on_degraded: bool,
+    /// Who to ping when an app goes down (`ALERT_MENTIONS`, see `alerts::Mention`).
+    pub alert_mentions: Vec<String>,
     /// Pinged after every round of checks (dead man's switch for the monitor itself).
     pub heartbeat_ping_url: Option<String>,
     /// Public base URL of this deployment, used for links in alerts.
@@ -149,6 +151,14 @@ impl Config {
                 })
                 .unwrap_or_default(),
             alert_on_degraded: parsed("ALERT_ON_DEGRADED", false)?,
+            alert_mentions: optional("ALERT_MENTIONS")
+                .map(|v| {
+                    v.split(',')
+                        .map(|m| m.trim().to_string())
+                        .filter(|m| !m.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
             heartbeat_ping_url: optional("HEARTBEAT_PING_URL"),
             public_url: optional("PUBLIC_URL"),
             sessions_file: optional("SESSIONS_FILE")

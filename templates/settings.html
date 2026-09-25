@@ -1,0 +1,162 @@
+{% extends "base.html" %}
+{% block title %}{{ t(k="settings.title") }} — Heartbeat{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1 class="page-title">{{ t(k="settings.title") }}</h1>
+    <p class="page-sub">{{ t(k="settings.sub") }}</p>
+  </div>
+</header>
+
+<div class="settings" x-data="settingsPage()">
+  <!-- Webhooks: ping-pong -->
+  <section class="bay">
+    <h2 class="bay-title">{{ t(k="settings.webhooks") }}</h2>
+    {% if alerts %}
+    <div class="hook-list">
+      {% for hook in alerts.webhooks %}
+      <div class="hook">
+        <span class="chip service">{{ t(k="settings.service_" ~ hook.service) }}</span>
+        <span class="hook-url mono">{{ hook.masked }}</span>
+        <span class="result" x-show="results['ping-{{ hook.index }}']" x-html="resultHtml('ping-{{ hook.index }}')"></span>
+        <button type="button" class="btn secondary" :disabled="busy['ping-{{ hook.index }}']" @click="send('ping', {{ hook.index }}, 'ping-{{ hook.index }}')">
+          <span x-text="busy['ping-{{ hook.index }}'] ? T('settings.sending') : '{{ t(k="settings.ping") }}'"></span>
+        </button>
+      </div>
+      {% endfor %}
+    </div>
+    <p class="hint">{{ t(k="settings.ping_hint") }}</p>
+    {% else %}
+    <p class="empty">{{ t(k="settings.no_webhooks") }} <span class="mono">ALERT_WEBHOOK_URLS</span></p>
+    {% endif %}
+  </section>
+
+  {% if alerts %}
+  <!-- Sample alerts -->
+  <section class="bay">
+    <div class="section-head">
+      <h2 class="bay-title" style="margin: 0">{{ t(k="settings.samples") }}</h2>
+      {% if alerts.webhooks | length > 1 %}
+      <label class="target">
+        <span>{{ t(k="settings.send_to") }}</span>
+        <select x-model="target">
+          <option value="">{{ t(k="settings.all_webhooks") }}</option>
+          {% for hook in alerts.webhooks %}
+          <option value="{{ hook.index }}">{{ t(k="settings.service_" ~ hook.service) }} · {{ hook.masked }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      {% endif %}
+    </div>
+    <div class="samples">
+      {% for preview in alerts.previews %}
+      {% set kind = preview.kind %}
+      <article class="sample">
+        <header class="sample-head">
+          <span class="vital st-{% if kind == "down" %}down{% elif kind == "degraded" %}degraded{% else %}up{% endif %}"></span>
+          <h3>{{ t(k="settings.kind_" ~ kind) }}</h3>
+        </header>
+        <pre class="preview mono">{{ preview.text }}</pre>
+        {% if kind == "degraded" and not alerts.on_degraded %}
+        <p class="hint">{{ t(k="settings.degraded_off") }}</p>
+        {% endif %}
+        <div class="sample-foot">
+          <span class="result" x-show="results['{{ kind }}']" x-html="resultHtml('{{ kind }}')"></span>
+          <button type="button" class="btn secondary" :disabled="busy['{{ kind }}']" @click="send('{{ kind }}', target, '{{ kind }}')">
+            <span x-text="busy['{{ kind }}'] ? T('settings.sending') : '{{ t(k="settings.send_sample") }}'"></span>
+          </button>
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+    <p class="hint">{{ t(k="settings.samples_hint") }}</p>
+  </section>
+
+  <!-- Mentions -->
+  <section class="bay">
+    <h2 class="bay-title">{{ t(k="settings.mentions") }}</h2>
+    {% if alerts.mentions | length == 0 and alerts.rejected_mentions | length == 0 %}
+    <p class="empty">{{ t(k="settings.no_mentions") }} <span class="mono">ALERT_MENTIONS</span></p>
+    {% else %}
+    <table class="mention-table">
+      <thead><tr><th>{{ t(k="settings.mention_entry") }}</th><th>Slack</th><th>Discord</th></tr></thead>
+      <tbody>
+        {% for m in alerts.mentions %}
+        <tr>
+          <td class="mono">{{ m.raw }}</td>
+          <td class="mono">{% if m.slack %}{{ m.slack }}{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td class="mono">{% if m.discord %}{{ m.discord }}{% else %}<span class="muted">—</span>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if alerts.rejected_mentions | length > 0 %}
+    <div class="error-box" style="margin: 12px 0 0">{{ t(k="settings.rejected_mentions") }} <span class="mono">{{ alerts.rejected_mentions | join(sep=", ") }}</span></div>
+    {% endif %}
+    <p class="hint">{{ t(k="settings.mentions_hint") }}</p>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  <!-- Current configuration -->
+  <section class="bay">
+    <h2 class="bay-title">{{ t(k="settings.current") }}</h2>
+    <dl class="config">
+      <dt>{{ t(k="settings.cfg_auth") }}</dt>
+      <dd class="mono">{{ config.auth_mode }}{% if config.login_url %} · {{ config.login_url }}{% endif %}{% if config.admin_email %} · {{ config.admin_email }}{% endif %}</dd>
+      <dt>{{ t(k="settings.cfg_lang") }}</dt><dd class="mono">{{ config.app_lang }}</dd>
+      <dt>{{ t(k="settings.cfg_public_url") }}</dt><dd class="mono">{% if config.public_url %}{{ config.public_url }}{% else %}<span class="muted">—</span>{% endif %}</dd>
+      <dt>{{ t(k="settings.cfg_allowed_hosts") }}</dt><dd class="mono">{{ config.allowed_hosts }}</dd>
+      <dt>{{ t(k="settings.cfg_logs_key") }}</dt><dd>{% if config.admin_logs_key %}{{ t(k="settings.set") }}{% else %}<span class="muted">{{ t(k="settings.not_set") }}</span>{% endif %}</dd>
+      <dt>{{ t(k="settings.cfg_interval") }}</dt><dd class="mono">{{ config.interval_secs }} s</dd>
+      <dt>{{ t(k="settings.cfg_degraded") }}</dt><dd class="mono">{{ config.degraded_ms }} ms</dd>
+      <dt>{{ t(k="settings.cfg_retries") }}</dt><dd class="mono">{{ config.retries }}</dd>
+      <dt>{{ t(k="settings.cfg_cert") }}</dt><dd class="mono">{% if config.cert_warn_days > 0 %}{{ config.cert_warn_days }} {{ t(k="settings.days") }}{% else %}<span class="muted">{{ t(k="settings.off") }}</span>{% endif %}</dd>
+      <dt>{{ t(k="settings.cfg_retention") }}</dt><dd class="mono">{{ config.retention_days }} {{ t(k="settings.days") }}</dd>
+      <dt>{{ t(k="settings.cfg_on_degraded") }}</dt><dd>{% if config.alert_on_degraded %}{{ t(k="settings.on") }}{% else %}<span class="muted">{{ t(k="settings.off") }}</span>{% endif %}</dd>
+      <dt>{{ t(k="settings.cfg_deadman") }}</dt><dd>{% if config.dead_mans_switch %}{{ t(k="settings.set") }}{% else %}<span class="muted">{{ t(k="settings.not_set") }}</span>{% endif %}</dd>
+    </dl>
+    <p class="hint">{{ t(k="settings.env_hint") }}</p>
+  </section>
+</div>
+{% endblock %}
+{% block head %}
+<script src="/static/settings.js"></script>
+<style>
+  .settings { display: flex; flex-direction: column; gap: 16px; max-width: 1080px; }
+  .hint { margin: 12px 0 0; font-size: 12px; color: var(--ink-3); text-wrap: pretty; }
+  .muted { color: var(--ink-4); }
+  .chip { display: inline-flex; align-items: center; gap: 6px; height: 20px; padding: 0 8px; border-radius: 4px; background: var(--bay-raised); border: 1px solid var(--graticule); font-size: 11px; font-weight: 500; color: var(--ink-2); }
+
+  .hook-list { display: flex; flex-direction: column; }
+  .hook { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 12px; padding: 10px 0; }
+  .hook + .hook { border-top: 1px solid var(--graticule-soft); }
+  .hook-url { font-size: 12px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .result { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-2); }
+  .result .vital { width: 6px; height: 6px; }
+  .result .detail { color: var(--ink-3); max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+  .target { display: flex; align-items: center; gap: 8px; margin: 0; text-transform: none; letter-spacing: 0; font-size: 12px; }
+  .target select { max-width: 320px; }
+  .samples { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+  .sample { display: flex; flex-direction: column; gap: 10px; padding: 14px; border: 1px solid var(--graticule); border-radius: 8px; background: var(--glass); }
+  .sample-head { display: flex; align-items: center; gap: 8px; }
+  .sample-head h3 { font-size: 14px; font-weight: 500; }
+  .preview { margin: 0; padding: 10px 12px; border-radius: 6px; background: var(--well); border: 1px solid var(--graticule-soft); font-size: 12px; line-height: 1.6; color: var(--ink-2); white-space: pre-wrap; word-break: break-word; flex: 1; }
+  .sample .hint { margin: 0; }
+  .sample-foot { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
+
+  .mention-table td { font-size: 12px; }
+  .config { display: grid; grid-template-columns: minmax(160px, 240px) minmax(0, 1fr); gap: 10px 16px; margin: 0; }
+  .config dt { font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); padding-top: 2px; }
+  .config dd { margin: 0; font-size: 13px; color: var(--ink-2); word-break: break-all; }
+  @media (max-width: 640px) {
+    .hook { grid-template-columns: auto minmax(0, 1fr); }
+    .hook .result, .hook .btn { grid-column: 1 / -1; justify-self: start; }
+    .config { grid-template-columns: 1fr; gap: 2px; }
+    .config dd { margin-bottom: 10px; }
+  }
+</style>
+{% endblock %}
