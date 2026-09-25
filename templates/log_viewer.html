@@ -7,7 +7,7 @@
     <a
       href="/logs"
       style="color: var(--muted); text-decoration: none; font-size: 13px"
-      >← Logs</a
+      >{{ t(k="viewer.back") }}</a
     >
     <h1 style="margin: 0; font-size: 18px; color: var(--text)">
       {{ app.name }}
@@ -46,15 +46,15 @@
         "
       >
         <div>
-          <label for="stream-select">Stream</label>
+          <label for="stream-select">{{ t(k="viewer.stream") }}</label>
           <select id="stream-select" x-model="stream" @change="load()">
-            <option value="both">out + error</option>
-            <option value="out">solo out</option>
-            <option value="error">solo error</option>
+            <option value="both">{{ t(k="viewer.stream_both") }}</option>
+            <option value="out">{{ t(k="viewer.stream_out") }}</option>
+            <option value="error">{{ t(k="viewer.stream_error") }}</option>
           </select>
         </div>
         <div>
-          <label for="lines-input">Líneas</label>
+          <label for="lines-input">{{ t(k="viewer.lines") }}</label>
           <input
             id="lines-input"
             type="number"
@@ -66,17 +66,17 @@
           />
         </div>
         <div style="flex: 1; min-width: 160px; max-width: 320px">
-          <label for="search-input">Buscar</label>
+          <label for="search-input">{{ t(k="viewer.search") }}</label>
           <input
             id="search-input"
             type="text"
             x-model="search"
-            placeholder="filtrar por texto..."
+            placeholder="{{ t(k="viewer.search_placeholder") }}"
             style="width: 100%"
           />
         </div>
         <div>
-          <label>Niveles (stdout)</label>
+          <label>{{ t(k="viewer.levels") }}</label>
           <div class="chip-row">
             <template x-for="level in ALL_LEVELS" :key="level">
               <button
@@ -101,7 +101,7 @@
           class="icon-btn"
           :class="autoRefresh ? 'active' : ''"
           @click="autoRefresh = !autoRefresh; toggleAutoRefresh()"
-          :title="autoRefresh ? 'Auto-refresh activo (5s) — click para apagar' : 'Activar auto-refresh (5s)'"
+          :title="autoRefresh ? T('viewer.auto_on') : T('viewer.auto_off')"
         >
           <svg
             :class="autoRefresh ? 'spin' : ''"
@@ -125,7 +125,7 @@
           class="icon-btn"
           @click="load()"
           :disabled="loading"
-          title="Refrescar ahora"
+          title="{{ t(k="viewer.refresh_now") }}"
         >
           <svg
             :class="loading ? 'spin' : ''"
@@ -163,19 +163,19 @@
           justify-content: space-between;
         "
       >
-        <span class="section-label">Módulos de stdout</span>
+        <span class="section-label">{{ t(k="viewer.modules") }}</span>
         <button
           type="button"
           class="reset-link"
           x-show="excludedLevels.length || excludedTargets.length"
           @click="resetFilters()"
         >
-          Quitar filtros
+          {{ t(k="viewer.clear_filters") }}
         </button>
       </div>
 
       <div x-show="distinctTargets().length">
-        <label>Click para excluir</label>
+        <label>{{ t(k="viewer.click_to_exclude") }}</label>
         <div class="chip-row">
           <template x-for="item in distinctTargets()" :key="item.target">
             <button
@@ -224,7 +224,7 @@
               type="button"
               class="copy-btn"
               @click.stop="copyLine(line.raw, 'out-' + idx)"
-              :title="copiedKey === ('out-' + idx) ? 'Copiado' : 'Copiar raw'"
+              :title="copiedKey === ('out-' + idx) ? T('js.copied') : T('viewer.copy_raw')"
             >
               <svg
                 x-show="copiedKey !== ('out-' + idx)"
@@ -275,7 +275,7 @@
           x-show="filteredOut().length === 0"
           style="color: var(--muted); font-size: 13px"
         >
-          Sin líneas.
+          {{ t(k="viewer.no_lines") }}
         </p>
       </div>
     </div>
@@ -299,7 +299,7 @@
               type="button"
               class="copy-btn"
               @click.stop="copyLine(line, 'err-' + idx)"
-              :title="copiedKey === ('err-' + idx) ? 'Copiado' : 'Copiar raw'"
+              :title="copiedKey === ('err-' + idx) ? T('js.copied') : T('viewer.copy_raw')"
             >
               <svg
                 x-show="copiedKey !== ('err-' + idx)"
@@ -334,7 +334,7 @@
           x-show="filteredError().length === 0"
           style="color: var(--muted); font-size: 13px"
         >
-          Sin líneas.
+          {{ t(k="viewer.no_lines") }}
         </p>
       </div>
     </div>

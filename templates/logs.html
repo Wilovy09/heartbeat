@@ -1,21 +1,21 @@
 {% extends "base.html" %}
-{% block title %}Logs — Heartbeat{% endblock %}
+{% block title %}{{ t(k="logs.title") }} — Heartbeat{% endblock %}
 {% block content %}
 <header class="page-head">
   <div>
-    <h1 class="page-title">Logs</h1>
-    <p class="page-sub">Elige una app para ver su stdout y stderr en vivo.</p>
+    <h1 class="page-title">{{ t(k="logs.title") }}</h1>
+    <p class="page-sub">{{ t(k="logs.sub") }}</p>
   </div>
 </header>
 {% if apps | length == 0 %}
 <div class="bay empty">
-  No hay apps registradas todavía. <a href="/apps">Registra la primera</a>.
+  {{ t(k="logs.empty") }} <a href="/apps">{{ t(k="logs.empty_cta") }}</a>.
 </div>
 {% else %}
 <div class="bay source-list" x-data="uptimeDashboard()" x-init="init()">
   {% for app in apps %}
   <a class="source" href="/logs/{{ app.slug }}">
-    <span class="vital" :class="'st-' + statusKey(monitorFor('{{ app.slug }}')?.status)"></span>
+    <span class="vital" :class="'st-' + stateOf(monitorFor('{{ app.slug }}'))"></span>
     <span class="source-id">
       <span class="source-name">{{ app.name }}</span>
       <span class="source-slug mono">{{ app.slug }}</span>
@@ -26,7 +26,7 @@
       </template>
     </span>
     <span class="source-pct mono" x-text="fmtPct(monitorFor('{{ app.slug }}')?.uptime_24h)"></span>
-    <span class="source-go">Abrir logs <span aria-hidden="true">→</span></span>
+    <span class="source-go">{{ t(k="logs.open") }} <span aria-hidden="true">→</span></span>
   </a>
   {% endfor %}
 </div>

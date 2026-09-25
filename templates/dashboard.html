@@ -1,20 +1,20 @@
 {% extends "base.html" %}
-{% block title %}Dashboard — Heartbeat{% endblock %}
+{% block title %}{{ t(k="dash.title") }} — Heartbeat{% endblock %}
 {% block content %}
 {% if apps | length == 0 %}
 <div class="bay empty">
-  No hay apps registradas todavía. <a href="/apps">Registra la primera</a> para empezar a monitorearla.
+  {{ t(k="dash.empty") }} <a href="/apps">{{ t(k="dash.empty_cta") }}</a> {{ t(k="dash.empty_tail") }}
 </div>
 {% else %}
 <div class="monitor" x-data="uptimeDashboard()" x-init="init()">
   <!-- Channels: every app, triage order (down, degraded, up, no data). -->
-  <aside class="channels" aria-label="Apps monitoreadas">
-    <input type="search" x-model="search" placeholder="Buscar app" aria-label="Buscar app" class="channel-search">
+  <aside class="channels" aria-label="{{ t(k="dash.channels_aria") }}">
+    <input type="search" x-model="search" placeholder="{{ t(k="dash.search") }}" aria-label="{{ t(k="dash.search") }}" class="channel-search">
     <div class="channel-list">
       <template x-for="m in filteredMonitors()" :key="m.slug">
         <a class="channel" :href="'#' + m.slug" :class="selected === m.slug && 'selected'" :aria-current="selected === m.slug ? 'page' : null">
           <div class="channel-head">
-            <span class="vital" :class="'st-' + statusKey(m.status)"></span>
+            <span class="vital" :class="'st-' + stateOf(m)"></span>
             <span class="channel-name" x-text="m.name"></span>
             <span class="channel-pct mono" x-text="fmtPct(m.uptime_24h)"></span>
           </div>
@@ -25,7 +25,7 @@
           </div>
         </a>
       </template>
-      <p class="empty channel-empty" x-show="filteredMonitors().length === 0">Ninguna app coincide.</p>
+      <p class="empty channel-empty" x-show="filteredMonitors().length === 0">{{ t(k="dash.no_match") }}</p>
     </div>
   </aside>
 
@@ -39,32 +39,36 @@
           <span class="vital vital-lg" :class="'st-' + overallStatus()"></span>
           <div>
             <h1 class="verdict-title" x-text="overallMessage()"></h1>
-            <p class="page-sub" x-text="overview.monitors.length + (overview.monitors.length === 1 ? ' app monitoreada' : ' apps monitoreadas') + ' · chequeo cada ' + overview.interval_secs + ' s'"></p>
+            <p class="page-sub" x-text="T(overview.monitors.length === 1 ? 'dash.monitored_one' : 'dash.monitored_many', {n: overview.monitors.length, secs: overview.interval_secs})"></p>
           </div>
         </header>
 
         <div class="census bay">
           <div class="census-cell">
-            <div class="readout-label">Up</div>
+            <div class="readout-label">{{ t(k="dash.census_up") }}</div>
             <div class="census-value mono" :class="count('up') && 'st-text-up'" x-text="count('up')"></div>
           </div>
           <div class="census-cell">
-            <div class="readout-label">Degradado</div>
+            <div class="readout-label">{{ t(k="dash.census_degraded") }}</div>
             <div class="census-value mono" :class="count('degraded') && 'st-text-degraded'" x-text="count('degraded')"></div>
           </div>
           <div class="census-cell">
-            <div class="readout-label">Down</div>
+            <div class="readout-label">{{ t(k="dash.census_down") }}</div>
             <div class="census-value mono" :class="count('down') && 'st-text-down'" x-text="count('down')"></div>
           </div>
           <div class="census-cell">
-            <div class="readout-label">Sin datos</div>
+            <div class="readout-label">{{ t(k="dash.census_unknown") }}</div>
             <div class="census-value mono" x-text="count('unknown')"></div>
+          </div>
+          <div class="census-cell" x-show="count('paused')">
+            <div class="readout-label">{{ t(k="dash.census_paused") }}</div>
+            <div class="census-value mono" x-text="count('paused')"></div>
           </div>
         </div>
 
         <template x-if="attention().length">
           <div class="bay">
-            <h2 class="bay-title">Requieren atención</h2>
+            <h2 class="bay-title">{{ t(k="dash.attention") }}</h2>
             <div class="alarm-list">
               <template x-for="m in attention()" :key="m.slug">
                 <a class="alarm" :href="'#' + m.slug">
@@ -80,8 +84,8 @@
         </template>
 
         <div class="bay">
-          <h2 class="bay-title">Eventos recientes</h2>
-          <p class="empty" x-show="overview.events.length === 0">Sin cambios de estado todavía.</p>
+          <h2 class="bay-title">{{ t(k="dash.recent_events") }}</h2>
+          <p class="empty" x-show="overview.events.length === 0">{{ t(k="dash.no_events") }}</p>
           <ol class="timeline">
             <template x-for="e in visibleEvents(overview.events)" :key="e.slug + e.at">
               <li class="event">
@@ -92,7 +96,7 @@
               </li>
             </template>
           </ol>
-          <button type="button" class="more" x-show="overview.events.length > 8" @click="showAllEvents = !showAllEvents" x-text="showAllEvents ? 'Mostrar menos' : 'Mostrar los ' + overview.events.length + ' eventos'"></button>
+          <button type="button" class="more" x-show="overview.events.length > 8" @click="showAllEvents = !showAllEvents" x-text="showAllEvents ? T('dash.show_less') : T('dash.show_all', {n: overview.events.length})"></button>
         </div>
       </div>
     </template>
@@ -103,17 +107,25 @@
         <header class="page-head" style="margin: 0">
           <div style="min-width: 0">
             <h1 class="page-title" x-text="current().name"></h1>
-            <p class="page-sub mono app-url" x-text="current().health_url || 'Sin URL de health'"></p>
+            <p class="page-sub mono app-url" x-text="current().health_url || T('dash.no_health_url')"></p>
           </div>
           <div class="head-actions">
-            <a class="btn ghost" href="#">← Resumen</a>
-            <a class="btn secondary" :href="'/logs/' + current().slug">Ver logs</a>
+            <a class="btn ghost" href="#">{{ t(k="dash.back") }}</a>
+            <a class="btn ghost" :href="'/apps#app-' + current().slug">{{ t(k="dash.edit") }}</a>
+            <a class="btn secondary" :href="'/logs/' + current().slug">{{ t(k="dash.view_logs") }}</a>
           </div>
         </header>
 
+        <template x-if="current().paused">
+          <div class="bay notice">
+            <span class="vital st-paused"></span>
+            <span>{{ t(k="dash.paused_notice") }} <a :href="'/apps#app-' + current().slug">{{ t(k="nav.apps") }}</a>.</span>
+          </div>
+        </template>
+
         <template x-if="!current().health_url">
           <div class="bay empty">
-            Esta app se registró sin URL de health, así que no se monitorea. Vuelve a registrarla en <a href="/apps">Apps</a> con una URL de health.
+            {{ t(k="dash.no_health") }} <a :href="'/apps#app-' + current().slug">{{ t(k="nav.apps") }}</a>.
           </div>
         </template>
 
@@ -121,27 +133,31 @@
           <div class="stack">
             <div class="vitals bay">
               <div class="vital-primary">
-                <div class="vital-state" :class="'st-text-' + statusKey(current().status)">
-                  <span class="vital" :class="'st-' + statusKey(current().status)"></span>
-                  <span x-text="statusLabel(current().status)"></span>
+                <div class="vital-state" :class="'st-text-' + stateOf(current())">
+                  <span class="vital" :class="'st-' + stateOf(current())"></span>
+                  <span x-text="statusLabel(stateOf(current()))"></span>
                 </div>
                 <div class="vital-reading mono">
                   <span x-text="current().latency_ms ?? '—'"></span><span class="vital-unit">ms</span>
                 </div>
-                <div class="readout-label">Latencia actual</div>
+                <div class="readout-label">{{ t(k="dash.latency_now") }}</div>
               </div>
               <div class="vital-secondary">
                 <div class="readout">
-                  <div class="readout-label">Prom. 24 h</div>
+                  <div class="readout-label">{{ t(k="dash.avg_24h") }}</div>
                   <div class="readout-value mono" x-text="fmtMs(current().avg_latency_24h_ms)"></div>
                 </div>
                 <div class="readout">
-                  <div class="readout-label">Uptime 24 h</div>
+                  <div class="readout-label">{{ t(k="dash.uptime_24h") }}</div>
                   <div class="readout-value mono" x-text="fmtPct(current().uptime_24h)"></div>
                 </div>
                 <div class="readout">
-                  <div class="readout-label">Uptime 30 días</div>
+                  <div class="readout-label">{{ t(k="dash.uptime_30d") }}</div>
                   <div class="readout-value mono" x-text="fmtPct(current().uptime_30d)"></div>
+                </div>
+                <div class="readout" x-show="current().cert_expires_at">
+                  <div class="readout-label">{{ t(k="dash.cert") }}</div>
+                  <div class="readout-value mono" x-text="certLabel(current())"></div>
                 </div>
               </div>
               <div class="vital-strip">
@@ -152,16 +168,16 @@
                 </div>
                 <div class="strip-axis">
                   <span x-text="stripStart(current(), STRIP_SLOTS)"></span>
-                  <span x-text="'chequeo cada ' + overview.interval_secs + ' s'"></span>
-                  <span>ahora</span>
+                  <span x-text="T('dash.check_every', {secs: overview.interval_secs})"></span>
+                  <span>{{ t(k="dash.now") }}</span>
                 </div>
               </div>
             </div>
 
             <div class="bay">
               <div class="chart-head">
-                <h2 class="bay-title" style="margin: 0">Tiempo de respuesta</h2>
-                <div class="segmented" role="group" aria-label="Rango">
+                <h2 class="bay-title" style="margin: 0">{{ t(k="dash.response_time") }}</h2>
+                <div class="segmented" role="group" aria-label="{{ t(k="dash.range") }}">
                   <template x-for="r in RANGES" :key="r.hours">
                     <button type="button" :aria-pressed="hours === r.hours" @click="setHours(r.hours)" x-text="r.label"></button>
                   </template>
@@ -186,8 +202,8 @@
             </div>
 
             <div class="bay">
-              <h2 class="bay-title">Eventos</h2>
-              <p class="empty" x-show="detail.events.length === 0">Sin cambios de estado todavía.</p>
+              <h2 class="bay-title">{{ t(k="dash.events") }}</h2>
+              <p class="empty" x-show="detail.events.length === 0">{{ t(k="dash.no_events") }}</p>
               <ol class="timeline">
                 <template x-for="e in visibleEvents(detail.events)" :key="e.at">
                   <li class="event event-app-less">
@@ -197,7 +213,7 @@
                   </li>
                 </template>
               </ol>
-              <button type="button" class="more" x-show="detail.events.length > 8" @click="showAllEvents = !showAllEvents" x-text="showAllEvents ? 'Mostrar menos' : 'Mostrar los ' + detail.events.length + ' eventos'"></button>
+              <button type="button" class="more" x-show="detail.events.length > 8" @click="showAllEvents = !showAllEvents" x-text="showAllEvents ? T('dash.show_less') : T('dash.show_all', {n: detail.events.length})"></button>
             </div>
           </div>
         </template>
@@ -233,7 +249,7 @@
   .verdict { display: flex; align-items: center; gap: 16px; padding: 8px 0 4px; }
   .vital-lg { width: 14px; height: 14px; }
   .verdict-title { font-size: 28px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.15; }
-  .census { display: grid; grid-template-columns: repeat(4, 1fr); padding: 0; }
+  .census { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); padding: 0; }
   .census-cell { padding: 16px; }
   .census-cell + .census-cell { border-left: 1px solid var(--graticule-soft); }
   .census-value { font-size: 28px; font-weight: 500; line-height: 1.1; margin-top: 6px; color: var(--ink-2); }
@@ -271,7 +287,9 @@
   .vital-state { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; letter-spacing: 0.02em; }
   .vital-reading { font-size: 44px; font-weight: 500; line-height: 1; letter-spacing: -0.03em; margin: 12px 0 8px; }
   .vital-unit { font-size: 16px; color: var(--ink-3); margin-left: 6px; letter-spacing: 0; }
-  .vital-secondary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-content: center; }
+  .vital-secondary { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 16px; align-content: center; }
+  .notice { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--ink-2); }
+  .notice a { color: var(--ink); }
   .readout-value { font-size: 22px; font-weight: 500; margin-top: 6px; letter-spacing: -0.01em; }
   .vital-strip { grid-column: 1 / -1; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--graticule-soft); }
   .strip-beats { gap: 2px; }

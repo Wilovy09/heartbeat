@@ -14,6 +14,7 @@ const CHART = { height: 260, left: 48, right: 12, top: 12, bottom: 26 };
 // Mirrors the rhythm/ink tokens in base.html (SVG attributes can't read CSS variables).
 const COLOR = { up: '#3fd68a', degraded: '#f0b43c', down: '#f0514e', ink3: '#6e737c', ink4: '#454a52' };
 const FONT_MONO = '"IBM Plex Mono", ui-monospace, monospace';
+const LOCALE = document.documentElement.lang === 'en' ? 'en-US' : 'es-MX';
 const RANGES = [
   { hours: 1, label: '1h' },
   { hours: 6, label: '6h' },
@@ -22,7 +23,7 @@ const RANGES = [
   { hours: 720, label: '30d' },
 ];
 // Triage order: what needs a human first.
-const SEVERITY = { down: 0, degraded: 1, up: 2, unknown: 3 };
+const SEVERITY = { down: 0, degraded: 1, up: 2, unknown: 3, paused: 4 };
 
 function uptimeDashboard() {
   return {
@@ -69,7 +70,7 @@ function uptimeDashboard() {
         this.overview = overview;
         this.loadError = '';
       } catch (e) {
-        this.loadError = `No se pudo cargar el estado: ${e.message}`;
+        this.loadError = T('js.load_status_failed', { error: e.message });
       }
       if (this.hours <= LIVE_DETAIL_MAX_HOURS || this.detail.beats.length === 0) {
         await this.loadDetail();
@@ -83,7 +84,7 @@ function uptimeDashboard() {
         const detail = await this.fetchJson(`/api/uptime/${encodeURIComponent(m.slug)}?hours=${this.hours}`);
         if (detail && this.selected === m.slug) this.detail = detail;
       } catch (e) {
-        this.loadError = `No se pudo cargar el historial: ${e.message}`;
+        this.loadError = T('js.load_history_failed', { error: e.message });
       }
     },
 
@@ -95,23 +96,22 @@ function uptimeDashboard() {
       const q = this.search.trim().toLowerCase();
       return this.overview.monitors
         .filter((m) => !q || m.name.toLowerCase().includes(q) || m.slug.includes(q))
-        .sort((a, b) => SEVERITY[this.statusKey(a.status)] - SEVERITY[this.statusKey(b.status)] || a.name.localeCompare(b.name));
+        .sort((a, b) => SEVERITY[this.stateOf(a)] - SEVERITY[this.stateOf(b)] || a.name.localeCompare(b.name));
     },
 
     // Worst state across all apps -- what the overview's verdict reports.
     overallStatus() {
-      const keys = this.overview.monitors.map((m) => this.statusKey(m.status));
+      const keys = this.overview.monitors.map((m) => this.stateOf(m));
       return ['down', 'degraded', 'up'].find((k) => keys.includes(k)) || 'unknown';
     },
 
     overallMessage() {
       const down = this.count('down');
       const degraded = this.count('degraded');
-      const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
-      if (down) return plural(down, 'app caída', 'apps caídas');
-      if (degraded) return plural(degraded, 'app degradada', 'apps degradadas');
-      if (this.count('up')) return 'Todo en orden';
-      return 'Esperando la primera lectura';
+      if (down) return T(down === 1 ? 'js.verdict_down_one' : 'js.verdict_down_many', { n: down });
+      if (degraded) return T(degraded === 1 ? 'js.verdict_degraded_one' : 'js.verdict_degraded_many', { n: degraded });
+      if (this.count('up')) return T('js.verdict_up');
+      return T('js.verdict_waiting');
     },
 
     attention() {
@@ -140,7 +140,7 @@ function uptimeDashboard() {
     },
 
     count(key) {
-      return this.overview.monitors.filter((m) => this.statusKey(m.status) === key).length;
+      return this.overview.monitors.filter((m) => this.stateOf(m) === key).length;
     },
 
     monitorFor(slug) {
@@ -162,11 +162,24 @@ function uptimeDashboard() {
       return this.showAllEvents ? events : events.slice(0, EVENTS_COLLAPSED);
     },
 
+    // A monitor's display state: paused wins over its last reading.
+    stateOf(m) {
+      if (!m) return 'unknown';
+      return m.paused ? 'paused' : this.statusKey(m.status);
+    },
+
+    // Days until the health endpoint's TLS certificate expires, or '' when unknown.
+    certLabel(m) {
+      if (!m || !m.cert_expires_at) return '';
+      const days = Math.floor((m.cert_expires_at - Date.now() / 1000) / 86400);
+      return days < 0 ? T('js.cert_expired') : T('js.cert_days', { n: days });
+    },
+
     statusKey(status) {
       return status || 'unknown';
     },
     statusLabel(status) {
-      return { up: 'Up', degraded: 'Degradado', down: 'Down' }[status] || 'Sin datos';
+      return T(['up', 'degraded', 'down', 'paused'].includes(status) ? `js.status_${status}` : 'js.status_unknown');
     },
     beatTitle(b) {
       return `${this.fmtDateTime(b.at)} — ${this.statusLabel(b.status)} — ${this.fmtMs(b.latency_ms)}\n${b.message}`;
@@ -179,15 +192,15 @@ function uptimeDashboard() {
     },
     fmtDateTime(at) {
       const d = new Date(at * 1000);
-      const date = d.toLocaleDateString('es-MX', { day: '2-digit', month: 'short' }).replace('.', '');
-      const time = d.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+      const date = d.toLocaleDateString(LOCALE, { day: '2-digit', month: 'short' }).replace('.', '');
+      const time = d.toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
       return `${date} ${time}`;
     },
     fmtAgo(at) {
       const secs = Math.max(0, Math.round(Date.now() / 1000 - at));
-      if (secs < 90) return `hace ${secs} s`;
-      if (secs < 5400) return `hace ${Math.round(secs / 60)} min`;
-      return `hace ${Math.round(secs / 3600)} h`;
+      if (secs < 90) return T('js.ago_s', { n: secs });
+      if (secs < 5400) return T('js.ago_min', { n: Math.round(secs / 60) });
+      return T('js.ago_h', { n: Math.round(secs / 3600) });
     },
 
     observeChart(el) {
@@ -215,7 +228,7 @@ function uptimeDashboard() {
       if (!this.chartWidth) return '';
       const s = this.chartScale();
       const w = this.chartWidth;
-      const parts = [`<svg width="${w}" height="${CHART.height}" role="img" aria-label="Tiempo de respuesta">`];
+      const parts = [`<svg width="${w}" height="${CHART.height}" role="img" aria-label="${T('js.chart_label')}">`];
 
       // ECG paper: a fine 8px grid with a heavier line every 5 squares, anchored to the
       // plot's top-left corner so it lines up with the axes.
@@ -299,7 +312,7 @@ function uptimeDashboard() {
       if (threshold < s.yMax) {
         const ty = s.y(threshold);
         parts.push(`<line x1="${CHART.left}" x2="${w - CHART.right}" y1="${ty}" y2="${ty}" stroke="${COLOR.degraded}" stroke-width="1" stroke-dasharray="3 5" opacity="0.6"/>`);
-        parts.push(`<text x="${w - CHART.right - 6}" y="${ty - 6}" text-anchor="end" font-size="11" font-family='${FONT_MONO}' fill="${COLOR.degraded}">umbral ${threshold} ms</text>`);
+        parts.push(`<text x="${w - CHART.right - 6}" y="${ty - 6}" text-anchor="end" font-size="11" font-family='${FONT_MONO}' fill="${COLOR.degraded}">${T('js.chart_threshold', { ms: threshold })}</text>`);
       }
 
       if (this.hover) {
@@ -309,7 +322,7 @@ function uptimeDashboard() {
         }
       }
       if (this.detail.beats.length === 0) {
-        parts.push(`<text x="${w / 2}" y="${CHART.height / 2}" text-anchor="middle" font-size="13" fill="${COLOR.ink3}">Sin lecturas en este rango</text>`);
+        parts.push(`<text x="${w / 2}" y="${CHART.height / 2}" text-anchor="middle" font-size="13" fill="${COLOR.ink3}">${T('js.chart_empty')}</text>`);
       }
       parts.push('</svg>');
       return parts.join('');
@@ -363,6 +376,6 @@ function timeTicks(from, to, plotW) {
 
 function tickLabel(at, hours) {
   const d = new Date(at * 1000);
-  if (hours > 24) return d.toLocaleDateString('es-MX', { day: '2-digit', month: 'short' }).replace('.', '');
-  return d.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', hour12: false });
+  if (hours > 24) return d.toLocaleDateString(LOCALE, { day: '2-digit', month: 'short' }).replace('.', '');
+  return d.toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit', hour12: false });
 }

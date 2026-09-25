@@ -1,90 +1,54 @@
-<!doctype html>
-<html lang="es">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Heartbeat — Entrar</title>
-    <link rel="icon" type="image/svg+xml" href="/static/icon.svg" />
-    <style>
-      body {
-        margin: 0;
-        min-height: 100vh;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        background: #0f1115;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      }
-      .card {
-        background: #171a21;
-        border: 1px solid #262b36;
-        border-radius: 12px;
-        padding: 32px;
-        width: 320px;
-      }
-      h1 {
-        color: #d6dae3;
-        font-size: 18px;
-        margin: 0 0 20px;
-      }
-      label {
-        font-size: 11px;
-        color: #7d8598;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        display: block;
-        margin-bottom: 4px;
-      }
-      input {
-        width: 100%;
-        background: #0f1115;
-        border: 1px solid #262b36;
-        color: #d6dae3;
-        padding: 10px;
-        border-radius: 6px;
-        font-size: 14px;
-        margin-bottom: 14px;
-      }
-      button {
-        width: 100%;
-        background: #4f8cff;
-        color: white;
-        border: none;
-        padding: 10px;
-        border-radius: 8px;
-        font-size: 14px;
-        font-weight: 600;
-        cursor: pointer;
-      }
-      .error {
-        background: rgba(224, 90, 90, 0.12);
-        color: #e05a5a;
-        border: 1px solid rgba(224, 90, 90, 0.3);
-        padding: 10px;
-        border-radius: 8px;
-        font-size: 13px;
-        margin-bottom: 14px;
-      }
-    </style>
-  </head>
-  <body>
-    <form class="card" method="post" action="/login">
-      <h1>Heartbeat</h1>
-      {% if error %}
-      <div class="error">{{ error }}</div>
-      {% endif %}
-      <label for="email">Email</label>
-      <input
-        id="email"
-        name="email"
-        type="email"
-        value="{{ email }}"
-        required
-        autofocus
-      />
-      <label for="password">Contraseña</label>
-      <input id="password" name="password" type="password" required />
-      <button type="submit">Entrar</button>
-    </form>
-  </body>
+<!DOCTYPE html>
+<html lang="{{ lang() }}">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ t(k="login.title") }} — Heartbeat</title>
+  <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
+  <link rel="stylesheet" href="/static/fonts/plex.css">
+  <style>
+    :root { --glass: #0b0c0e; --bay: #111316; --well: #08090a; --graticule: rgba(255,255,255,.075); --graticule-strong: rgba(255,255,255,.12); --ink: #e7e9ec; --ink-3: #6e737c; --ink-4: #454a52; --rhythm-up: #3fd68a; --rhythm-down: #f0514e; --font-sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    html { -webkit-font-smoothing: antialiased; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; background: var(--glass); color: var(--ink); font: 14px/1.5 var(--font-sans); }
+    .panel { width: 100%; max-width: 360px; background: var(--bay); border: 1px solid var(--graticule); border-radius: 10px; padding: 28px 24px 24px; display: flex; flex-direction: column; gap: 16px; }
+    .mark { display: flex; align-items: center; gap: 12px; }
+    .mark img { width: 32px; height: 32px; border-radius: 8px; }
+    .vital { position: relative; width: 8px; height: 8px; border-radius: 50%; background: var(--rhythm-up); margin-left: auto; }
+    .vital::after { content: ""; position: absolute; inset: 0; border-radius: 50%; background: inherit; animation: beat 2.4s cubic-bezier(.23,1,.32,1) infinite; }
+    @keyframes beat { 0% { transform: scale(1); opacity: .55; } 45%, 100% { transform: scale(2.6); opacity: 0; } }
+    @media (prefers-reduced-motion: reduce) { .vital::after { display: none; } }
+    h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -0.01em; }
+    .sub { margin: 2px 0 0; font-size: 13px; color: var(--ink-3); }
+    label { display: block; margin-bottom: 6px; font-size: 11px; font-weight: 500; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); }
+    input { width: 100%; height: 36px; padding: 0 10px; background: var(--well); border: 1px solid var(--graticule-strong); border-radius: 6px; color: var(--ink); font: 14px var(--font-sans); }
+    input:focus-visible, button:focus-visible { outline: 2px solid rgba(231,233,236,.35); outline-offset: 2px; }
+    button { height: 36px; margin-top: 4px; border: 0; border-radius: 6px; background: var(--ink); color: var(--glass); font: 500 14px var(--font-sans); cursor: pointer; transition: background-color 120ms, transform 120ms cubic-bezier(.23,1,.32,1); }
+    button:hover { background: #fff; }
+    button:active { transform: scale(.97); }
+    .error { padding: 10px 12px; border-radius: 6px; background: rgba(240,81,78,.08); border: 1px solid rgba(240,81,78,.25); color: #f7a3a1; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <form class="panel" method="post" action="/login">
+    <div class="mark">
+      <img src="/static/icon.svg" alt="">
+      <div>
+        <h1>{{ t(k="login.heading") }}</h1>
+        <p class="sub">{{ t(k="login.sub") }}</p>
+      </div>
+      <span class="vital" aria-hidden="true"></span>
+    </div>
+    {% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}
+    <div>
+      <label for="email">{{ t(k="login.email") }}</label>
+      <input id="email" name="email" type="email" value="{{ email }}" autocomplete="username" required autofocus>
+    </div>
+    <div>
+      <label for="password">{{ t(k="login.password") }}</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+    </div>
+    <button type="submit">{{ t(k="login.submit") }}</button>
+  </form>
+</body>
 </html>
