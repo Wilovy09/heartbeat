@@ -1,3 +1,4 @@
+mod alert_templates;
 mod alerts;
 #[cfg(test)]
 mod app_tests;
@@ -55,11 +56,17 @@ async fn main() -> std::io::Result<()> {
     let outbound = Outbound::new(&cfg.allowed_hosts)
         .unwrap_or_else(|e| panic!("error creando el cliente HTTP: {e}"));
 
+    let templates = std::sync::Arc::new(
+        alert_templates::TemplateStore::load(&cfg.alert_templates_file, &i18n)
+            .await
+            .unwrap_or_else(|e| panic!("error cargando {}: {e}", cfg.alert_templates_file)),
+    );
     let alerter = Alerter::new(AlertSettings {
         webhook_urls: cfg.alert_webhook_urls.clone(),
         on_degraded: cfg.alert_on_degraded,
         public_url: cfg.public_url.clone(),
         mentions: cfg.alert_mentions.clone(),
+        templates: Some(templates),
     })
     .unwrap_or_else(|e| panic!("error creando el cliente de alertas: {e}"));
 

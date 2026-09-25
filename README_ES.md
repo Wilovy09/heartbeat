@@ -62,9 +62,11 @@ Un solo binario de Rust, sin base de datos: todo se guarda en archivos bajo `dat
   `channel`, IDs de usuario (`U…`) o grupo (`S…`) de Slack, usuarios o roles (`&…`) de
   Discord; ver `.env.example`.
 - **Página de configuración** (`/settings`): haz ping a cada webhook y ve su respuesta
-  ("pong"), revisa y envía una prueba de cada tipo de alerta (caída, degradada,
-  recuperación) con sus menciones, y consulta la configuración actual (los secretos solo
-  aparecen como configurados o no).
+  ("pong"), edita el texto de cada tipo de alerta (caída, degradada, recuperación) con
+  vista previa en vivo y las variables `{app}`, `{message}`, `{latency}`, `{link}` y
+  `{mentions}`, envía una prueba de cada una y consulta la configuración actual (los
+  secretos solo aparecen como configurados o no). Los textos editados se guardan en
+  `ALERT_TEMPLATES_FILE` y aplican sin reiniciar; los de por defecto siguen `APP_LANG`.
 - **Pausa y mantenimiento**: una app pausada no se consulta, y ese tiempo no cuenta para
   su uptime.
 - **Edición**: nombre, URLs, umbral y palabra clave se cambian sin perder el historial ni

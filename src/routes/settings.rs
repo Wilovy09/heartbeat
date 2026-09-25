@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use tera::{Context, Tera};
 
 use crate::{
+    alert_templates::{AlertTemplates, MAX_TEMPLATE_CHARS},
     alerts::{Alerter, TestKind},
     auth,
     config::{AuthMode, Config},
@@ -68,7 +69,16 @@ pub async fn show(
     }
     let mut ctx = Context::new();
     ctx.insert("active", "settings");
-    ctx.insert("alerts", &alerter.as_ref().as_ref().map(Alerter::overview));
+    let overview = alerter.as_ref().as_ref().map(Alerter::overview);
+    // For the Alpine component: templates, defaults and sample values, as a JS literal.
+    let templates_json = overview
+        .as_ref()
+        .and_then(|o| serde_json::to_string(&o.templates).ok())
+        .unwrap_or_else(|| "[]".to_string());
+    let has_mentions = overview.as_ref().is_some_and(|o| !o.mentions.is_empty());
+    ctx.insert("alerts", &overview);
+    ctx.insert("templates_json", &templates_json);
+    ctx.insert("has_mentions", &has_mentions);
     ctx.insert("config", &ConfigView::from(cfg.get_ref()));
     match tera.render("settings.html", &ctx) {
         Ok(html) => HttpResponse::Ok().content_type("text/html").body(html),
@@ -98,4 +108,37 @@ pub async fn test_alert(
     };
     let outcomes = alerter.test(body.target, body.kind).await;
     HttpResponse::Ok().json(serde_json::json!({ "outcomes": outcomes }))
+}
+
+/// POST /settings/alerts/templates -- saves the alert message templates (blank = back to
+/// the default) and answers with the fresh previews.
+pub async fn save_templates(
+    req: HttpRequest,
+    alerter: web::Data<Option<Alerter>>,
+    body: web::Json<AlertTemplates>,
+) -> HttpResponse {
+    if auth::session_token(&req).is_none() {
+        return HttpResponse::Unauthorized().json(serde_json::json!({ "error": "unauthorized" }));
+    }
+    let Some(alerter) = alerter.as_ref().as_ref() else {
+        return HttpResponse::Conflict().json(serde_json::json!({ "error": "no webhooks" }));
+    };
+    let templates = body.into_inner();
+    if let Some(kind) = templates.too_long() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": format!("template too long (max {MAX_TEMPLATE_CHARS} characters)"),
+            "kind": kind,
+        }));
+    }
+    if let Err(e) = alerter.templates().save(templates).await {
+        tracing::error!(error = %e, "settings: could not save alert templates");
+        return HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": e.to_string() }));
+    }
+    tracing::info!("settings: alert templates updated");
+    let overview = alerter.overview();
+    HttpResponse::Ok().json(serde_json::json!({
+        "templates": overview.templates,
+        "previews": overview.previews,
+    }))
 }

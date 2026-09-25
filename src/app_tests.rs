@@ -55,6 +55,7 @@ async fn state() -> TestState {
         alert_webhook_urls: Vec::new(),
         alert_on_degraded: false,
         alert_mentions: Vec::new(),
+        alert_templates_file: path("alert_templates.json"),
         heartbeat_ping_url: None,
         public_url: None,
         sessions_file: path("sessions.json"),

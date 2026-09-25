@@ -96,6 +96,8 @@ pub struct Config {
     pub alert_on_degraded: bool,
     /// Who to ping when an app goes down (`ALERT_MENTIONS`, see `alerts::Mention`).
     pub alert_mentions: Vec<String>,
+    /// Where alert message templates edited from /settings are stored.
+    pub alert_templates_file: String,
     /// Pinged after every round of checks (dead man's switch for the monitor itself).
     pub heartbeat_ping_url: Option<String>,
     /// Public base URL of this deployment, used for links in alerts.
@@ -151,6 +153,8 @@ impl Config {
                 })
                 .unwrap_or_default(),
             alert_on_degraded: parsed("ALERT_ON_DEGRADED", false)?,
+            alert_templates_file: optional("ALERT_TEMPLATES_FILE")
+                .unwrap_or_else(|| "./data/alert_templates.json".to_string()),
             alert_mentions: optional("ALERT_MENTIONS")
                 .map(|v| {
                     v.split(',')

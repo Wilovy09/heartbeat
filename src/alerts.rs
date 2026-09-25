@@ -12,7 +12,9 @@ use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
+use crate::alert_templates::{self, TemplateKind, TemplateStore, TemplateVars};
 use crate::uptime::{Heartbeat, Status};
+use std::sync::Arc;
 
 const WEBHOOK_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -124,6 +126,8 @@ pub struct AlertSettings {
     pub public_url: Option<String>,
     /// `ALERT_MENTIONS` entries (see `Mention`).
     pub mentions: Vec<String>,
+    /// Editable message templates; `None` = Spanish defaults, nothing persisted (tests).
+    pub templates: Option<Arc<TemplateStore>>,
 }
 
 /// How serious a status is for alerting. With `on_degraded` off, degraded counts as fine,
@@ -157,6 +161,8 @@ struct GenericEvent<'a> {
     url: Option<String>,
     /// `ALERT_MENTIONS` entries, only on a change to down.
     mentions: Vec<String>,
+    /// The message rendered from the template, as Slack/Discord would show it.
+    text: String,
 }
 
 #[derive(Serialize)]
@@ -174,6 +180,7 @@ pub struct Alerter {
     mentions: Vec<Mention>,
     /// `ALERT_MENTIONS` entries that didn't parse, shown on the settings page.
     rejected_mentions: Vec<String>,
+    templates: Arc<TemplateStore>,
 }
 
 /// Which sample the settings page sends: a plain connectivity check, or one of the real
@@ -202,6 +209,17 @@ pub struct MentionInfo {
     pub discord: Option<String>,
 }
 
+/// One editable template as the settings page shows it.
+#[derive(Debug, Serialize)]
+pub struct TemplateInfo {
+    pub kind: TemplateKind,
+    pub template: String,
+    pub default: String,
+    pub custom: bool,
+    /// Sample values (Slack-flavored mentions) for the live preview.
+    pub sample: TemplateVars,
+}
+
 /// Everything the settings page shows about alerting.
 #[derive(Debug, Serialize)]
 pub struct AlertOverview {
@@ -211,6 +229,7 @@ pub struct AlertOverview {
     pub on_degraded: bool,
     /// Slack-flavored preview of each alert kind, exactly as it would be sent.
     pub previews: Vec<AlertPreview>,
+    pub templates: Vec<TemplateInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -302,6 +321,11 @@ impl Alerter {
                 .map(|u| u.trim_end_matches('/').to_string()),
             mentions,
             rejected_mentions,
+            templates: settings.templates.unwrap_or_else(|| {
+                Arc::new(TemplateStore::in_memory(&crate::i18n::I18n::new(
+                    crate::i18n::Lang::Es,
+                )))
+            }),
         }))
     }
 
@@ -324,20 +348,15 @@ impl Alerter {
         self.severity(change.to) == Severity::Down
     }
 
-    fn text(&self, flavor: Flavor, change: &StatusChange) -> String {
-        let latency = change
-            .beat
-            .latency_ms
-            .map(|ms| format!(" ({ms} ms)"))
-            .unwrap_or_default();
-        let headline = match (self.severity(change.from), self.severity(change.to)) {
-            (_, Severity::Down) => {
-                format!("🔴 {} está caída: {}", change.name, change.beat.message)
-            }
-            (_, Severity::Degraded) => format!("🟡 {} está degradada{latency}", change.name),
-            (Severity::Down, Severity::Ok) => format!("🟢 {} se recuperó{latency}", change.name),
-            (_, Severity::Ok) => format!("🟢 {} volvió a la normalidad{latency}", change.name),
-        };
+    fn kind(&self, change: &StatusChange) -> TemplateKind {
+        match self.severity(change.to) {
+            Severity::Down => TemplateKind::Down,
+            Severity::Degraded => TemplateKind::Degraded,
+            Severity::Ok => TemplateKind::Recovered,
+        }
+    }
+
+    fn vars(&self, flavor: Flavor, change: &StatusChange) -> TemplateVars {
         let mentions: Vec<String> = if self.pages(change) {
             self.mentions
                 .iter()
@@ -346,15 +365,28 @@ impl Alerter {
         } else {
             Vec::new()
         };
-        let headline = if mentions.is_empty() {
-            headline
-        } else {
-            format!("{} {headline}", mentions.join(" "))
-        };
-        match self.dashboard_url(&change.slug) {
-            Some(url) => format!("{headline}\n{url}"),
-            None => headline,
+        TemplateVars {
+            app: change.name.clone(),
+            message: change.beat.message.clone(),
+            latency: change
+                .beat
+                .latency_ms
+                .map(|ms| format!("{ms} ms"))
+                .unwrap_or_default(),
+            link: self.dashboard_url(&change.slug).unwrap_or_default(),
+            mentions: mentions.join(" "),
         }
+    }
+
+    fn text(&self, flavor: Flavor, change: &StatusChange) -> String {
+        let template = self.templates.effective(self.kind(change));
+        alert_templates::render(&template, &self.vars(flavor, change))
+    }
+
+    /// Where the settings page saves edited templates.
+    #[must_use]
+    pub fn templates(&self) -> &TemplateStore {
+        &self.templates
     }
 
     fn dashboard_url(&self, slug: &str) -> Option<String> {
@@ -388,6 +420,7 @@ impl Alerter {
                 } else {
                     Vec::new()
                 },
+                text: self.text(flavor, change),
             })
             .unwrap_or_default(),
         }
@@ -491,6 +524,23 @@ impl Alerter {
                 .collect(),
             rejected_mentions: self.rejected_mentions.clone(),
             on_degraded: self.on_degraded,
+            templates: TemplateKind::ALL
+                .into_iter()
+                .filter_map(|kind| {
+                    let test_kind = match kind {
+                        TemplateKind::Down => TestKind::Down,
+                        TemplateKind::Degraded => TestKind::Degraded,
+                        TemplateKind::Recovered => TestKind::Recovered,
+                    };
+                    Self::sample(test_kind).map(|change| TemplateInfo {
+                        kind,
+                        template: self.templates.effective(kind),
+                        default: self.templates.default_for(kind),
+                        custom: self.templates.is_custom(kind),
+                        sample: samples.vars(Flavor::Slack, &change),
+                    })
+                })
+                .collect(),
             previews: [TestKind::Down, TestKind::Degraded, TestKind::Recovered]
                 .into_iter()
                 .filter_map(|kind| {
@@ -580,6 +630,7 @@ mod tests {
             on_degraded,
             public_url: Some("https://status.example.com/".to_string()),
             mentions: mentions.iter().map(|m| (*m).to_string()).collect(),
+            templates: None,
         })
         .unwrap()
         .unwrap()
@@ -778,5 +829,43 @@ mod tests {
 
         let none = alerter.test(Some(7), TestKind::Ping).await;
         assert!(none.is_empty(), "an out-of-range target sends nothing");
+    }
+
+    #[tokio::test]
+    async fn real_alerts_use_the_saved_template() {
+        let store = Arc::new(TemplateStore::in_memory(&crate::i18n::I18n::new(
+            crate::i18n::Lang::En,
+        )));
+        let alerter = Alerter::new(AlertSettings {
+            webhook_urls: vec!["https://hooks.slack.com/services/T/B/x".to_string()],
+            mentions: vec!["here".to_string()],
+            templates: Some(store.clone()),
+            ..AlertSettings::default()
+        })
+        .unwrap()
+        .unwrap();
+        let down = change(Status::Up, Status::Down);
+        assert!(
+            alerter
+                .text(Flavor::Slack, &down)
+                .starts_with("<!here> 🔴 Billing API is down")
+        );
+
+        store
+            .save(crate::alert_templates::AlertTemplates {
+                down: Some("{mentions} CAÍDA {app} -> {message}".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            alerter.text(Flavor::Slack, &down),
+            "<!here> CAÍDA Billing API -> HTTP 503 Service Unavailable"
+        );
+        let generic = alerter.payload(Flavor::Generic, &down);
+        assert_eq!(
+            generic["text"],
+            "CAÍDA Billing API -> HTTP 503 Service Unavailable"
+        );
     }
 }

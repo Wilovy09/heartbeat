@@ -42,6 +42,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             "/settings/alerts/test",
             web::post().to(settings::test_alert),
         )
+        .route(
+            "/settings/alerts/templates",
+            web::post().to(settings::save_templates),
+        )
         .route("/api/uptime", web::get().to(uptime::overview))
         .route("/api/uptime/{slug}", web::get().to(uptime::detail));
 }

@@ -61,8 +61,11 @@ A single Rust binary, no database: everything is stored in files under `data/`.
   pings people when an app goes down: `here`, `channel`, Slack user (`U…`) or user group
   (`S…`) IDs, Discord user IDs or roles (`&…`); see `.env.example`.
 - **Settings page** (`/settings`): ping each webhook and see its answer ("pong"),
-  preview and send a test of every alert kind (down, degraded, recovery) with its
-  mentions, and review the current configuration (secrets shown only as set / not set).
+  edit the text of each alert kind (down, degraded, recovery) with a live preview and the
+  variables `{app}`, `{message}`, `{latency}`, `{link}` and `{mentions}`, send a test of
+  each, and review the current configuration (secrets shown only as set / not set). Edited
+  texts are stored in `ALERT_TEMPLATES_FILE` and apply without a restart; the defaults
+  follow `APP_LANG`.
 - **Pause and maintenance**: a paused app isn't checked, and that time doesn't count
   against its uptime.
 - **Editing**: name, URLs, threshold and keyword can change without losing the history or

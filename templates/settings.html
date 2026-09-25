@@ -8,7 +8,7 @@
   </div>
 </header>
 
-<div class="settings" x-data="settingsPage()">
+<div class="settings" x-data="settingsPage({{ templates_json }})">
   <!-- Webhooks: ping-pong -->
   <section class="bay">
     <h2 class="bay-title">{{ t(k="settings.webhooks") }}</h2>
@@ -49,26 +49,44 @@
       {% endif %}
     </div>
     <div class="samples">
-      {% for preview in alerts.previews %}
-      {% set kind = preview.kind %}
+      {% for tpl in alerts.templates %}
+      {% set kind = tpl.kind %}
       <article class="sample">
         <header class="sample-head">
           <span class="vital st-{% if kind == "down" %}down{% elif kind == "degraded" %}degraded{% else %}up{% endif %}"></span>
           <h3>{{ t(k="settings.kind_" ~ kind) }}</h3>
+          <span class="tpl-state" x-text="stateLabel('{{ kind }}')"></span>
         </header>
-        <pre class="preview mono">{{ preview.text }}</pre>
+
+        <label class="tpl-label" for="tpl-{{ kind }}">{{ t(k="settings.template") }}</label>
+        <textarea id="tpl-{{ kind }}" class="tpl-input mono" rows="3" spellcheck="false" x-ref="tpl_{{ kind }}" x-model="tpl['{{ kind }}'].template"></textarea>
+        <div class="vars" role="group" aria-label="{{ t(k="settings.variables") }}">
+          <template x-for="name in VARIABLES" :key="name">
+            <button type="button" class="var" @click="insertVar('{{ kind }}', name)" :title="T('settings.var_' + name)" x-text="'{' + name + '}'"></button>
+          </template>
+        </div>
+        {% if kind == "down" and has_mentions %}
+        <p class="hint warn" x-show="!tpl['down'].template.includes('{mentions}')">{{ t(k="settings.no_mentions_var") }}</p>
+        {% endif %}
+
+        <span class="tpl-label">{{ t(k="settings.preview") }}</span>
+        <pre class="preview mono" x-text="preview('{{ kind }}')"></pre>
         {% if kind == "degraded" and not alerts.on_degraded %}
         <p class="hint">{{ t(k="settings.degraded_off") }}</p>
         {% endif %}
+
         <div class="sample-foot">
           <span class="result" x-show="results['{{ kind }}']" x-html="resultHtml('{{ kind }}')"></span>
-          <button type="button" class="btn secondary" :disabled="busy['{{ kind }}']" @click="send('{{ kind }}', target, '{{ kind }}')">
+          <button type="button" class="btn ghost" x-show="tpl['{{ kind }}'].template !== tpl['{{ kind }}'].default" @click="restore('{{ kind }}')">{{ t(k="settings.restore") }}</button>
+          <button type="button" class="btn secondary" x-show="dirty('{{ kind }}')" :disabled="saving" @click="save()">{{ t(k="settings.save") }}</button>
+          <button type="button" class="btn secondary" :disabled="busy['{{ kind }}']" @click="sendSample('{{ kind }}')">
             <span x-text="busy['{{ kind }}'] ? T('settings.sending') : '{{ t(k="settings.send_sample") }}'"></span>
           </button>
         </div>
       </article>
       {% endfor %}
     </div>
+    <p class="error-box" x-show="saveError" x-text="saveError" style="margin: 12px 0 0"></p>
     <p class="hint">{{ t(k="settings.samples_hint") }}</p>
   </section>
 
@@ -146,6 +164,15 @@
   .sample-head h3 { font-size: 14px; font-weight: 500; }
   .preview { margin: 0; padding: 10px 12px; border-radius: 6px; background: var(--well); border: 1px solid var(--graticule-soft); font-size: 12px; line-height: 1.6; color: var(--ink-2); white-space: pre-wrap; word-break: break-word; flex: 1; }
   .sample .hint { margin: 0; }
+  .hint.warn { color: var(--rhythm-degraded); }
+  .tpl-state { margin-left: auto; font-size: 11px; color: var(--ink-3); }
+  .tpl-label { margin: 0; font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); }
+  .tpl-input { width: 100%; min-height: 76px; padding: 8px 10px; resize: vertical; background: var(--well); border: 1px solid var(--graticule-strong); border-radius: 6px; color: var(--ink); font-size: 12px; line-height: 1.6; }
+  .tpl-input:focus-visible { outline: 2px solid rgba(231, 233, 236, 0.35); outline-offset: 2px; }
+  .vars { display: flex; flex-wrap: wrap; gap: 4px; }
+  .var { height: 22px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--graticule); background: var(--bay-raised); color: var(--ink-2); font: 11px var(--font-mono); cursor: pointer; transition: color 120ms, border-color 120ms; }
+  .var:hover { color: var(--ink); border-color: var(--graticule-strong); }
+  .preview { flex: 0 0 auto; min-height: 58px; }
   .sample-foot { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
 
   .mention-table td { font-size: 12px; }
