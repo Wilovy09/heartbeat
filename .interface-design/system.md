@@ -88,13 +88,20 @@ Reglas de color:
   URLs se capturan en mono 12 px (`.mono-input`).
 - **Punto de estado (`.vital`):** 8 px; 14 px en el veredicto (`.vital-lg`). El latido es
   un `::after` que escala a 2.6× y se desvanece: 2.4 s arriba, 3.6 s degradado. Caído: sin
-  latido y con un halo rojo de 3 px. Sin datos: gris con borde interno.
+  latido y con un halo rojo de 3 px. Sin datos: gris con borde interno. Pausada
+  (`.st-paused`): anillo hueco en `--ink-3`, sin latido.
 - **Tira de checks (`.beats` / `.beat`):** barras de radio 2 px. Canal del rail: 14 px de
   alto, 40 checks. Detalle: 32 px de alto, 100 checks, separación 2 px. Fila de Logs:
   16 px, 30 checks. Alineada a la derecha: los espacios vacíos quedan a la izquierda.
 - **Lectura (`.readout`):** etiqueta en `.readout-label` sobre el valor en mono 22 px/500.
-- **Conteo por estado (`.census`):** 4 celdas separadas por `--graticule-soft`, valor mono
-  28 px.
+- **Conteo por estado (`.census`):** celdas `auto-fit` (mín. 120 px) separadas por
+  `--graticule-soft`, valor mono 28 px. "Pausadas" solo aparece si hay alguna.
+- **Chip (`.chip`):** 20 px de alto, radio 4 px, `--bay-raised` con borde `--graticule`,
+  11 px/500 `--ink-2`. Marca estados de una ficha ("Pausada", "Pública").
+- **Aviso (`.notice`):** panel con punto de estado + texto 13 px `--ink-2`, para estados
+  que el usuario eligió (p. ej. monitoreo en pausa). No es un error.
+- **Desplegable (`details` con `summary` 12 px `--ink-3` y flecha ▸ que gira 90°):**
+  opciones avanzadas, edición y código del embed. Se abre solo si hay un error adentro.
 - **Control segmentado (`.segmented`):** fondo `--well`, botones mono de 26 px. El activo
   va en `--bay-raised` con un anillo de 1 px.
 - **Línea de tiempo (`.timeline` / `.event`):** columnas hora (130 px, mono 12) · estado
@@ -117,4 +124,18 @@ Reglas de color:
   - Por debajo de 900 px, el área principal va primero.
 - **Logs:** un solo panel con filas: punto · nombre y slug · tira · % · "Abrir logs →".
 - **Apps:** formulario fijo de 340 px más fichas con URLs, embed y acciones. Los hosts
-  permitidos se muestran en el formulario.
+  permitidos se muestran en el formulario. Cada ficha: cabecera con chips y acciones
+  (Pausar/Reanudar, Rotar token, Eliminar), URLs, edición desplegable y embed con
+  "Publicar en /status". Un error de validación aparece dentro del formulario que falló y
+  conserva lo escrito.
+- **Estado público (`/status`):** columna de 760 px, sin navegación de admin (bloque
+  `topbar` reemplazado). Veredicto 28 px, filas con punto · nombre · estado en texto ·
+  % · tira de 60 checks (30 en móvil).
+- **Login:** panel único de 360 px centrado, logo + punto vivo, mismos tokens.
+
+## Textos e idiomas
+
+- Nada de texto fijo en plantillas ni JS: servidor `{{ t(k="...") }}` (`locales/*.json`),
+  cliente `T('...')` (`static/i18n/*.js`). Un test exige las mismas claves en `es` y `en`.
+- Voz: directa y concreta, sin jerga. Los estados se nombran igual en todas partes
+  (Up / Degradado / Down / Pausada / Sin datos).
