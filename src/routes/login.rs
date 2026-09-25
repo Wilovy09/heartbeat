@@ -1,7 +1,10 @@
-//! Login: proxies credentials to the real login endpoint (see `Config::login_url`), and
-//! only lets the browser in if that endpoint's response says `is_admin: true`. That field
-//! is the login server's own decision (ideally a live lookup, not a JWT claim) -- this app
-//! never re-implements that check, it just reads the verdict.
+//! Login, in one of two modes (`config::AuthMode`):
+//! - `Upstream`: credentials go to an external login endpoint, and the browser gets in only
+//!   if its response says `is_admin: true` -- that verdict is the login server's own
+//!   decision, this app never re-implements it.
+//! - `Password`: one local admin, checked against an argon2 hash.
+//!
+//! Failed attempts are throttled per IP and per email (`security::LoginLimiter`).
 
 use actix_web::{HttpRequest, HttpResponse, web};
 use serde::Deserialize;
@@ -9,7 +12,9 @@ use tera::{Context, Tera};
 
 use crate::{
     auth::{self, SessionStore},
-    config::Config,
+    config::{AuthMode, Config},
+    i18n::I18n,
+    security::{self, LoginLimiter},
 };
 
 fn render_login(tera: &Tera, error: Option<&str>, email: &str) -> HttpResponse {
@@ -32,81 +37,149 @@ pub struct LoginForm {
     password: String,
 }
 
-pub async fn submit_login(
-    tera: web::Data<Tera>,
-    cfg: web::Data<Config>,
-    sessions: web::Data<SessionStore>,
-    form: web::Form<LoginForm>,
-) -> HttpResponse {
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(&cfg.login_url)
+/// Why a login attempt didn't produce a session. Only `Rejected` counts toward the
+/// brute-force throttle: an unreachable login server says nothing about the password.
+/// Both carry a catalog key; `Rejected` may also carry the login server's own message,
+/// shown as-is when present.
+enum LoginFailure {
+    Rejected {
+        key: &'static str,
+        upstream: Option<String>,
+    },
+    Unavailable(&'static str),
+}
+
+impl LoginFailure {
+    fn rejected(key: &'static str) -> Self {
+        Self::Rejected {
+            key,
+            upstream: None,
+        }
+    }
+
+    fn message(&self, i18n: &I18n) -> String {
+        match self {
+            Self::Rejected {
+                upstream: Some(msg),
+                ..
+            } => msg.clone(),
+            Self::Rejected { key, .. } | Self::Unavailable(key) => i18n.text(key, &[]),
+        }
+    }
+}
+
+/// Checks the credentials; on success returns the token to keep in the session (empty when
+/// the mode has none).
+async fn authenticate(cfg: &Config, form: &LoginForm) -> Result<String, LoginFailure> {
+    match &cfg.auth {
+        AuthMode::Upstream { login_url } => authenticate_upstream(login_url, form).await,
+        AuthMode::Password {
+            email,
+            password_hash,
+        } => authenticate_password(email, password_hash, form).await,
+    }
+}
+
+async fn authenticate_password(
+    admin_email: &str,
+    password_hash: &str,
+    form: &LoginForm,
+) -> Result<String, LoginFailure> {
+    let hash = password_hash.to_string();
+    let password = form.password.clone();
+    // argon2 is deliberately slow CPU work: keep it off the async executor. The password is
+    // verified even when the email is wrong, so timing doesn't reveal which one failed.
+    let password_ok =
+        tokio::task::spawn_blocking(move || crate::password::verify(&password, &hash))
+            .await
+            .unwrap_or(false);
+    if password_ok && form.email.trim().eq_ignore_ascii_case(admin_email) {
+        Ok(String::new())
+    } else {
+        Err(LoginFailure::rejected("login.invalid"))
+    }
+}
+
+async fn authenticate_upstream(login_url: &str, form: &LoginForm) -> Result<String, LoginFailure> {
+    let resp = reqwest::Client::new()
+        .post(login_url)
         .json(&serde_json::json!({ "email": form.email, "password": form.password }))
         .send()
-        .await;
-
-    let resp = match resp {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "login: no se pudo contactar el endpoint de login");
-            return render_login(
-                &tera,
-                Some("No se pudo contactar el servidor de login. Intenta de nuevo."),
-                &form.email,
-            );
-        }
-    };
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "login: could not reach the login endpoint");
+            LoginFailure::Unavailable("login.unreachable")
+        })?;
 
     let status = resp.status();
-    let body: serde_json::Value = match resp.json().await {
-        Ok(b) => b,
-        Err(_) => {
-            return render_login(
-                &tera,
-                Some("El servidor de login regresó una respuesta inválida."),
-                &form.email,
-            );
-        }
-    };
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|_| LoginFailure::Unavailable("login.bad_response"))?;
 
     if !status.is_success() {
-        let msg = body
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Credenciales inválidas.");
-        return render_login(&tera, Some(msg), &form.email);
+        return Err(LoginFailure::Rejected {
+            key: "login.invalid",
+            upstream: body
+                .get("error")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        });
     }
 
     let is_admin = body
         .get("is_admin")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     if !is_admin {
-        tracing::info!(email = %form.email, "login: usuario válido pero no es admin, acceso denegado");
-        return render_login(
-            &tera,
-            Some("Tu cuenta no tiene permisos de administrador."),
-            &form.email,
-        );
+        tracing::info!(email = %form.email, "login: valid user without admin rights, denied");
+        return Err(LoginFailure::rejected("login.not_admin"));
     }
 
-    let Some(token) = body.get("access_token").and_then(|v| v.as_str()) else {
-        return render_login(
-            &tera,
-            Some("El login no regresó un token de sesión válido."),
-            &form.email,
-        );
-    };
+    body.get("access_token")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or(LoginFailure::Unavailable("login.no_token"))
+}
 
-    let session_id = match sessions.create(token.to_string()) {
+pub async fn submit_login(
+    req: HttpRequest,
+    tera: web::Data<Tera>,
+    cfg: web::Data<Config>,
+    i18n: web::Data<I18n>,
+    sessions: web::Data<SessionStore>,
+    limiter: web::Data<LoginLimiter>,
+    form: web::Form<LoginForm>,
+) -> HttpResponse {
+    let ip = security::client_ip(&req);
+    if let Some(wait) = limiter.locked_for(&ip, &form.email) {
+        tracing::warn!(%ip, email = %form.email, "login: throttled");
+        let minutes = wait.as_secs().div_ceil(60).max(1).to_string();
+        let msg = i18n.text("login.throttled", &[("minutes", &minutes)]);
+        return render_login(&tera, Some(&msg), &form.email);
+    }
+
+    let token = match authenticate(&cfg, &form).await {
+        Ok(token) => token,
+        Err(failure) => {
+            if matches!(failure, LoginFailure::Rejected { .. }) {
+                limiter.record_failure(&ip, &form.email);
+            }
+            return render_login(&tera, Some(&failure.message(&i18n)), &form.email);
+        }
+    };
+    limiter.record_success(&ip, &form.email);
+
+    let session_id = match sessions.create(token).await {
         Ok(id) => id,
         Err(e) => {
-            tracing::error!(error = %e, "login: could not generate a session id");
-            return render_login(&tera, Some("No se pudo iniciar la sesión."), &form.email);
+            tracing::error!(error = %e, "login: could not start a session");
+            let msg = i18n.text("login.session_failed", &[]);
+            return render_login(&tera, Some(&msg), &form.email);
         }
     };
 
-    tracing::info!(email = %form.email, "login: acceso de admin concedido");
+    tracing::info!(email = %form.email, "login: admin access granted");
     HttpResponse::Found()
         .append_header(("Location", "/"))
         .cookie(auth::build_session_cookie(session_id, cfg.cookie_secure))
@@ -118,8 +191,10 @@ pub async fn logout(
     cfg: web::Data<Config>,
     sessions: web::Data<SessionStore>,
 ) -> HttpResponse {
-    if let Some(cookie) = req.cookie(auth::SESSION_COOKIE) {
-        sessions.remove(cookie.value());
+    if let Some(cookie) = req.cookie(auth::SESSION_COOKIE)
+        && let Err(e) = sessions.remove(cookie.value()).await
+    {
+        tracing::error!(error = %e, "logout: could not persist the session removal");
     }
     HttpResponse::Found()
         .append_header(("Location", "/login"))
