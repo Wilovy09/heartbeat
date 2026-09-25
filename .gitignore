@@ -1,3 +1,6 @@
 /target
 /data
 .env
+PLAN.md
+test.html
+tests/e2e/node_modules
