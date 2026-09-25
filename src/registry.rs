@@ -5,8 +5,64 @@
 //! for anything more granular).
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
+
+/// Every way a registry operation can fail. The messages are shown to the admin as-is in
+/// the /apps form, hence Spanish.
+#[derive(Debug, thiserror::Error)]
+pub enum RegistryError {
+    #[error("El nombre no puede estar vacío")]
+    EmptyName,
+    #[error("El nombre debe tener al menos una letra o número")]
+    NameWithoutAlphanumerics,
+    #[error("La URL de {0} debe empezar con http:// o https://")]
+    InvalidUrl(&'static str),
+    #[error("Ya existe una app registrada con un nombre equivalente")]
+    SlugTaken,
+    #[error("No se encontró la app '{0}'")]
+    NotFound(String),
+    #[error("No se pudo generar el token: {0}")]
+    Token(#[from] getrandom::Error),
+    #[error("Error de E/S en {path}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{path} no es un registro de apps válido: {source}")]
+    Json {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+impl RegistryError {
+    fn io(path: &Path) -> impl FnOnce(std::io::Error) -> Self + '_ {
+        move |source| Self::Io {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+}
+
+type Result<T> = std::result::Result<T, RegistryError>;
+
+impl crate::i18n::Localize for RegistryError {
+    fn localize(&self, i18n: &crate::i18n::I18n) -> String {
+        match self {
+            Self::EmptyName => i18n.text("err.empty_name", &[]),
+            Self::NameWithoutAlphanumerics => i18n.text("err.name_no_alnum", &[]),
+            Self::InvalidUrl(label) => i18n.text("err.invalid_url", &[("label", label)]),
+            Self::SlugTaken => i18n.text("err.slug_taken", &[]),
+            Self::NotFound(slug) => i18n.text("err.not_found", &[("slug", slug)]),
+            Self::Token(_) | Self::Io { .. } | Self::Json { .. } => {
+                i18n.text("err.internal", &[("error", &self.to_string())])
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisteredApp {
@@ -24,6 +80,54 @@ pub struct RegisteredApp {
     /// one generated there.
     #[serde(default)]
     pub embed_token: String,
+    /// Paused apps aren't probed, so maintenance time doesn't count against their uptime.
+    #[serde(default)]
+    pub paused: bool,
+    /// Listed on the public `/status` page.
+    #[serde(default)]
+    pub public: bool,
+    /// Per-app "degraded" threshold; `None` = the global `UPTIME_DEGRADED_MS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded_after_ms: Option<u32>,
+    /// Text the health response body must contain to count as up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect_body: Option<String>,
+}
+
+/// What an admin sets when registering or editing an app. The slug and embed token are
+/// not part of it: they're assigned once and survive every edit.
+#[derive(Debug, Clone, Default)]
+pub struct AppSettings {
+    pub name: String,
+    pub logs_url: String,
+    pub health_url: String,
+    pub degraded_after_ms: Option<u32>,
+    pub expect_body: Option<String>,
+}
+
+impl AppSettings {
+    /// Trims every field, turns blank optionals into `None`, and validates.
+    fn normalized(self) -> Result<Self> {
+        let name = self.name.trim().to_string();
+        if name.is_empty() {
+            return Err(RegistryError::EmptyName);
+        }
+        let logs_url = self.logs_url.trim().to_string();
+        let health_url = self.health_url.trim().to_string();
+        validate_url(&logs_url, "logs")?;
+        validate_url(&health_url, "health")?;
+        let expect_body = self
+            .expect_body
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        Ok(Self {
+            name,
+            logs_url,
+            health_url,
+            degraded_after_ms: self.degraded_after_ms.filter(|&ms| ms > 0),
+            expect_body,
+        })
+    }
 }
 
 impl RegisteredApp {
@@ -44,8 +148,8 @@ impl RegisteredApp {
 }
 
 /// 24 random bytes, hex-encoded (48 chars).
-fn new_embed_token() -> anyhow::Result<String> {
-    crate::token::random_hex(24).map_err(|e| anyhow::anyhow!("no se pudo generar el token: {e}"))
+fn new_embed_token() -> Result<String> {
+    Ok(crate::token::random_hex(24)?)
 }
 
 pub struct AppRegistry {
@@ -73,20 +177,24 @@ fn slugify(name: &str) -> String {
     slug
 }
 
-fn validate_url(url: &str, label: &str) -> anyhow::Result<()> {
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        anyhow::bail!("La URL de {label} debe empezar con http:// o https://");
+fn validate_url(url: &str, label: &'static str) -> Result<()> {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        Ok(())
+    } else {
+        Err(RegistryError::InvalidUrl(label))
     }
-    Ok(())
 }
 
 impl AppRegistry {
-    pub async fn load(path: impl Into<PathBuf>) -> anyhow::Result<Self> {
+    pub async fn load(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         let mut apps: Vec<RegisteredApp> = match tokio::fs::read_to_string(&path).await {
-            Ok(raw) => serde_json::from_str(&raw)?,
+            Ok(raw) => serde_json::from_str(&raw).map_err(|source| RegistryError::Json {
+                path: path.clone(),
+                source,
+            })?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(RegistryError::io(&path)(e)),
         };
         let mut backfilled = false;
         for app in apps.iter_mut().filter(|a| a.embed_token.is_empty()) {
@@ -103,13 +211,19 @@ impl AppRegistry {
         Ok(registry)
     }
 
-    async fn persist(&self, apps: &[RegisteredApp]) -> anyhow::Result<()> {
+    async fn persist(&self, apps: &[RegisteredApp]) -> Result<()> {
         if let Some(parent) = self.path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(RegistryError::io(parent))?;
         }
-        let raw = serde_json::to_string_pretty(apps)?;
-        tokio::fs::write(&self.path, raw).await?;
-        Ok(())
+        let raw = serde_json::to_string_pretty(apps).map_err(|source| RegistryError::Json {
+            path: self.path.clone(),
+            source,
+        })?;
+        tokio::fs::write(&self.path, raw)
+            .await
+            .map_err(RegistryError::io(&self.path))
     }
 
     pub async fn list(&self) -> Vec<RegisteredApp> {
@@ -125,68 +239,154 @@ impl AppRegistry {
             .cloned()
     }
 
-    /// Adds `name`/`logs_url`/`health_url`, returns the new entry's slug. Errors on a blank
-    /// name/URL or a slug collision (two names that normalize the same way, e.g. "API Test"
-    /// and "api-test") rather than silently overwriting the earlier registration.
-    pub async fn add(
-        &self,
-        name: &str,
-        logs_url: &str,
-        health_url: &str,
-    ) -> anyhow::Result<String> {
-        let name = name.trim();
-        let logs_url = logs_url.trim();
-        let health_url = health_url.trim();
-        if name.is_empty() {
-            anyhow::bail!("El nombre no puede estar vacío");
-        }
-        validate_url(logs_url, "logs")?;
-        validate_url(health_url, "health")?;
-        let slug = slugify(name);
+    /// Registers an app, returns its new slug. Errors on a blank name/URL or a slug
+    /// collision (two names that normalize the same way, e.g. "API Test" and "api-test")
+    /// rather than silently overwriting the earlier registration.
+    pub async fn add(&self, settings: AppSettings) -> Result<String> {
+        let settings = settings.normalized()?;
+        let slug = slugify(&settings.name);
         if slug.is_empty() {
-            anyhow::bail!("El nombre debe tener al menos una letra o número");
+            return Err(RegistryError::NameWithoutAlphanumerics);
         }
 
         let mut apps = self.apps.write().await;
         if apps.iter().any(|a| a.slug == slug) {
-            anyhow::bail!("Ya existe una app registrada con un nombre equivalente");
+            return Err(RegistryError::SlugTaken);
         }
         apps.push(RegisteredApp {
             slug: slug.clone(),
-            name: name.to_string(),
-            logs_url: logs_url.to_string(),
-            health_url: Some(health_url.to_string()),
+            name: settings.name,
+            logs_url: settings.logs_url,
+            health_url: Some(settings.health_url),
             embed_token: new_embed_token()?,
+            paused: false,
+            public: false,
+            degraded_after_ms: settings.degraded_after_ms,
+            expect_body: settings.expect_body,
         });
         self.persist(&apps).await?;
         Ok(slug)
     }
 
-    /// Replaces the app's embed token, invalidating every embed that uses the old one.
-    pub async fn rotate_embed_token(&self, slug: &str) -> anyhow::Result<()> {
+    /// Applies `change` to one app and persists, or reports it missing.
+    async fn modify(
+        &self,
+        slug: &str,
+        change: impl FnOnce(&mut RegisteredApp) -> Result<()>,
+    ) -> Result<()> {
         let mut apps = self.apps.write().await;
-        let Some(app) = apps.iter_mut().find(|a| a.slug == slug) else {
-            anyhow::bail!("No se encontró la app '{slug}'");
-        };
-        app.embed_token = new_embed_token()?;
+        let app = apps
+            .iter_mut()
+            .find(|a| a.slug == slug)
+            .ok_or_else(|| RegistryError::NotFound(slug.to_string()))?;
+        change(app)?;
         self.persist(&apps).await
     }
 
-    pub async fn remove(&self, slug: &str) -> anyhow::Result<()> {
+    /// Replaces an app's settings. Its slug, embed token and history stay the same.
+    pub async fn update(&self, slug: &str, settings: AppSettings) -> Result<()> {
+        let settings = settings.normalized()?;
+        self.modify(slug, |app| {
+            app.name = settings.name;
+            app.logs_url = settings.logs_url;
+            app.health_url = Some(settings.health_url);
+            app.degraded_after_ms = settings.degraded_after_ms;
+            app.expect_body = settings.expect_body;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn set_paused(&self, slug: &str, paused: bool) -> Result<()> {
+        self.modify(slug, |app| {
+            app.paused = paused;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn set_public(&self, slug: &str, public: bool) -> Result<()> {
+        self.modify(slug, |app| {
+            app.public = public;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Replaces the app's embed token, invalidating every embed that uses the old one.
+    pub async fn rotate_embed_token(&self, slug: &str) -> Result<()> {
+        self.modify(slug, |app| {
+            app.embed_token = new_embed_token()?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn remove(&self, slug: &str) -> Result<()> {
         let mut apps = self.apps.write().await;
         let before = apps.len();
         apps.retain(|a| a.slug != slug);
         if apps.len() == before {
-            anyhow::bail!("No se encontró la app '{slug}'");
+            return Err(RegistryError::NotFound(slug.to_string()));
         }
-        self.persist(&apps).await?;
-        Ok(())
+        self.persist(&apps).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn settings(name: &str, logs_url: &str, health_url: &str) -> AppSettings {
+        AppSettings {
+            name: name.to_string(),
+            logs_url: logs_url.to_string(),
+            health_url: health_url.to_string(),
+            ..AppSettings::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn update_keeps_slug_and_token_and_pause_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("apps.json");
+        let registry = AppRegistry::load(&file).await.unwrap();
+        let slug = registry
+            .add(settings(
+                "Billing API",
+                "https://x/logs",
+                "https://x/health",
+            ))
+            .await
+            .unwrap();
+        let token = registry.find(&slug).await.unwrap().embed_token;
+
+        let mut changed = settings("Billing API v2", "https://y/logs", "https://y/health");
+        changed.degraded_after_ms = Some(1500);
+        changed.expect_body = Some("  ok  ".to_string());
+        registry.update(&slug, changed).await.unwrap();
+        registry.set_paused(&slug, true).await.unwrap();
+        registry.set_public(&slug, true).await.unwrap();
+
+        let app = AppRegistry::load(&file)
+            .await
+            .unwrap()
+            .find(&slug)
+            .await
+            .unwrap();
+        assert_eq!(app.name, "Billing API v2");
+        assert_eq!(app.embed_token, token);
+        assert_eq!(app.degraded_after_ms, Some(1500));
+        assert_eq!(app.expect_body.as_deref(), Some("ok"));
+        assert!(app.paused && app.public);
+
+        assert!(matches!(
+            registry
+                .update("missing", settings("a", "https://x", "https://x"))
+                .await,
+            Err(RegistryError::NotFound(_))
+        ));
+    }
 
     #[test]
     fn slugify_lowercases_and_collapses_punctuation() {
@@ -202,7 +402,11 @@ mod tests {
             .await
             .unwrap();
         let slug = registry
-            .add("Billing API", "https://x/logs", "https://x/health")
+            .add(settings(
+                "Billing API",
+                "https://x/logs",
+                "https://x/health",
+            ))
             .await
             .unwrap();
         assert_eq!(slug, "billing-api");
@@ -219,11 +423,19 @@ mod tests {
             .await
             .unwrap();
         registry
-            .add("Billing API", "https://x/logs", "https://x/health")
+            .add(settings(
+                "Billing API",
+                "https://x/logs",
+                "https://x/health",
+            ))
             .await
             .unwrap();
         let err = registry
-            .add("billing api", "https://y/logs", "https://y/health")
+            .add(settings(
+                "billing api",
+                "https://y/logs",
+                "https://y/health",
+            ))
             .await;
         assert!(err.is_err());
     }
@@ -234,7 +446,9 @@ mod tests {
         let registry = AppRegistry::load(dir.path().join("apps.json"))
             .await
             .unwrap();
-        let err = registry.add("Bad", "not-a-url", "https://x/health").await;
+        let err = registry
+            .add(settings("Bad", "not-a-url", "https://x/health"))
+            .await;
         assert!(err.is_err());
     }
 
@@ -244,7 +458,7 @@ mod tests {
         let registry = AppRegistry::load(dir.path().join("apps.json"))
             .await
             .unwrap();
-        let err = registry.add("Bad", "https://x/logs", "").await;
+        let err = registry.add(settings("Bad", "https://x/logs", "")).await;
         assert!(err.is_err());
     }
 
@@ -269,7 +483,11 @@ mod tests {
             .await
             .unwrap();
         let slug = registry
-            .add("Billing API", "https://x/logs", "https://x/health")
+            .add(settings(
+                "Billing API",
+                "https://x/logs",
+                "https://x/health",
+            ))
             .await
             .unwrap();
         let app = registry.find(&slug).await.unwrap();
@@ -313,7 +531,11 @@ mod tests {
         {
             let registry = AppRegistry::load(&file).await.unwrap();
             registry
-                .add("Billing API", "https://x/logs", "https://x/health")
+                .add(settings(
+                    "Billing API",
+                    "https://x/logs",
+                    "https://x/health",
+                ))
                 .await
                 .unwrap();
         }
@@ -327,7 +549,11 @@ mod tests {
         let file = dir.path().join("apps.json");
         let registry = AppRegistry::load(&file).await.unwrap();
         let slug = registry
-            .add("Billing API", "https://x/logs", "https://x/health")
+            .add(settings(
+                "Billing API",
+                "https://x/logs",
+                "https://x/health",
+            ))
             .await
             .unwrap();
         registry.remove(&slug).await.unwrap();

@@ -1,78 +1,140 @@
 {% extends "base.html" %}
-{% block title %}Apps — Heartbeat{% endblock %}
+{% block title %}{{ t(k="apps.title") }} — Heartbeat{% endblock %}
 {% block content %}
 <header class="page-head">
   <div>
-    <h1 class="page-title">Apps</h1>
-    <p class="page-sub">Registra una app para monitorear su health, leer sus logs y publicar su estado en otras webs.</p>
+    <h1 class="page-title">{{ t(k="apps.title") }}</h1>
+    <p class="page-sub">{{ t(k="apps.sub") }}</p>
   </div>
+  <a class="btn ghost" href="/status" target="_blank" rel="noopener">{{ t(k="apps.status_page") }}</a>
 </header>
+{% if error %}<div class="error-box" role="alert">{{ error }}</div>{% endif %}
 
 <div class="registry">
   <form class="bay intake" method="post" action="/apps">
-    <h2 class="intake-title">Registrar app</h2>
-    {% if error %}<div class="error-box" role="alert">{{ error }}</div>{% endif %}
+    <h2 class="intake-title">{{ t(k="apps.register") }}</h2>
+    {% if register_values %}<div class="error-box" role="alert">{{ form_error }}</div>{% endif %}
     <div class="field">
-      <label for="name">Nombre</label>
-      <input id="name" name="name" placeholder="Billing API (staging)" required value="{% if form %}{{ form.name }}{% endif %}">
+      <label for="name">{{ t(k="apps.name") }}</label>
+      <input id="name" name="name" placeholder="Billing API (staging)" required value="{% if register_values %}{{ register_values.name }}{% endif %}">
     </div>
     <div class="field">
-      <label for="logs_url">URL de logs</label>
-      <input id="logs_url" name="logs_url" type="url" class="mono-input" placeholder="https://api.example.com/admin/logs" required value="{% if form %}{{ form.logs_url }}{% endif %}">
-      <p class="hint">Endpoint tipo <span class="mono">/admin/logs</span> que devuelve el stdout y stderr en <a href="https://docs.rs/tracing-subscriber/latest/tracing_subscriber/fmt/format/struct.Json.html" target="_blank" rel="noopener noreferrer">JSON</a>.</p>
+      <label for="logs_url">{{ t(k="apps.logs_url") }}</label>
+      <input id="logs_url" name="logs_url" type="url" class="mono-input" placeholder="https://api.example.com/admin/logs" required value="{% if register_values %}{{ register_values.logs_url }}{% endif %}">
+      <p class="hint">{{ t(k="apps.logs_hint_a") }} <span class="mono">/admin/logs</span> {{ t(k="apps.logs_hint_b") }} <a href="https://docs.rs/tracing-subscriber/latest/tracing_subscriber/fmt/format/struct.Json.html" target="_blank" rel="noopener noreferrer">JSON</a>.</p>
     </div>
     <div class="field">
-      <label for="health_url">URL de health</label>
-      <input id="health_url" name="health_url" type="url" class="mono-input" placeholder="https://api.example.com/health" required value="{% if form %}{{ form.health_url }}{% endif %}">
-      <p class="hint">Se consulta cada {{ uptime_interval_secs }} s: 2xx es up, más de {{ uptime_degraded_ms }} ms es degradado, lo demás es down.</p>
+      <label for="health_url">{{ t(k="apps.health_url") }}</label>
+      <input id="health_url" name="health_url" type="url" class="mono-input" placeholder="https://api.example.com/health" required value="{% if register_values %}{{ register_values.health_url }}{% endif %}">
+      <p class="hint">{{ t(k="apps.health_hint", secs=uptime_interval_secs, ms=uptime_degraded_ms) }}</p>
     </div>
-    <p class="rule">Solo <span class="mono">https://</span> en <span class="mono">{{ allowed_hosts }}</span></p>
-    <button class="btn intake-submit" type="submit">Registrar</button>
+    <details class="advanced"{% if register_values and (register_values.degraded_after_ms or register_values.expect_body) %} open{% endif %}>
+      <summary>{{ t(k="apps.advanced") }}</summary>
+      <div class="field">
+        <label for="degraded_after_ms">{{ t(k="apps.threshold_long") }}</label>
+        <input id="degraded_after_ms" name="degraded_after_ms" inputmode="numeric" class="mono-input" placeholder="{{ uptime_degraded_ms }} ({{ t(k="apps.global") }})" value="{% if register_values %}{{ register_values.degraded_after_ms }}{% endif %}">
+      </div>
+      <div class="field">
+        <label for="expect_body">{{ t(k="apps.keyword_long") }}</label>
+        <input id="expect_body" name="expect_body" class="mono-input" placeholder="&quot;status&quot;:&quot;ok&quot;" value="{% if register_values %}{{ register_values.expect_body }}{% endif %}">
+        <p class="hint">{{ t(k="apps.keyword_hint") }}</p>
+      </div>
+    </details>
+    <p class="rule">{{ t(k="apps.rule_a") }} <span class="mono">https://</span> {{ t(k="apps.rule_b") }} <span class="mono">{{ allowed_hosts }}</span></p>
+    <button class="btn intake-submit" type="submit">{{ t(k="apps.submit") }}</button>
   </form>
 
-  <section class="entries" aria-label="Apps registradas">
-    <h2 class="bay-title">Registradas · <span class="mono">{{ apps | length }}</span></h2>
+  <section class="entries" aria-label="{{ t(k="apps.list_aria") }}">
+    <h2 class="bay-title">{{ t(k="apps.registered") }} · <span class="mono">{{ apps | length }}</span></h2>
     {% if apps | length == 0 %}
-    <div class="bay empty">Ninguna todavía. Usa el formulario para registrar la primera.</div>
+    <div class="bay empty">{{ t(k="apps.none") }}</div>
     {% endif %}
     {% for app in apps %}
-    <article class="bay entry">
+    <article class="bay entry" id="app-{{ app.slug }}">
       <header class="entry-head">
         <div class="entry-id">
           <h3 class="entry-name">{{ app.name }}</h3>
           <span class="entry-slug mono">{{ app.slug }}</span>
+          {% if app.paused %}<span class="chip"><span class="vital st-paused"></span>{{ t(k="apps.chip_paused") }}</span>{% endif %}
+          {% if app.public %}<a class="chip" href="/status" target="_blank" rel="noopener">{{ t(k="apps.chip_public") }}</a>{% endif %}
         </div>
         <div class="entry-actions">
+          <form method="post" action="/apps/{{ app.slug }}/pause">
+            <input type="hidden" name="value" value="{% if app.paused %}false{% else %}true{% endif %}">
+            <button class="btn ghost" type="submit">{% if app.paused %}{{ t(k="apps.resume") }}{% else %}{{ t(k="apps.pause") }}{% endif %}</button>
+          </form>
           <form method="post" action="/apps/{{ app.slug }}/rotate-token" data-name="{{ app.name }}"
-            onsubmit="return confirm('¿Rotar el token de ' + this.dataset.name + '? Los embeds ya publicados dejarán de funcionar hasta actualizar el token.');">
-            <button class="btn ghost" type="submit">Rotar token</button>
+            onsubmit="return confirm(T('apps.confirm_rotate', { name: this.dataset.name }));">
+            <button class="btn ghost" type="submit">{{ t(k="apps.rotate") }}</button>
           </form>
           <form method="post" action="/apps/{{ app.slug }}/delete" data-name="{{ app.name }}"
-            onsubmit="return confirm('¿Eliminar ' + this.dataset.name + '? Se borra también su historial de uptime.');">
-            <button class="btn danger" type="submit">Eliminar</button>
+            onsubmit="return confirm(T('apps.confirm_delete', { name: this.dataset.name }));">
+            <button class="btn danger" type="submit">{{ t(k="apps.delete") }}</button>
           </form>
         </div>
       </header>
 
       <dl class="entry-urls">
-        <dt>Logs</dt>
+        <dt>{{ t(k="apps.dt_logs") }}</dt>
         <dd class="mono">{{ app.logs_url }}</dd>
-        <dt>Health</dt>
+        <dt>{{ t(k="apps.dt_health") }}</dt>
         {% if app.health_url %}
         <dd class="mono">{{ app.health_url }}</dd>
         {% else %}
-        <dd class="entry-missing">Sin URL de health: no se monitorea. Elimínala y regístrala de nuevo con una.</dd>
+        <dd class="entry-missing">{{ t(k="apps.missing_health") }}</dd>
         {% endif %}
+        {% if app.degraded_after_ms %}<dt>{{ t(k="apps.dt_threshold") }}</dt><dd class="mono">{{ app.degraded_after_ms }} ms</dd>{% endif %}
+        {% if app.expect_body %}<dt>{{ t(k="apps.dt_keyword") }}</dt><dd class="mono">{{ app.expect_body }}</dd>{% endif %}
       </dl>
+
+      {% set editing = edit_slug == app.slug %}
+      <details class="entry-edit"{% if editing %} open{% endif %}>
+        <summary>{{ t(k="apps.edit") }}</summary>
+        <form class="edit-form" method="post" action="/apps/{{ app.slug }}/edit">
+          {% if editing %}<div class="error-box" role="alert">{{ form_error }}</div>{% endif %}
+          <div class="field">
+            <label for="name-{{ app.slug }}">{{ t(k="apps.name") }}</label>
+            <input id="name-{{ app.slug }}" name="name" required value="{% if editing %}{{ edit_values.name }}{% else %}{{ app.name }}{% endif %}">
+          </div>
+          <div class="field">
+            <label for="logs-{{ app.slug }}">{{ t(k="apps.logs_url") }}</label>
+            <input id="logs-{{ app.slug }}" name="logs_url" type="url" class="mono-input" required value="{% if editing %}{{ edit_values.logs_url }}{% else %}{{ app.logs_url }}{% endif %}">
+          </div>
+          <div class="field">
+            <label for="health-{{ app.slug }}">{{ t(k="apps.health_url") }}</label>
+            <input id="health-{{ app.slug }}" name="health_url" type="url" class="mono-input" required value="{% if editing %}{{ edit_values.health_url }}{% elif app.health_url %}{{ app.health_url }}{% endif %}">
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label for="threshold-{{ app.slug }}">{{ t(k="apps.threshold") }}</label>
+              <input id="threshold-{{ app.slug }}" name="degraded_after_ms" inputmode="numeric" class="mono-input" placeholder="{{ uptime_degraded_ms }} ({{ t(k="apps.global") }})" value="{% if editing %}{{ edit_values.degraded_after_ms }}{% elif app.degraded_after_ms %}{{ app.degraded_after_ms }}{% endif %}">
+            </div>
+            <div class="field">
+              <label for="expect-{{ app.slug }}">{{ t(k="apps.keyword") }}</label>
+              <input id="expect-{{ app.slug }}" name="expect_body" class="mono-input" placeholder="{{ t(k="apps.optional") }}" value="{% if editing %}{{ edit_values.expect_body }}{% elif app.expect_body %}{{ app.expect_body }}{% endif %}">
+            </div>
+          </div>
+          <p class="hint">{{ t(k="apps.edit_hint") }}</p>
+          <div class="edit-actions">
+            <button class="btn" type="submit">{{ t(k="apps.save") }}</button>
+          </div>
+        </form>
+      </details>
 
       <div class="entry-embed">
         <div class="embed-head">
-          <span class="bay-title" style="margin: 0">Embed</span>
-          <button class="btn secondary" type="button" data-slug="{{ app.slug }}" data-token="{{ app.embed_token }}" onclick="copyEmbed(this)">Copiar código</button>
+          <span class="bay-title" style="margin: 0">{{ t(k="apps.embed") }}</span>
+          <div class="embed-actions">
+            <form method="post" action="/apps/{{ app.slug }}/public">
+              <input type="hidden" name="value" value="{% if app.public %}false{% else %}true{% endif %}">
+              <button class="btn ghost" type="submit">{% if app.public %}{{ t(k="apps.unpublish") }}{% else %}{{ t(k="apps.publish") }}{% endif %}</button>
+            </form>
+            <button class="btn secondary" type="button" data-slug="{{ app.slug }}" data-token="{{ app.embed_token }}" onclick="copyEmbed(this)">{{ t(k="apps.copy_code") }}</button>
+          </div>
         </div>
         <heartbeat-status app="{{ app.slug }}" token="{{ app.embed_token }}"></heartbeat-status>
         <details class="snippet">
-          <summary>Ver código</summary>
+          <summary>{{ t(k="apps.view_code") }}</summary>
           <pre class="mono" data-slug="{{ app.slug }}" data-token="{{ app.embed_token }}"></pre>
         </details>
       </div>
@@ -95,11 +157,15 @@
   }
   async function copyEmbed(btn) {
     const label = btn.textContent;
-    btn.textContent = (await copyToClipboard(embedSnippet(btn.dataset))) ? "Copiado" : "No se pudo copiar";
+    btn.textContent = (await copyToClipboard(embedSnippet(btn.dataset))) ? T('js.copied') : T('js.copy_failed');
     setTimeout(() => (btn.textContent = label), 1500);
   }
   document.addEventListener("DOMContentLoaded", () => {
     for (const pre of document.querySelectorAll(".snippet pre")) pre.textContent = embedSnippet(pre.dataset);
+    // Arriving from the dashboard's "Editar" (/apps#app-slug): open that app's edit form.
+    const target = location.hash && document.getElementById(location.hash.slice(1));
+    const edit = target && target.querySelector(".entry-edit");
+    if (edit) { edit.open = true; target.scrollIntoView({ block: "start" }); }
   });
 </script>
 <style>
@@ -140,6 +206,24 @@
   .snippet summary::before { content: "▸"; display: inline-block; margin-right: 6px; transition: transform 150ms var(--ease-out); }
   .snippet[open] summary::before { transform: rotate(90deg); }
   .snippet summary:hover { color: var(--ink); }
+  .chip { display: inline-flex; align-items: center; gap: 6px; height: 20px; padding: 0 8px; border-radius: 4px; background: var(--bay-raised); border: 1px solid var(--graticule); font-size: 11px; font-weight: 500; color: var(--ink-2); text-decoration: none; }
+  a.chip:hover { color: var(--ink); }
+  .chip .vital { width: 6px; height: 6px; }
+  .entry-id { flex-wrap: wrap; }
+  .embed-actions { display: flex; gap: 6px; align-items: center; }
+  .embed-actions form { display: contents; }
+  .advanced summary, .entry-edit summary { width: fit-content; font-size: 12px; color: var(--ink-3); cursor: pointer; list-style: none; }
+  .advanced summary::-webkit-details-marker, .entry-edit summary::-webkit-details-marker { display: none; }
+  .advanced summary::before, .entry-edit summary::before { content: "▸"; display: inline-block; margin-right: 6px; transition: transform 150ms var(--ease-out); }
+  .advanced[open] summary::before, .entry-edit[open] summary::before { transform: rotate(90deg); }
+  .advanced summary:hover, .entry-edit summary:hover { color: var(--ink); }
+  .advanced[open] { display: flex; flex-direction: column; gap: 16px; }
+  .entry-edit { padding: 12px 20px; border-top: 1px solid var(--graticule-soft); }
+  .edit-form { display: flex; flex-direction: column; gap: 14px; margin-top: 14px; }
+  .edit-form .error-box { margin: 0; }
+  .field-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+  .edit-actions { display: flex; justify-content: flex-end; }
+  .entry { scroll-margin-top: 72px; }
   .snippet pre { margin: 10px 0 0; padding: 12px 14px; border-radius: 6px; background: var(--well); border: 1px solid var(--graticule); font-size: 12px; line-height: 1.6; color: var(--ink-2); white-space: pre-wrap; word-break: break-all; }
 </style>
 {% endblock %}
