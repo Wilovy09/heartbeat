@@ -1,0 +1,10 @@
+# docker compose up -d   (after `cp .env.example .env` and editing it)
+services:
+  heartbeat:
+    build: .
+    env_file: .env
+    ports:
+      - "8090:8090"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
