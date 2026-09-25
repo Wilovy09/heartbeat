@@ -126,6 +126,8 @@ function uptimeDashboard() {
 
     // Left label under the big strip: age of its oldest drawn bar.
     stripStart(m, slots = BAR_SLOTS) {
+      // Must match the dashboard CSS that hides all but the latest 40 bars on phones.
+      if (slots === STRIP_SLOTS && window.matchMedia('(max-width: 720px)').matches) slots = BAR_SLOTS;
       const drawn = m.recent.slice(-slots);
       return drawn.length ? this.fmtAgo(drawn[0].at) : '';
     },
@@ -273,7 +275,10 @@ function uptimeDashboard() {
         // A gap longer than a few check intervals (or a Down) breaks the line instead of
         // drawing a misleading straight run across missing data.
         const prev = keys[i - 1];
-        if (prev != null && (col - prev) * span > this.overview.interval_secs * 3) flush();
+        // Adjacent columns never break: when one column spans more than a few intervals
+        // (narrow chart, 7d/30d range) a 1-column step is continuous data, not a gap.
+        const gapLimit = Math.max(this.overview.interval_secs * 3, span * 1.5);
+        if (prev != null && (col - prev) * span > gapLimit) flush();
         if (bucket.n === 0) { flush(); return; }
         segment.push([colX(col), s.y(bucket.sum / bucket.n)]);
       });

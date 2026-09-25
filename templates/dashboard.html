@@ -212,7 +212,8 @@
 <style>
   .monitor { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 24px; align-items: start; }
   /* Narrow screens: the verdict/detail leads, the channel list follows. */
-  @media (max-width: 900px) { .monitor { grid-template-columns: 1fr; } .stage { order: -1; } .channels { position: static !important; max-height: none !important; } }
+  @media (max-width: 900px) { .monitor { grid-template-columns: minmax(0, 1fr); } .stage { order: -1; } .channels { position: static !important; max-height: none !important; } }
+  .stage, .stack { min-width: 0; }
   .stack { display: flex; flex-direction: column; gap: 16px; }
 
   /* Channels */
@@ -276,9 +277,18 @@
   .strip-beats { gap: 2px; }
   .strip-beats .beat { height: 32px; min-width: 2px; }
   .strip-axis { display: flex; justify-content: space-between; margin-top: 8px; font-size: 11px; color: var(--ink-3); }
-  @media (max-width: 720px) { .vitals { grid-template-columns: 1fr; } .vital-primary { border-right: 0; padding-right: 0; padding-bottom: 16px; margin-bottom: 16px; border-bottom: 1px solid var(--graticule-soft); } }
+  @media (max-width: 720px) {
+    .vitals { grid-template-columns: minmax(0, 1fr); padding: 16px; }
+    .vital-primary { border-right: 0; padding-right: 0; padding-bottom: 16px; margin-bottom: 16px; border-bottom: 1px solid var(--graticule-soft); }
+    .vital-secondary { gap: 12px; }
+    .readout-value { font-size: 18px; }
+    .readout-label { letter-spacing: 0.04em; }
+    /* 100 bars don't fit a phone: keep the latest 40 (the strip is right-aligned). */
+    .strip-beats .beat:nth-child(-n + 60) { display: none; }
+    .strip-beats { gap: 3px; }
+  }
 
-  .chart-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; gap: 12px; }
+  .chart-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; margin-bottom: 12px; gap: 12px; }
   .segmented { display: inline-flex; padding: 2px; gap: 2px; background: var(--well); border: 1px solid var(--graticule); border-radius: 8px; }
   .segmented button { height: 26px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: var(--ink-3); font: 500 12px var(--font-mono); cursor: pointer; transition: color 120ms, background-color 120ms; }
   .segmented button:hover { color: var(--ink); }

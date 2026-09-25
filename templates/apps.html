@@ -104,7 +104,7 @@
 </script>
 <style>
   .registry { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 24px; align-items: start; }
-  @media (max-width: 900px) { .registry { grid-template-columns: 1fr; } .intake { position: static !important; } }
+  @media (max-width: 900px) { .registry { grid-template-columns: minmax(0, 1fr); } .intake { position: static !important; } }
 
   /* Intake form */
   .intake { position: sticky; top: 76px; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
