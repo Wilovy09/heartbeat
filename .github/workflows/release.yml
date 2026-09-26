@@ -1,17 +1,26 @@
 name: Release
 
-# Push a tag like v1.2.0 to build a Linux x86_64 release and attach it to a GitHub release.
-# Servers install it with deploy/update.sh.
+# Push a tag like v1.2.0 to build Linux releases (x86_64 and aarch64), attach them to a
+# GitHub release, and publish a multi-arch Docker image to GHCR. Servers install the
+# tarball with deploy/update.sh.
 on:
   push:
     tags: ["v*"]
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   build:
-    runs-on: ubuntu-22.04 # older glibc: the binary runs on this and every newer Ubuntu
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04 # older glibc: the binary runs on this and every newer Ubuntu
+          - arch: aarch64
+            runner: ubuntu-22.04-arm # e.g. AWS Graviton
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -20,14 +29,61 @@ jobs:
         run: cargo build --release --locked
       - name: Package
         run: |
-          name="heartbeat-${GITHUB_REF_NAME}-x86_64-linux"
+          name="heartbeat-${GITHUB_REF_NAME}-${{ matrix.arch }}-linux"
           mkdir -p "dist/$name/target/release"
           cp target/release/heartbeat "dist/$name/target/release/"
+          # Templates, static files and libs are embedded in the binary; they're still
+          # shipped because servers running a pre-0.2.0 deploy/update.sh copy them and
+          # abort if they're missing.
           cp -r templates static libs deploy .env.example README.md "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           # From inside dist/ so the checksum file names the bare file, not "dist/...".
           (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.arch }}
+          path: dist/*.tar.gz*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.sha256 --generate-notes
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

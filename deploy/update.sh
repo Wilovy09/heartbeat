@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Installs a Heartbeat release built by .github/workflows/release.yml, in place:
-# the binary, templates, static files and vendored libs are replaced; .env and data/ are
-# never touched. The previous binary is kept as target/release/heartbeat.prev.
+# Installs a Heartbeat release built by .github/workflows/release.yml, in place: the
+# binary (templates, static files and libs are embedded in it since v0.2.0) and deploy/
+# are replaced; .env and data/ are never touched. The previous binary is kept as
+# target/release/heartbeat.prev. Picks the x86_64 or aarch64 build to match this machine.
 #
 # Usage (from the install directory, e.g. /arena/heartbeat):
 #   HEARTBEAT_REPO=owner/heartbeat deploy/update.sh            # latest release
@@ -30,7 +31,7 @@ restart() {
 if [[ "${1:-}" == "--rollback" ]]; then
   [[ -f "$BIN.prev" ]] || { echo "No previous binary to roll back to." >&2; exit 1; }
   mv "$BIN.prev" "$BIN"
-  echo "Rolled back the binary (templates/static stay at the newer version)."
+  echo "Rolled back the binary."
   restart
   exit 0
 fi
@@ -40,7 +41,13 @@ TAG="${1:-latest}"
 if [[ "$TAG" == "latest" ]]; then
   TAG="$(curl -fsS "https://api.github.com/repos/$REPO/releases/latest" | grep -m1 '"tag_name"' | cut -d'"' -f4)"
 fi
-NAME="heartbeat-$TAG-x86_64-linux"
+ARCH="$(uname -m)"
+case "$ARCH" in
+  x86_64 | aarch64) ;;
+  arm64) ARCH=aarch64 ;;
+  *) echo "No release for $ARCH" >&2; exit 1 ;;
+esac
+NAME="heartbeat-$TAG-$ARCH-linux"
 URL="https://github.com/$REPO/releases/download/$TAG/$NAME.tar.gz"
 
 TMP="$(mktemp -d)"
@@ -59,7 +66,9 @@ tar -C "$TMP" -xzf "$TMP/$NAME.tar.gz"
 mkdir -p target/release
 [[ -f "$BIN" ]] && cp "$BIN" "$BIN.prev"
 install -m 755 "$TMP/$NAME/target/release/heartbeat" "$BIN"
+# Releases before v0.2.0 also shipped templates/, static/ and libs/ next to the binary.
 for dir in templates static libs deploy; do
+  [[ -d "$TMP/$NAME/$dir" ]] || continue
   rm -rf "$APP_DIR/$dir"
   cp -r "$TMP/$NAME/$dir" "$APP_DIR/$dir"
 done
