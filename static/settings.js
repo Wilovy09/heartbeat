@@ -1,7 +1,7 @@
 // Alpine component backing templates/settings.html: edits the alert templates (live
 // preview, save, restore), and sends pings and sample alerts through
 // POST /settings/alerts/test, showing each webhook's answer ("pong").
-const VARIABLES = ['app', 'message', 'latency', 'link', 'mentions'];
+const VARIABLES = ['app', 'message', 'latency', 'link', 'mentions', 'duration'];
 
 // Mirrors alert_templates::render in Rust, so the preview matches what gets sent.
 function renderTemplate(template, vars) {
@@ -12,6 +12,16 @@ function renderTemplate(template, vars) {
   while (lines.length && !lines[lines.length - 1]) lines.pop();
   return lines.join('\n');
 }
+// Slack markup as the channel shows it: <!here> -> @here, <@U1> -> @U1, <!subteam^S1> ->
+// @S1, and links underlined. Escapes first, so nothing from a template becomes markup.
+function slackToHtml(text) {
+  const safe = escapeHtml(text);
+  return safe
+    .replace(/&lt;!(here|channel|everyone)&gt;/g, '<span class="mention">@$1</span>')
+    .replace(/&lt;!subteam\^([A-Z0-9]+)&gt;/g, '<span class="mention">@$1</span>')
+    .replace(/&lt;@([A-Z0-9]+)&gt;/g, '<span class="mention">@$1</span>')
+    .replace(/https?:\/\/[^\s<]+/g, (url) => `<span class="link">${url}</span>`);
+}
 function escapeHtml(text) {
   return String(text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 }
@@ -21,15 +31,27 @@ function settingsPage(templates = []) {
   return {
     VARIABLES,
     target: '',
+    active: templates.length ? templates[0].kind : '',
     busy: {},
     results: {},
     tpl: byKind,
     saving: false,
     saveError: '',
 
+    // "Last delivered 14:02" / "Failed 14:02": the latest real alert or test per webhook.
+    lastDelivery(at, ok) {
+      const when = new Date(at * 1000).toLocaleString();
+      return ok ? T('settings.last_ok', { when }) : T('settings.last_failed', { when });
+    },
+
     preview(kind) {
       const t = this.tpl[kind];
       return t ? renderTemplate(t.template, t.sample) : '';
+    },
+
+    previewHtml(kind) {
+      const text = this.preview(kind);
+      return text ? slackToHtml(text) : `<span class="chat-empty">${escapeHtml(T('settings.preview_empty'))}</span>`;
     },
 
     dirty(kind) {
@@ -60,7 +82,7 @@ function settingsPage(templates = []) {
       this.tpl[kind].template = this.tpl[kind].default;
     },
 
-    // Saves all three; a template equal to its default is sent blank so it keeps
+    // Saves every kind; a template equal to its default is sent blank so it keeps
     // following the default (e.g. if APP_LANG changes).
     async save() {
       this.saving = true;

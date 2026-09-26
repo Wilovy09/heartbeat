@@ -110,12 +110,54 @@ pub fn extract(html: &str, base: &Url) -> Vec<Bundle> {
     bundles
 }
 
+/// Why a bundle isn't the JS/CSS it should be. Rendered in the UI's language by the
+/// monitor (`Localize`), since it becomes the check's message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BundleProblem {
+    Status {
+        path: String,
+        status: u16,
+    },
+    /// `content_type` is `None` when the response had none.
+    WrongType {
+        path: String,
+        content_type: Option<String>,
+    },
+    Unreachable {
+        path: String,
+        error: String,
+    },
+}
+
+impl crate::i18n::Localize for BundleProblem {
+    fn localize(&self, i18n: &crate::i18n::I18n) -> String {
+        match self {
+            Self::Status { path, status } => i18n.text(
+                "check.bundle_status",
+                &[("path", path), ("status", &status.to_string())],
+            ),
+            Self::WrongType {
+                path,
+                content_type: Some(ct),
+            } => i18n.text("check.bundle_type", &[("path", path), ("type", ct)]),
+            Self::WrongType {
+                path,
+                content_type: None,
+            } => i18n.text("check.bundle_no_type", &[("path", path)]),
+            Self::Unreachable { path, error } => i18n.text(
+                "check.bundle_unreachable",
+                &[("path", path), ("error", error)],
+            ),
+        }
+    }
+}
+
 /// Why a bundle response isn't the JS/CSS it should be, or `None` if it's fine.
 #[must_use]
-pub fn problem(bundle: &Bundle, status: u16, content_type: &str) -> Option<String> {
-    let path = bundle.url.path();
+pub fn problem(bundle: &Bundle, status: u16, content_type: &str) -> Option<BundleProblem> {
+    let path = bundle.url.path().to_string();
     if !(200..300).contains(&status) {
-        return Some(format!("Bundle roto: {path} respondió HTTP {status}"));
+        return Some(BundleProblem::Status { path, status });
     }
     let ct = content_type.to_ascii_lowercase();
     let ok = match bundle.kind {
@@ -126,17 +168,15 @@ pub fn problem(bundle: &Bundle, status: u16, content_type: &str) -> Option<Strin
         return None;
     }
     let got = ct.split(';').next().unwrap_or_default().trim();
-    let got = if got.is_empty() {
-        "sin Content-Type"
-    } else {
-        got
-    };
-    Some(format!("Bundle roto: {path} respondió {got}"))
+    Some(BundleProblem::WrongType {
+        path,
+        content_type: (!got.is_empty()).then(|| got.to_string()),
+    })
 }
 
 /// Checks every bundle; the first problem found, if any. Bundles on hosts outside
 /// `ALLOWED_HOSTS` (e.g. a third-party CDN) are skipped: they can't be requested.
-pub async fn verify(outbound: &Outbound, bundles: &[Bundle]) -> Option<String> {
+pub async fn verify(outbound: &Outbound, bundles: &[Bundle]) -> Option<BundleProblem> {
     for bundle in bundles {
         let Ok(url) = outbound.check(bundle.url.as_str()) else {
             continue;
@@ -150,10 +190,10 @@ pub async fn verify(outbound: &Outbound, bundles: &[Bundle]) -> Option<String> {
         {
             Ok(resp) => resp,
             Err(e) => {
-                return Some(format!(
-                    "Bundle roto: {} no respondió ({e})",
-                    bundle.url.path()
-                ));
+                return Some(BundleProblem::Unreachable {
+                    path: bundle.url.path().to_string(),
+                    error: e.to_string(),
+                });
             }
         };
         let content_type = resp
@@ -241,13 +281,42 @@ mod tests {
         assert_eq!(problem(&js, 200, "text/javascript"), None);
         assert_eq!(problem(&css, 200, "text/css"), None);
         assert_eq!(
-            problem(&js, 200, "text/html; charset=utf-8").as_deref(),
-            Some("Bundle roto: /assets/index-X.js respondió text/html")
+            problem(&js, 200, "text/html; charset=utf-8"),
+            Some(BundleProblem::WrongType {
+                path: "/assets/index-X.js".into(),
+                content_type: Some("text/html".into()),
+            })
         );
         assert_eq!(
-            problem(&css, 404, "text/html").as_deref(),
-            Some("Bundle roto: /assets/index-X.css respondió HTTP 404")
+            problem(&css, 404, "text/html"),
+            Some(BundleProblem::Status {
+                path: "/assets/index-X.css".into(),
+                status: 404,
+            })
         );
-        assert!(problem(&js, 200, "").unwrap().contains("sin Content-Type"));
+        assert_eq!(
+            problem(&js, 200, ""),
+            Some(BundleProblem::WrongType {
+                path: "/assets/index-X.js".into(),
+                content_type: None,
+            })
+        );
+    }
+
+    #[test]
+    fn problems_read_in_the_ui_language() {
+        use crate::i18n::{I18n, Lang, Localize};
+        let p = BundleProblem::WrongType {
+            path: "/assets/x.js".into(),
+            content_type: Some("text/html".into()),
+        };
+        assert_eq!(
+            p.localize(&I18n::new(Lang::Es)),
+            "Bundle roto: /assets/x.js respondió text/html"
+        );
+        assert_eq!(
+            p.localize(&I18n::new(Lang::En)),
+            "Broken bundle: /assets/x.js answered text/html"
+        );
     }
 }

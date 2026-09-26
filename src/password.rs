@@ -5,7 +5,7 @@ use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, Salt
 
 #[derive(Debug, thiserror::Error)]
 pub enum HashError {
-    #[error("no se pudo generar la sal: {0}")]
+    #[error("could not generate a salt: {0}")]
     Salt(#[from] getrandom::Error),
     #[error("{0}")]
     Argon2(#[from] argon2::password_hash::Error),

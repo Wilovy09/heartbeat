@@ -1,58 +1,158 @@
 {% extends "base.html" %}
-{% block title %}{{ t(k="status.title") }} — Heartbeat{% endblock %}
+{% block title %}{{ row.name }} · {{ t(k="status.title") }}{% endblock %}
 {% block topbar %}
-<span class="brand"><img src="/static/icon.svg" alt=""><span>{{ t(k="status.header") }}</span></span>
+<span class="brand"><img src="/static/icon.svg" alt=""><span>{{ row.name }}</span></span>
+<span class="topbar-note">{{ t(k="status.header") }}</span>
 {% endblock %}
 {% block content %}
 <div class="status-page">
   <header class="verdict">
-    <span class="vital vital-lg st-{{ verdict }}"></span>
-    <h1 class="verdict-title">
-      {{ t(k="status.verdict_" ~ verdict) }}
-    </h1>
+    <span class="vital vital-lg st-{% if verdict == "incident" %}degraded{% else %}{{ verdict }}{% endif %}"></span>
+    <div>
+      <h1 class="verdict-title">{{ t(k="status.verdict_" ~ verdict) }}</h1>
+      <p class="verdict-sub">{{ t(k="status.updated") }} <time class="rel" data-at="{{ now }}"></time></p>
+    </div>
   </header>
 
-  {% if rows | length == 0 %}
-  <div class="bay empty">{{ t(k="status.empty") }}</div>
-  {% else %}
-  <div class="bay service-list">
-    {% for row in rows %}
+  {% for n in notices.open %}
+  <article class="bay notice notice-{{ n.state }}" role="status">
+    <header class="notice-head">
+      <span class="notice-chip"><span class="vital st-{% if n.state == "investigating" %}down{% elif n.state == "identified" %}degraded{% else %}up{% endif %}"></span>{{ t(k="notices.state_" ~ n.state) }}</span>
+      <time class="notice-time rel" data-at="{{ n.updated_at }}"></time>
+    </header>
+    <h2 class="notice-title">{{ n.title }}</h2>
+    {% if n.body %}<p class="notice-body">{{ n.body }}</p>{% endif %}
+    {% if n.updated_at != n.created_at %}<p class="notice-meta">{{ t(k="status.opened") }} <time class="abs" data-at="{{ n.created_at }}"></time></p>{% endif %}
+  </article>
+  {% endfor %}
+
+  <section class="bay service-list" aria-label="{{ t(k="status.services") }}">
     <div class="service">
       <div class="service-head">
         <span class="vital st-{{ row.state }}"></span>
-        <span class="service-name">{{ row.name }}</span>
-        <span class="service-state st-text-{{ row.state }}">
-          {{ t(k="status.state_" ~ row.state) }}
-        </span>
-        <span class="service-pct mono" title="{{ t(k="status.uptime_title") }}">{{ row.uptime_24h }}</span>
+        <span class="service-name">{{ t(k="status.current") }}</span>
+        <span class="service-state st-text-{{ row.state }}">{{ t(k="status.state_" ~ row.state) }}</span>
       </div>
-      <div class="beats service-beats" aria-hidden="true">
-        {% for beat in row.strip %}<span class="beat{% if beat %} st-{{ beat }}{% endif %}"></span>{% endfor %}
+      <div class="days" role="img" aria-label="{{ t(k="status.uptime_title", days=history_days) }}: {{ row.uptime }}">
+        {% for day in row.days %}<span class="day day-{{ day.level }}" data-day="{{ day.start }}" data-uptime="{{ day.uptime }}"></span>{% endfor %}
+      </div>
+      <div class="days-axis">
+        <span class="axis-full">{{ t(k="status.days_ago", n=history_days) }}</span><span class="axis-short">{{ t(k="status.days_ago", n=14) }}</span>
+        <span class="axis-pct mono">{{ row.uptime }} {{ t(k="status.uptime_word") }}</span>
+        <span>{{ t(k="status.today") }}</span>
       </div>
     </div>
-    {% endfor %}
-  </div>
+  </section>
+
+  {% if notices.recent | length > 0 %}
+  <section class="past">
+    <h2 class="bay-title">{{ t(k="status.past_incidents") }}</h2>
+    <ol class="past-list">
+      {% for n in notices.recent %}
+      <li class="past-entry">
+        <span class="vital st-up"></span>
+        <div class="past-body">
+          <div class="past-head">
+            <h3>{{ n.title }}</h3>
+            <span class="past-state">{{ t(k="notices.state_resolved") }}</span>
+          </div>
+          {% if n.body %}<p class="notice-body">{{ n.body }}</p>{% endif %}
+          <p class="notice-meta"><time class="abs" data-at="{{ n.created_at }}"></time> · <span class="dur" data-from="{{ n.created_at }}" data-to="{{ n.resolved_at }}"></span></p>
+        </div>
+      </li>
+      {% endfor %}
+    </ol>
+  </section>
   {% endif %}
-  <p class="status-foot">{{ t(k="status.foot") }}</p>
+
+  <p class="status-foot">{{ t(k="status.foot", days=history_days) }}</p>
 </div>
 {% endblock %}
 {% block head %}
 <meta http-equiv="refresh" content="60">
+<script>
+  // Times in the visitor's own language and timezone: "3 min ago" for recency, a full date
+  // for when; a day bar's tooltip is its date and uptime.
+  document.addEventListener("DOMContentLoaded", () => {
+    const lang = document.documentElement.lang || "es";
+    const rel = new Intl.RelativeTimeFormat(lang, { numeric: "auto" });
+    const ago = (secs) => {
+      const s = Math.round(secs - Date.now() / 1000);
+      for (const [unit, size] of [["day", 86400], ["hour", 3600], ["minute", 60]]) {
+        if (Math.abs(s) >= size) return rel.format(Math.round(s / size), unit);
+      }
+      return rel.format(s, "second");
+    };
+    const duration = (secs) => {
+      const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600), m = Math.max(1, Math.round((secs % 3600) / 60));
+      return d ? `${d} d ${h} h` : h ? `${h} h ${m} min` : `${m} min`;
+    };
+    for (const el of document.querySelectorAll("time.rel")) {
+      el.textContent = ago(Number(el.dataset.at));
+      el.title = new Date(el.dataset.at * 1000).toLocaleString(lang);
+    }
+    for (const el of document.querySelectorAll("time.abs")) {
+      el.textContent = new Date(el.dataset.at * 1000).toLocaleString(lang, { dateStyle: "medium", timeStyle: "short" });
+    }
+    for (const el of document.querySelectorAll(".dur")) {
+      el.textContent = T("status.lasted", { duration: duration(el.dataset.to - el.dataset.from) });
+    }
+    for (const el of document.querySelectorAll(".day")) {
+      const date = new Date(el.dataset.day * 1000).toLocaleDateString(lang, { day: "numeric", month: "short", timeZone: "UTC" });
+      el.title = `${date} · ${el.dataset.uptime || T("status.no_data")}`;
+    }
+  });
+</script>
 <style>
+  .topbar-note { margin-left: 12px; padding-left: 12px; border-left: 1px solid var(--graticule); font-size: 13px; color: var(--ink-3); }
   .status-page { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
   .verdict { display: flex; align-items: center; gap: 16px; padding: 16px 0 4px; }
   .vital-lg { width: 14px; height: 14px; }
-  .verdict-title { font-size: 28px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.15; }
+  .verdict-title { font-size: 28px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.15; text-wrap: balance; }
+  .verdict-sub { margin: 4px 0 0; font-size: 13px; color: var(--ink-3); }
+
+  /* Open notices: what the team is telling visitors, above the automatic lights. */
+  .notice { display: flex; flex-direction: column; gap: 8px; padding: 18px 20px; }
+  .notice-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .notice-chip { display: inline-flex; align-items: center; gap: 8px; height: 24px; padding: 0 10px; border-radius: 12px; background: var(--bay-raised); border: 1px solid var(--graticule); font-size: 12px; font-weight: 500; color: var(--ink); }
+  .notice-chip .vital { width: 7px; height: 7px; }
+  .notice-time { font-size: 12px; color: var(--ink-3); }
+  .notice-title { font-size: 18px; font-weight: 600; letter-spacing: -0.01em; }
+  .notice-body { margin: 0; font-size: 14px; line-height: 1.55; color: var(--ink-2); white-space: pre-wrap; text-wrap: pretty; }
+  .notice-meta { margin: 0; font-size: 12px; color: var(--ink-3); }
+
+  /* Services: 30 daily bars, the latest on the right. */
   .service-list { padding: 0; }
-  .service { padding: 16px 20px; }
+  .service { padding: 18px 20px; }
   .service + .service { border-top: 1px solid var(--graticule-soft); }
-  .service-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-  .service-name { flex: 1; min-width: 0; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .service-state { font-size: 12px; font-weight: 500; }
-  .service-pct { font-size: 12px; color: var(--ink-3); }
-  .service-beats .beat { height: 24px; }
-  .status-foot { margin: 0; text-align: center; font-size: 12px; color: var(--ink-3); }
-  /* 60 bars don't fit a phone: keep the latest 30. */
-  @media (max-width: 560px) { .service-beats .beat:nth-child(-n + 30) { display: none; } .verdict-title { font-size: 22px; } }
+  .service-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .service-name { flex: 1; min-width: 0; font-size: 12px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); }
+  .service-state { font-size: 13px; font-weight: 500; }
+  .service-state.st-text-paused, .service-state.st-text-unknown { color: var(--ink-3); }
+  .days { display: flex; gap: 3px; height: 32px; }
+  .day { flex: 1; border-radius: 2px; background: var(--rhythm-flat); transition: opacity 120ms; }
+  .day-up { background: var(--rhythm-up); }
+  .day-degraded { background: var(--rhythm-degraded); }
+  .day-down { background: var(--rhythm-down); }
+  .days:hover .day { opacity: 0.55; }
+  .days .day:hover { opacity: 1; }
+  .days-axis { display: flex; justify-content: space-between; margin-top: 8px; font-size: 11px; color: var(--ink-4); }
+  .axis-pct { color: var(--ink-3); }
+  .axis-short { display: none; }
+  .empty-note { margin: 0; font-size: 14px; color: var(--ink-3); }
+
+  /* Recently resolved notices. */
+  .past { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+  .past-list { list-style: none; margin: 0; padding: 0; }
+  .past-entry { display: flex; gap: 14px; padding: 14px 0; border-top: 1px solid var(--graticule-soft); }
+  .past-entry:first-child { border-top: 0; }
+  .past-entry > .vital { margin-top: 6px; }
+  .past-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .past-head { display: flex; align-items: baseline; gap: 10px; }
+  .past-head h3 { font-size: 14px; font-weight: 600; }
+  .past-state { font-size: 12px; color: var(--ink-3); }
+  .status-foot { margin: 8px 0 0; text-align: center; font-size: 12px; color: var(--ink-4); }
+  /* 30 bars don't fit a phone comfortably: keep the latest 14. */
+  @media (max-width: 560px) { .days .day:nth-child(-n + 16) { display: none; } .axis-full { display: none; } .axis-short { display: inline; } .verdict-title { font-size: 22px; } }
 </style>
 {% endblock %}

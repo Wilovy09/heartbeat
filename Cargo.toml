@@ -1,11 +1,18 @@
 [package]
 name = "heartbeat"
-version = "0.1.3"
+version = "0.2.0"
 edition = "2024"
+license = "Elastic-2.0"
+publish = false
 
 [dependencies]
-actix-web = "4"
-actix-files = "0.6"
+# HTTP/1.1 only (nginx terminates TLS and HTTP/2) and no compression: fewer dependencies,
+# and no h2 0.3 (RUSTSEC-2026-0258).
+actix-web = { version = "4", default-features = false, features = [
+    "macros",
+    "cookies",
+    "unicode",
+] }
 tera = { version = "2.4.0", features = ["glob_fs"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
@@ -19,6 +26,11 @@ getrandom = { version = "0.3", features = ["std"] }
 url = "2"
 x509-parser = "0.17"
 argon2 = { version = "0.5", features = ["std"] }
+rust-embed = { version = "8", features = ["mime-guess"] }
+
+[features]
+# `just demo` only: synthetic logs for the demo apps (see src/demo.rs).
+demo = []
 
 [dev-dependencies]
 tempfile = "3"

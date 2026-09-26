@@ -2,10 +2,14 @@ mod alert_templates;
 mod alerts;
 #[cfg(test)]
 mod app_tests;
+mod assets;
 mod auth;
 mod bundles;
 mod config;
+#[cfg(feature = "demo")]
+mod demo;
 mod i18n;
+mod notices;
 mod outbound;
 mod password;
 mod registry;
@@ -16,9 +20,11 @@ mod uptime;
 
 use actix_web::middleware::from_fn;
 use actix_web::{App, HttpServer, web};
+use std::process::ExitCode;
 use std::time::Duration;
 use tera::Tera;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::LevelFilter;
 
 use alerts::{AlertSettings, Alerter};
 use auth::SessionStore;
@@ -28,12 +34,38 @@ use registry::AppRegistry;
 use security::LoginLimiter;
 use uptime::{CheckPolicy, Notifiers, UptimeMonitor};
 
+/// Everything that can stop Heartbeat from starting. Reported once, cleanly, instead of
+/// a panic backtrace.
+#[derive(Debug, thiserror::Error)]
+enum StartupError {
+    #[error(transparent)]
+    Config(#[from] config::ConfigError),
+    #[error("could not load templates: {0}")]
+    Templates(#[from] tera::Error),
+    #[error(transparent)]
+    Registry(#[from] registry::RegistryError),
+    #[error("could not build the HTTP client: {0}")]
+    Outbound(#[from] outbound::OutboundError),
+    #[error(transparent)]
+    AlertTemplates(#[from] alert_templates::TemplateError),
+    #[error("could not build the alerts client: {0}")]
+    Alerts(#[from] reqwest::Error),
+    #[error(transparent)]
+    Uptime(#[from] uptime::UptimeError),
+    #[error(transparent)]
+    Sessions(#[from] auth::SessionError),
+    #[error(transparent)]
+    Notices(#[from] notices::NoticeError),
+    #[error("HTTP server error: {0}")]
+    Server(#[from] std::io::Error),
+}
+
 #[actix_web::main]
-async fn main() -> std::io::Result<()> {
+async fn main() -> ExitCode {
     dotenvy::dotenv().ok();
 
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+        .with_env_filter(EnvFilter::from_default_env().add_directive(LevelFilter::INFO.into()))
         .init();
 
     // `heartbeat hash-password`: reads a password from stdin and prints the argon2 hash for
@@ -42,25 +74,28 @@ async fn main() -> std::io::Result<()> {
         return hash_password_command();
     }
 
-    let cfg = Config::from_env().unwrap_or_else(|e| panic!("{e}"));
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            tracing::error!(error = %e, "heartbeat stopped");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> Result<(), StartupError> {
+    let cfg = Config::from_env()?;
 
     let i18n = i18n::I18n::new(cfg.app_lang);
     let mut tera = Tera::new();
     i18n.register(&mut tera);
-    tera.load_from_glob("templates/**/*.html")
-        .unwrap_or_else(|e| panic!("error cargando templates: {e}"));
+    assets::load_templates(&mut tera)?;
 
-    let registry = AppRegistry::load(&cfg.apps_file)
-        .await
-        .unwrap_or_else(|e| panic!("error cargando {}: {e}", cfg.apps_file));
-
-    let outbound = Outbound::new(&cfg.allowed_hosts)
-        .unwrap_or_else(|e| panic!("error creando el cliente HTTP: {e}"));
+    let registry = AppRegistry::load(&cfg.apps_file).await?;
+    let outbound = Outbound::new(&cfg.allowed_hosts)?;
 
     let templates = std::sync::Arc::new(
-        alert_templates::TemplateStore::load(&cfg.alert_templates_file, &i18n)
-            .await
-            .unwrap_or_else(|e| panic!("error cargando {}: {e}", cfg.alert_templates_file)),
+        alert_templates::TemplateStore::load(&cfg.alert_templates_file, &i18n).await?,
     );
     let alerter = Alerter::new(AlertSettings {
         webhook_urls: cfg.alert_webhook_urls.clone(),
@@ -68,8 +103,9 @@ async fn main() -> std::io::Result<()> {
         public_url: cfg.public_url.clone(),
         mentions: cfg.alert_mentions.clone(),
         templates: Some(templates),
-    })
-    .unwrap_or_else(|e| panic!("error creando el cliente de alertas: {e}"));
+        remind_after: Some(Duration::from_secs(u64::from(cfg.alert_remind_mins) * 60)),
+        lang: cfg.app_lang,
+    })?;
 
     let monitor = UptimeMonitor::load(
         &cfg.uptime_dir,
@@ -79,22 +115,23 @@ async fn main() -> std::io::Result<()> {
             retries: cfg.uptime_retries,
             cert_warn_days: cfg.uptime_cert_warn_days,
             retention: Duration::from_hours(24 * u64::from(cfg.uptime_retention_days)),
+            timeout: Duration::from_secs(u64::from(cfg.uptime_timeout_secs)),
+            mass_down_pct: cfg.uptime_mass_down_pct,
+            lang: cfg.app_lang,
         },
         outbound.clone(),
         Notifiers {
-            alerter: alerter.clone(),
+            alerter: Some(alerter.clone()),
             ping_url: cfg.heartbeat_ping_url.clone(),
         },
     )
-    .await
-    .unwrap_or_else(|e| panic!("error cargando {}: {e}", cfg.uptime_dir));
+    .await?;
 
     let host = cfg.host.clone();
     let port = cfg.port;
 
-    let sessions = SessionStore::load(&cfg.sessions_file)
-        .await
-        .unwrap_or_else(|e| panic!("error cargando {}: {e}", cfg.sessions_file));
+    let sessions = SessionStore::load(&cfg.sessions_file).await?;
+    let notices = notices::NoticeStore::load(&cfg.notices_file).await?;
 
     let auth_mode = match &cfg.auth {
         config::AuthMode::Upstream { .. } => "upstream",
@@ -117,6 +154,7 @@ async fn main() -> std::io::Result<()> {
     let alerter_data = web::Data::new(alerter);
     let outbound_data = web::Data::new(outbound);
     let monitor_data = web::Data::new(monitor);
+    let notices_data = web::Data::new(notices);
 
     tokio::spawn(
         monitor_data
@@ -138,32 +176,39 @@ async fn main() -> std::io::Result<()> {
             .app_data(sessions_data.clone())
             .app_data(outbound_data.clone())
             .app_data(monitor_data.clone())
+            .app_data(notices_data.clone())
             .configure(routes::configure)
     })
     .bind((host, port))?
     .run()
-    .await
+    .await?;
+    Ok(())
 }
 
-fn hash_password_command() -> std::io::Result<()> {
+fn hash_password_command() -> ExitCode {
     use std::io::{BufRead, Write};
     eprint!("Password: ");
-    std::io::stderr().flush()?;
     let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line)?;
+    let read = std::io::stderr()
+        .flush()
+        .and_then(|()| std::io::stdin().lock().read_line(&mut line));
+    if let Err(e) = read {
+        eprintln!("Could not read the password: {e}");
+        return ExitCode::FAILURE;
+    }
     let password = line.trim_end_matches(['\r', '\n']);
     if password.is_empty() {
-        eprintln!("El password no puede estar vacío.");
-        std::process::exit(1);
+        eprintln!("The password can't be empty.");
+        return ExitCode::FAILURE;
     }
     match password::hash(password) {
         Ok(hash) => {
             println!("{hash}");
-            Ok(())
+            ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("No se pudo generar el hash: {e}");
-            std::process::exit(1);
+            eprintln!("Could not hash the password: {e}");
+            ExitCode::FAILURE
         }
     }
 }

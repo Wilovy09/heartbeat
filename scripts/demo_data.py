@@ -7,8 +7,26 @@ reserved .invalid TLD never resolves (down).
 Embed test from a different origin, the way a third-party site would load it:
     python3 -m http.server 8100 -d data/demo  ->  http://localhost:8100/embed-test.html
 """
-import base64, json, math, random, secrets, time
+import base64, json, math, os, random, secrets, time
 from pathlib import Path
+
+# App names and the few check messages stored in the history follow APP_LANG, like the UI.
+LANG = "en" if os.environ.get("APP_LANG", "es").strip().lower() == "en" else "es"
+NAMES = {
+    "es": {"estable": "Estable", "backend": "Backend", "intermitente": "Intermitente", "caida": "Caída",
+           "degradada": "Degradada", "recuperada": "Recuperada", "nueva": "Recién registrada",
+           "frontend": "Frontend", "frontend-roto": "Frontend roto", "sin-health": "Sin health"},
+    "en": {"estable": "Steady", "backend": "Backend", "intermitente": "Flaky", "caida": "Down",
+           "degradada": "Degraded", "recuperada": "Recovered", "nueva": "Just registered",
+           "frontend": "Frontend", "frontend-roto": "Broken frontend", "sin-health": "No health"},
+}[LANG]
+BROKEN_BUNDLE = {
+    "es": "Bundle roto: /html respondió text/html",
+    "en": "Broken bundle: /html answered text/html",
+}[LANG]
+
+def app_name(key):
+    return f"Demo · {NAMES[key]}"
 
 random.seed(7)
 HERE = Path(__file__).resolve().parent.parent / "data" / "demo"
@@ -88,20 +106,20 @@ def recuperada(at, ago):
     return up(at, noise(150))
 
 apps = [
-    ("demo-estable", "Demo · Estable", REAL_HEALTH, NOW - 30 * DAY, estable),
-    ("demo-backend", "Demo · Backend", REAL_HEALTH, NOW - 30 * DAY, backend),
-    ("demo-intermitente", "Demo · Intermitente", REAL_HEALTH, NOW - 30 * DAY, intermitente),
-    ("demo-caida", "Demo · Caída", DEAD_HEALTH, NOW - 30 * DAY, caida),
-    ("demo-degradada", "Demo · Degradada", SLOW_HEALTH, NOW - 7 * DAY, degradada),
-    ("demo-recuperada", "Demo · Recuperada", REAL_HEALTH, NOW - 14 * DAY, recuperada),
-    ("demo-nueva", "Demo · Recién registrada", REAL_HEALTH, NOW - 12 * STEP, estable),
+    ("demo-estable", app_name("estable"), REAL_HEALTH, NOW - 30 * DAY, estable),
+    ("demo-backend", app_name("backend"), REAL_HEALTH, NOW - 30 * DAY, backend),
+    ("demo-intermitente", app_name("intermitente"), REAL_HEALTH, NOW - 30 * DAY, intermitente),
+    ("demo-caida", app_name("caida"), DEAD_HEALTH, NOW - 30 * DAY, caida),
+    ("demo-degradada", app_name("degradada"), SLOW_HEALTH, NOW - 7 * DAY, degradada),
+    ("demo-recuperada", app_name("recuperada"), REAL_HEALTH, NOW - 14 * DAY, recuperada),
+    ("demo-nueva", app_name("nueva"), REAL_HEALTH, NOW - 12 * STEP, estable),
 ]
 
 registry = []
 for slug, name, health, start, fn in apps:
     beats = series(start, fn)
     (UP_DIR / f"{slug}.jsonl").write_text("".join(json.dumps(b) + "\n" for b in beats))
-    registry.append({"slug": slug, "name": name, "logs_url": f"https://httpbin.org/anything/{slug}/logs", "health_url": health, "embed_token": secrets.token_hex(24)})
+    registry.append({"slug": slug, "name": name, "logs_url": f"https://logs.heartbeat.invalid/{slug}/logs", "health_url": health, "embed_token": secrets.token_hex(24)})
     print(f"{slug:20} {len(beats):6} beats")
 
 # 8. Single-page frontends: monitor-only (no logs URL) with the bundle check on. httpbin
@@ -124,12 +142,12 @@ def frontend(at, ago):
 
 def frontend_broken(at, ago):
     if ago < 20 * 60:
-        return down(at, "Bundle roto: /html respondió text/html", noise(110))
+        return down(at, BROKEN_BUNDLE, noise(110))
     return up(at, noise(110))
 
 for slug, name, health, fn in [
-    ("demo-frontend", "Demo · Frontend", spa_page(GOOD_JS, GOOD_CSS), frontend),
-    ("demo-frontend-roto", "Demo · Frontend roto", spa_page(BROKEN_JS, GOOD_CSS), frontend_broken),
+    ("demo-frontend", app_name("frontend"), spa_page(GOOD_JS, GOOD_CSS), frontend),
+    ("demo-frontend-roto", app_name("frontend-roto"), spa_page(BROKEN_JS, GOOD_CSS), frontend_broken),
 ]:
     beats = series(NOW - 3 * DAY, fn)
     (UP_DIR / f"{slug}.jsonl").write_text("".join(json.dumps(b) + "\n" for b in beats))
@@ -138,7 +156,7 @@ for slug, name, health, fn in [
     print(f"{slug:20} {len(beats):6} beats")
 
 # 7. Legacy entry registered before health URLs existed: never monitored.
-registry.append({"slug": "demo-sin-health", "name": "Demo · Sin health", "logs_url": "https://httpbin.org/anything/demo-sin-health/logs", "embed_token": secrets.token_hex(24)})
+registry.append({"slug": "demo-sin-health", "name": app_name("sin-health"), "logs_url": "https://logs.heartbeat.invalid/demo-sin-health/logs", "embed_token": secrets.token_hex(24)})
 
 (HERE / "apps.json").write_text(json.dumps(registry, indent=2, ensure_ascii=False))
 print(f"apps.json: {len(registry)} apps")

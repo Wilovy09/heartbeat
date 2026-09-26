@@ -85,7 +85,10 @@
     .btn:disabled { opacity: 0.5; cursor: default; transform: none; }
     input, select { height: 34px; background: var(--well); border: 1px solid var(--graticule-strong); color: var(--ink); padding: 0 10px; border-radius: 6px; font: 13px var(--font-sans); transition: border-color 120ms; }
     input::placeholder { color: var(--ink-4); }
-    input:hover, select:hover { border-color: rgba(255, 255, 255, 0.18); }
+    input:hover, select:hover, textarea:hover { border-color: rgba(255, 255, 255, 0.18); }
+    textarea { min-height: 58px; padding: 8px 10px; background: var(--well); border: 1px solid var(--graticule-strong); border-radius: 6px; color: var(--ink); font: 13px/1.5 var(--font-sans); transition: border-color 120ms; }
+    textarea::placeholder { color: var(--ink-4); }
+    textarea:focus-visible { outline: 2px solid rgba(231, 233, 236, 0.35); outline-offset: 2px; }
     input[type="checkbox"] { accent-color: var(--ink); width: 14px; height: 14px; }
     label { font-size: 11px; font-weight: 500; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.06em; display: block; margin-bottom: 6px; }
     table { width: 100%; border-collapse: collapse; }
@@ -146,9 +149,12 @@
     <a class="brand" href="/"><img src="/static/icon.svg" alt=""><span>Heartbeat</span></a>
     <nav class="topnav" aria-label="{{ t(k="nav.aria") }}">
       <a href="/" class="{% if active == "dashboard" %}active{% endif %}">{{ t(k="nav.dashboard") }}</a>
+      {% if is_admin %}
       <a href="/logs" class="{% if active == "logs" %}active{% endif %}">{{ t(k="nav.logs") }}</a>
       <a href="/apps" class="{% if active == "apps" %}active{% endif %}">{{ t(k="nav.apps") }}</a>
+      <a href="/notices" class="{% if active == "notices" %}active{% endif %}">{{ t(k="nav.notices") }}</a>
       <a href="/settings" class="{% if active == "settings" %}active{% endif %}">{{ t(k="nav.settings") }}</a>
+      {% endif %}
     </nav>
     <form class="logout" method="post" action="/logout"><button type="submit">{{ t(k="nav.logout") }}</button></form>
     {% endblock %}

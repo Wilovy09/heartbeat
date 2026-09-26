@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}{{ t(k="notices.title") }} — Heartbeat{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1 class="page-title">{{ t(k="notices.title") }}</h1>
+    <p class="page-sub">{{ t(k="notices.sub") }}</p>
+  </div>
+</header>
+{% if error %}<div class="error-box" role="alert">{{ error }}</div>{% endif %}
+
+<div class="notices">
+  <form class="bay notice-form" method="post" action="/notices">
+    <h2 class="intake-title">{{ t(k="notices.new") }}</h2>
+    <div class="field">
+      <label for="title">{{ t(k="notices.field_title") }}</label>
+      <input id="title" name="title" required maxlength="120" placeholder="{{ t(k="notices.title_placeholder") }}">
+    </div>
+    <div class="field">
+      <label for="body">{{ t(k="notices.field_body") }}</label>
+      <textarea id="body" name="body" rows="3" maxlength="2000"></textarea>
+    </div>
+    <div class="field">
+      <label for="apps">{{ t(k="notices.field_apps") }}</label>
+      <select id="apps" name="apps">
+        <option value="">{{ t(k="notices.all_apps") }}</option>
+        {% for app in apps %}
+        <option value="{{ app.slug }}">{{ app.name }}{% if not app.public %} — {{ t(k="notices.not_public") }}{% endif %}</option>
+        {% endfor %}
+      </select>
+      <p class="hint">{{ t(k="notices.apps_hint") }}</p>
+    </div>
+    <div class="field">
+      <label for="state">{{ t(k="notices.field_state") }}</label>
+      <select id="state" name="state">
+        {% for st in ["investigating", "identified", "monitoring", "resolved"] %}
+        <option value="{{ st }}">{{ t(k="notices.state_" ~ st) }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <button class="btn" type="submit">{{ t(k="notices.publish") }}</button>
+  </form>
+
+  <section class="notice-list">
+    {% if notices | length == 0 %}
+    <div class="bay empty">{{ t(k="notices.none") }}</div>
+    {% endif %}
+    {% for n in notices %}
+    <article class="bay notice-entry">
+      <header class="notice-head">
+        <span class="chip state-{{ n.state }}">{{ t(k="notices.state_" ~ n.state) }}</span>
+        <h3>{{ n.title }}</h3>
+        <time class="mono" data-at="{{ n.updated_at }}"></time>
+      </header>
+      <p class="notice-apps">{% if n.apps | length == 0 %}{{ t(k="notices.all_apps") }}{% else %}{% for slug in n.apps %}<a class="chip mono" href="/status/{{ slug }}" target="_blank" rel="noopener">{{ slug }}</a>{% endfor %}{% endif %}</p>
+      {% if n.body %}<p class="notice-body">{{ n.body }}</p>{% endif %}
+      <details>
+        <summary>{{ t(k="apps.edit") }}</summary>
+        <form class="notice-form" method="post" action="/notices/{{ n.id }}">
+          <div class="field"><input name="title" required maxlength="120" value="{{ n.title }}"></div>
+          <div class="field"><textarea name="body" rows="3" maxlength="2000">{{ n.body }}</textarea></div>
+          <div class="field">
+            <select name="apps" aria-label="{{ t(k="notices.field_apps") }}">
+              <option value="">{{ t(k="notices.all_apps") }}</option>
+              {% for app in apps %}
+              <option value="{{ app.slug }}"{% if n.apps | length > 0 and n.apps[0] == app.slug %} selected{% endif %}>{{ app.name }}{% if not app.public %} — {{ t(k="notices.not_public") }}{% endif %}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="notice-actions">
+            <select name="state">
+              {% for st in ["investigating", "identified", "monitoring", "resolved"] %}
+              <option value="{{ st }}"{% if st == n.state %} selected{% endif %}>{{ t(k="notices.state_" ~ st) }}</option>
+              {% endfor %}
+            </select>
+            <button class="btn" type="submit">{{ t(k="apps.save") }}</button>
+          </div>
+        </form>
+        <form method="post" action="/notices/{{ n.id }}/delete" onsubmit="return confirm(T('notices.confirm_delete'));">
+          <button class="btn danger" type="submit">{{ t(k="apps.delete") }}</button>
+        </form>
+      </details>
+    </article>
+    {% endfor %}
+  </section>
+</div>
+{% endblock %}
+{% block head %}
+<script>
+  document.addEventListener("DOMContentLoaded", () => {
+    for (const el of document.querySelectorAll("time[data-at]")) el.textContent = new Date(el.dataset.at * 1000).toLocaleString(document.documentElement.lang || undefined, { dateStyle: "medium", timeStyle: "short" });
+  });
+</script>
+<style>
+  .notices { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 24px; align-items: start; }
+  @media (max-width: 900px) { .notices { grid-template-columns: minmax(0, 1fr); } }
+  .notice-form { display: flex; flex-direction: column; gap: 14px; }
+  .bay.notice-form { padding: 20px; }
+  .intake-title { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
+  .field input, .field textarea, .field select { width: 100%; }
+  textarea { resize: vertical; }
+  .notice-list { display: flex; flex-direction: column; gap: 12px; }
+  .notice-entry { display: flex; flex-direction: column; gap: 10px; }
+  .notice-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .notice-head h3 { flex: 1; min-width: 0; font-size: 15px; font-weight: 600; }
+  .notice-head time { font-size: 12px; color: var(--ink-3); }
+  .notice-body { margin: 0; font-size: 13px; color: var(--ink-2); white-space: pre-wrap; }
+  .muted { color: var(--ink-4); }
+  .notice-apps { margin: 0; display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; color: var(--ink-3); }
+  .notice-apps .chip { color: var(--ink-2); text-decoration: none; }
+  .hint { margin: 6px 0 0; font-size: 12px; color: var(--ink-3); text-wrap: pretty; }
+  .notice-actions { display: flex; gap: 8px; justify-content: flex-end; }
+  details summary { width: fit-content; font-size: 12px; color: var(--ink-3); cursor: pointer; }
+  details[open] { display: flex; flex-direction: column; gap: 12px; }
+  .chip { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: 4px; border: 1px solid var(--graticule); font-size: 11px; font-weight: 500; }
+  .state-investigating { color: var(--rhythm-down); }
+  .state-identified, .state-monitoring { color: var(--rhythm-degraded); }
+  .state-resolved { color: var(--rhythm-up); }
+</style>
+{% endblock %}

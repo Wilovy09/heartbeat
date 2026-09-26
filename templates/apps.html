@@ -6,13 +6,18 @@
     <h1 class="page-title">{{ t(k="apps.title") }}</h1>
     <p class="page-sub">{{ t(k="apps.sub") }}</p>
   </div>
-  <a class="btn ghost" href="/status" target="_blank" rel="noopener">{{ t(k="apps.status_page") }}</a>
+  <button class="btn" type="button" data-open-dialog="register-dialog">{{ t(k="apps.register") }}</button>
 </header>
 {% if error %}<div class="error-box" role="alert">{{ error }}</div>{% endif %}
 
-<div class="registry">
-  <form class="bay intake" method="post" action="/apps">
-    <h2 class="intake-title">{{ t(k="apps.register") }}</h2>
+<!-- Registering is occasional: a modal, so the list gets the whole width. A rejected
+     submission comes back with the dialog open, the error and what was typed. -->
+<dialog class="modal" id="register-dialog" aria-labelledby="register-title"{% if register_values %} data-open-on-load{% endif %}>
+  <form class="intake" method="post" action="/apps">
+    <header class="modal-head">
+      <h2 class="intake-title" id="register-title">{{ t(k="apps.register") }}</h2>
+      <button class="modal-close" type="button" data-close-dialog aria-label="{{ t(k="apps.close") }}">×</button>
+    </header>
     {% if register_values %}<div class="error-box" role="alert">{{ form_error }}</div>{% endif %}
     <div class="field">
       <label for="name">{{ t(k="apps.name") }}</label>
@@ -26,10 +31,11 @@
     </div>
     <div class="field">
       <label for="health_url">{{ t(k="apps.health_url") }}</label>
-      <input id="health_url" name="health_url" type="url" class="mono-input" placeholder="https://api.example.com/health" required value="{% if register_values %}{{ register_values.health_url }}{% endif %}">
+      <input id="health_url" name="health_url" class="mono-input" placeholder="https://api.example.com/health" required value="{% if register_values %}{{ register_values.health_url }}{% endif %}">
       <p class="hint">{{ t(k="apps.health_hint", secs=uptime_interval_secs, ms=uptime_degraded_ms) }}</p>
+      <p class="hint">{{ t(k="apps.tcp_hint") }} <span class="mono">tcp://db.example.com:5432</span></p>
     </div>
-    <details class="advanced"{% if register_values and (register_values.degraded_after_ms or register_values.expect_body or register_values.check_assets) %} open{% endif %}>
+    <details class="advanced"{% if register_values %} open{% endif %}>
       <summary>{{ t(k="apps.advanced") }}</summary>
       <div class="field">
         <label for="degraded_after_ms">{{ t(k="apps.threshold_long") }}</label>
@@ -44,38 +50,87 @@
         <label class="check"><input type="checkbox" name="check_assets"{% if register_values and register_values.check_assets %} checked{% endif %}> {{ t(k="apps.check_assets") }}</label>
         <p class="hint">{{ t(k="apps.check_assets_hint") }}</p>
       </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="interval_secs">{{ t(k="apps.interval") }}</label>
+          <input id="interval_secs" name="interval_secs" inputmode="numeric" class="mono-input" placeholder="{{ uptime_interval_secs }} ({{ t(k="apps.global") }})" value="{% if register_values %}{{ register_values.interval_secs }}{% endif %}">
+        </div>
+        <div class="field">
+          <label for="timeout_secs">{{ t(k="apps.timeout") }}</label>
+          <input id="timeout_secs" name="timeout_secs" inputmode="numeric" class="mono-input" placeholder="{{ uptime_timeout_secs }} ({{ t(k="apps.global") }})" value="{% if register_values %}{{ register_values.timeout_secs }}{% endif %}">
+        </div>
+      </div>
+      <div class="field">
+        <label for="expect_status">{{ t(k="apps.expect_status") }}</label>
+        <input id="expect_status" name="expect_status" class="mono-input" placeholder="200, 401" value="{% if register_values %}{{ register_values.expect_status }}{% endif %}">
+        <p class="hint">{{ t(k="apps.expect_status_hint") }}</p>
+      </div>
+      <div class="field">
+        <label for="headers">{{ t(k="apps.headers") }}</label>
+        <textarea id="headers" name="headers" rows="2" class="mono-input" placeholder="Authorization: Bearer …">{% if register_values %}{{ register_values.headers }}{% endif %}</textarea>
+        <p class="hint">{{ t(k="apps.headers_hint") }}</p>
+      </div>
+      <div class="field">
+        <label for="alert_webhooks">{{ t(k="apps.alert_webhooks") }}</label>
+        <textarea id="alert_webhooks" name="alert_webhooks" rows="2" class="mono-input" placeholder="https://hooks.slack.com/services/…">{% if register_values %}{{ register_values.alert_webhooks }}{% endif %}</textarea>
+      </div>
+      <div class="field">
+        <label for="alert_mentions">{{ t(k="apps.alert_mentions") }}</label>
+        <input id="alert_mentions" name="alert_mentions" class="mono-input" placeholder="here, U0123ABCD" value="{% if register_values %}{{ register_values.alert_mentions }}{% endif %}">
+        <p class="hint">{{ t(k="apps.alerts_hint") }}</p>
+      </div>
     </details>
     <p class="rule">{{ t(k="apps.rule_a") }} <span class="mono">https://</span> {{ t(k="apps.rule_b") }} <span class="mono">{{ allowed_hosts }}</span></p>
-    <button class="btn intake-submit" type="submit">{{ t(k="apps.submit") }}</button>
+    <footer class="modal-foot">
+      <button class="btn ghost" type="button" data-close-dialog>{{ t(k="apps.cancel") }}</button>
+      <button class="btn intake-submit" type="submit">{{ t(k="apps.submit") }}</button>
+    </footer>
   </form>
+</dialog>
 
+<div class="registry">
   <section class="entries" aria-label="{{ t(k="apps.list_aria") }}">
-    <h2 class="bay-title">{{ t(k="apps.registered") }} · <span class="mono">{{ apps | length }}</span></h2>
+    <div class="entries-head">
+      <h2 class="bay-title">{{ t(k="apps.registered") }} · <span class="mono">{{ apps | length }}</span></h2>
+      {% if apps | length > 3 %}<input type="search" class="entries-filter" placeholder="{{ t(k="apps.filter") }}" aria-label="{{ t(k="apps.filter") }}" oninput="filterApps(this.value)">{% endif %}
+    </div>
+    <div class="bay empty" id="no-match" hidden>{{ t(k="apps.no_match") }}</div>
     {% if apps | length == 0 %}
-    <div class="bay empty">{{ t(k="apps.none") }}</div>
+    <div class="bay empty">{{ t(k="apps.none") }} <button class="btn secondary" type="button" data-open-dialog="register-dialog">{{ t(k="apps.register") }}</button></div>
     {% endif %}
     {% for app in apps %}
-    <article class="bay entry" id="app-{{ app.slug }}">
+    <article class="bay entry" id="app-{{ app.slug }}" data-search="{{ app.name | lower }} {{ app.slug }}">
       <header class="entry-head">
         <div class="entry-id">
+          <span class="vital" data-vital="{{ app.slug }}"></span>
           <h3 class="entry-name">{{ app.name }}</h3>
           <span class="entry-slug mono">{{ app.slug }}</span>
-          {% if app.paused %}<span class="chip"><span class="vital st-paused"></span>{{ t(k="apps.chip_paused") }}</span>{% endif %}
-          {% if app.public %}<a class="chip" href="/status" target="_blank" rel="noopener">{{ t(k="apps.chip_public") }}</a>{% endif %}
+          {% if app.paused %}<span class="chip{% if not app.paused_until and app.paused_at and app.paused_at < stale_pause_before %} warn{% endif %}"><span class="vital st-paused"></span>{{ t(k="apps.chip_paused") }}{% if app.paused_until %} · <span data-until="{{ app.paused_until }}"></span>{% elif app.paused_at %} · <span data-since="{{ app.paused_at }}"></span>{% endif %}</span>{% endif %}
+          {% if app.public %}<a class="chip" href="/status/{{ app.slug }}" target="_blank" rel="noopener">{{ t(k="apps.chip_public") }} ↗</a>{% endif %}
         </div>
+        <span class="entry-status mono" data-status="{{ app.slug }}"></span>
         <div class="entry-actions">
+          {% if app.paused %}
           <form method="post" action="/apps/{{ app.slug }}/pause">
-            <input type="hidden" name="value" value="{% if app.paused %}false{% else %}true{% endif %}">
-            <button class="btn ghost" type="submit">{% if app.paused %}{{ t(k="apps.resume") }}{% else %}{{ t(k="apps.pause") }}{% endif %}</button>
+            <input type="hidden" name="value" value="false">
+            <button class="btn secondary" type="submit">{{ t(k="apps.resume") }}</button>
           </form>
-          <form method="post" action="/apps/{{ app.slug }}/rotate-token" data-name="{{ app.name }}"
-            onsubmit="return confirm(T('apps.confirm_rotate', { name: this.dataset.name }));">
-            <button class="btn ghost" type="submit">{{ t(k="apps.rotate") }}</button>
-          </form>
-          <form method="post" action="/apps/{{ app.slug }}/delete" data-name="{{ app.name }}"
-            onsubmit="return confirm(T('apps.confirm_delete', { name: this.dataset.name }));">
-            <button class="btn danger" type="submit">{{ t(k="apps.delete") }}</button>
-          </form>
+          {% else %}
+          <details class="menu pause-menu">
+            <summary class="btn ghost">{{ t(k="apps.pause") }} <span class="caret" aria-hidden="true">▾</span></summary>
+            <form class="menu-pop" method="post" action="/apps/{{ app.slug }}/pause">
+              <input type="hidden" name="value" value="true">
+              <span class="menu-label">{{ t(k="apps.pause_for") }}</span>
+              <button type="submit" name="hours" value="1">1 h</button>
+              <button type="submit" name="hours" value="4">4 h</button>
+              <button type="submit" name="hours" value="24">24 h</button>
+              <button type="submit" name="hours" value="72">3 d</button>
+              <button type="submit" name="hours" value="168">7 d</button>
+              <button type="submit" name="hours" value="">{{ t(k="apps.pause_indefinite") }}</button>
+            </form>
+          </details>
+          {% endif %}
+          <a class="btn ghost" href="/#{{ app.slug }}">{{ t(k="apps.open_dashboard") }}</a>
         </div>
       </header>
 
@@ -91,10 +146,15 @@
         {% if app.degraded_after_ms %}<dt>{{ t(k="apps.dt_threshold") }}</dt><dd class="mono">{{ app.degraded_after_ms }} ms</dd>{% endif %}
         {% if app.expect_body %}<dt>{{ t(k="apps.dt_keyword") }}</dt><dd class="mono">{{ app.expect_body }}</dd>{% endif %}
         {% if app.check_assets %}<dt>{{ t(k="apps.dt_bundles") }}</dt><dd class="entry-muted">{{ t(k="apps.bundles_checked") }}</dd>{% endif %}
+        {% if app.interval_secs or app.timeout_secs %}<dt>{{ t(k="apps.dt_timing") }}</dt><dd class="mono">{% if app.interval_secs %}{{ t(k="apps.every", secs=app.interval_secs) }}{% endif %}{% if app.interval_secs and app.timeout_secs %} · {% endif %}{% if app.timeout_secs %}{{ t(k="apps.timeout_short", secs=app.timeout_secs) }}{% endif %}</dd>{% endif %}
+        {% if app.expect_status | length > 0 %}<dt>{{ t(k="apps.dt_status") }}</dt><dd class="mono">{{ app.expect_status | join(sep=", ") }}</dd>{% endif %}
+        {% if app.headers | length > 0 %}<dt>{{ t(k="apps.dt_headers") }}</dt><dd class="mono">{% for h in app.headers %}{{ h.name }}{% if not loop.last %}, {% endif %}{% endfor %}</dd>{% endif %}
+        {% if app.alert_webhooks | length > 0 or app.alert_mentions | length > 0 %}<dt>{{ t(k="apps.dt_alerts") }}</dt><dd>{% if app.alert_webhooks | length > 0 %}{{ t(k="apps.webhook_count", n=app.alert_webhooks | length) }}{% endif %}{% if app.alert_webhooks | length > 0 and app.alert_mentions | length > 0 %} · {% endif %}<span class="mono">{{ app.alert_mentions | join(sep=", ") }}</span></dd>{% endif %}
       </dl>
 
       {% set editing = edit_slug == app.slug %}
-      <details class="entry-edit"{% if editing %} open{% endif %}>
+      <div class="entry-panels">
+      <details class="entry-edit panel"{% if editing %} open{% endif %}>
         <summary>{{ t(k="apps.edit") }}</summary>
         <form class="edit-form" method="post" action="/apps/{{ app.slug }}/edit">
           {% if editing %}<div class="error-box" role="alert">{{ form_error }}</div>{% endif %}
@@ -108,7 +168,7 @@
           </div>
           <div class="field">
             <label for="health-{{ app.slug }}">{{ t(k="apps.health_url") }}</label>
-            <input id="health-{{ app.slug }}" name="health_url" type="url" class="mono-input" required value="{% if editing %}{{ edit_values.health_url }}{% elif app.health_url %}{{ app.health_url }}{% endif %}">
+            <input id="health-{{ app.slug }}" name="health_url" class="mono-input" required value="{% if editing %}{{ edit_values.health_url }}{% elif app.health_url %}{{ app.health_url }}{% endif %}">
           </div>
           <div class="field-row">
             <div class="field">
@@ -121,29 +181,103 @@
             </div>
           </div>
           <label class="check"><input type="checkbox" name="check_assets"{% if editing %}{% if edit_values.check_assets %} checked{% endif %}{% elif app.check_assets %} checked{% endif %}> {{ t(k="apps.check_assets") }}</label>
+          <div class="field-row">
+            <div class="field">
+              <label for="interval-{{ app.slug }}">{{ t(k="apps.interval") }}</label>
+              <input id="interval-{{ app.slug }}" name="interval_secs" inputmode="numeric" class="mono-input" placeholder="{{ uptime_interval_secs }} ({{ t(k="apps.global") }})" value="{% if editing %}{{ edit_values.interval_secs }}{% elif app.interval_secs %}{{ app.interval_secs }}{% endif %}">
+            </div>
+            <div class="field">
+              <label for="timeout-{{ app.slug }}">{{ t(k="apps.timeout") }}</label>
+              <input id="timeout-{{ app.slug }}" name="timeout_secs" inputmode="numeric" class="mono-input" placeholder="{{ uptime_timeout_secs }} ({{ t(k="apps.global") }})" value="{% if editing %}{{ edit_values.timeout_secs }}{% elif app.timeout_secs %}{{ app.timeout_secs }}{% endif %}">
+            </div>
+            <div class="field">
+              <label for="status-{{ app.slug }}">{{ t(k="apps.expect_status") }}</label>
+              <input id="status-{{ app.slug }}" name="expect_status" class="mono-input" placeholder="2xx" value="{% if editing %}{{ edit_values.expect_status }}{% else %}{{ app.expect_status | join(sep=", ") }}{% endif %}">
+            </div>
+          </div>
+          <div class="field">
+            <label for="headers-{{ app.slug }}">{{ t(k="apps.headers") }}</label>
+            <textarea id="headers-{{ app.slug }}" name="headers" rows="2" class="mono-input" placeholder="Authorization: Bearer …">{% if editing %}{{ edit_values.headers }}{% else %}{% for h in app.headers %}{{ h.name }}: {{ h.value }}
+{% endfor %}{% endif %}</textarea>
+          </div>
+          <div class="field">
+            <label for="webhooks-{{ app.slug }}">{{ t(k="apps.alert_webhooks") }}</label>
+            <textarea id="webhooks-{{ app.slug }}" name="alert_webhooks" rows="2" class="mono-input" placeholder="https://hooks.slack.com/services/…">{% if editing %}{{ edit_values.alert_webhooks }}{% else %}{{ app.alert_webhooks | join(sep="
+") }}{% endif %}</textarea>
+          </div>
+          <div class="field">
+            <label for="mentions-{{ app.slug }}">{{ t(k="apps.alert_mentions") }}</label>
+            <input id="mentions-{{ app.slug }}" name="alert_mentions" class="mono-input" placeholder="here, U0123ABCD" value="{% if editing %}{{ edit_values.alert_mentions }}{% else %}{{ app.alert_mentions | join(sep=", ") }}{% endif %}">
+            <p class="hint">{{ t(k="apps.alerts_hint") }}</p>
+          </div>
           <p class="hint">{{ t(k="apps.edit_hint") }}</p>
           <div class="edit-actions">
+            {% if app.alert_webhooks | length > 0 %}
+            <span class="ping-result" aria-live="polite"></span>
+            <button class="btn secondary" type="button" data-slug="{{ app.slug }}" onclick="pingAppHooks(this)">{{ t(k="apps.ping_webhooks") }}</button>
+            {% endif %}
             <button class="btn" type="submit">{{ t(k="apps.save") }}</button>
           </div>
         </form>
+        <div class="danger-zone">
+          <div>
+            <span class="danger-title">{{ t(k="apps.delete") }}</span>
+            <p class="hint">{{ t(k="apps.delete_hint") }}</p>
+          </div>
+          <form method="post" action="/apps/{{ app.slug }}/delete" data-name="{{ app.name }}"
+            onsubmit="return confirm(T('apps.confirm_delete', { name: this.dataset.name }));">
+            <button class="btn danger" type="submit">{{ t(k="apps.delete") }}</button>
+          </form>
+        </div>
       </details>
 
-      <div class="entry-embed">
-        <div class="embed-head">
-          <span class="bay-title" style="margin: 0">{{ t(k="apps.embed") }}</span>
-          <div class="embed-actions">
-            <form method="post" action="/apps/{{ app.slug }}/public">
-              <input type="hidden" name="value" value="{% if app.public %}false{% else %}true{% endif %}">
-              <button class="btn ghost" type="submit">{% if app.public %}{{ t(k="apps.unpublish") }}{% else %}{{ t(k="apps.publish") }}{% endif %}</button>
+      <details class="entry-share panel">
+        <summary>{{ t(k="apps.share") }}{% if app.public %} <span class="summary-note">· {{ t(k="apps.chip_public") }}</span>{% endif %}</summary>
+        <div class="share-body">
+          <div class="share-row">
+            <div>
+              <span class="share-title">{{ t(k="apps.status_page_title") }}</span>
+              <p class="hint">{% if app.public %}{{ t(k="apps.public_on") }} <a class="mono" href="/status/{{ app.slug }}" target="_blank" rel="noopener">/status/{{ app.slug }} ↗</a>{% else %}{{ t(k="apps.public_off") }}{% endif %}</p>
+            </div>
+            <div class="share-actions">
+              {% if app.public %}<button class="btn secondary" type="button" data-slug="{{ app.slug }}" onclick="copyStatusLink(this)">{{ t(k="apps.copy_link") }}</button>{% endif %}
+              <form method="post" action="/apps/{{ app.slug }}/public">
+                <input type="hidden" name="value" value="{% if app.public %}false{% else %}true{% endif %}">
+                <button class="btn {% if app.public %}ghost{% else %}secondary{% endif %}" type="submit">{% if app.public %}{{ t(k="apps.unpublish") }}{% else %}{{ t(k="apps.publish") }}{% endif %}</button>
+              </form>
+            </div>
+          </div>
+
+          <div class="share-block">
+            <div class="share-row">
+              <span class="share-title">{{ t(k="apps.embed") }}</span>
+              <button class="btn secondary" type="button" data-slug="{{ app.slug }}" data-token="{{ app.embed_token }}" onclick="copyEmbed(this)">{{ t(k="apps.copy_code") }}</button>
+            </div>
+            <heartbeat-status app="{{ app.slug }}" token="{{ app.embed_token }}"></heartbeat-status>
+            <pre class="mono snippet-code" data-slug="{{ app.slug }}" data-token="{{ app.embed_token }}"></pre>
+          </div>
+
+          <div class="share-block">
+            <div class="share-row">
+              <span class="share-title">{{ t(k="apps.badge") }}</span>
+              <button class="btn secondary" type="button" data-slug="{{ app.slug }}" data-token="{{ app.embed_token }}" onclick="copyBadge(this)">{{ t(k="apps.copy_badge") }}</button>
+            </div>
+            <img class="badge-preview" loading="lazy" src="/badge/{{ app.slug }}.svg?token={{ app.embed_token }}" alt="">
+            <pre class="mono badge-code" data-slug="{{ app.slug }}" data-token="{{ app.embed_token }}"></pre>
+          </div>
+
+          <div class="share-row share-rotate">
+            <div>
+              <span class="share-title">{{ t(k="apps.rotate") }}</span>
+              <p class="hint">{{ t(k="apps.rotate_hint") }}</p>
+            </div>
+            <form method="post" action="/apps/{{ app.slug }}/rotate-token" data-name="{{ app.name }}"
+              onsubmit="return confirm(T('apps.confirm_rotate', { name: this.dataset.name }));">
+              <button class="btn ghost" type="submit">{{ t(k="apps.rotate") }}</button>
             </form>
-            <button class="btn secondary" type="button" data-slug="{{ app.slug }}" data-token="{{ app.embed_token }}" onclick="copyEmbed(this)">{{ t(k="apps.copy_code") }}</button>
           </div>
         </div>
-        <heartbeat-status app="{{ app.slug }}" token="{{ app.embed_token }}"></heartbeat-status>
-        <details class="snippet">
-          <summary>{{ t(k="apps.view_code") }}</summary>
-          <pre class="mono" data-slug="{{ app.slug }}" data-token="{{ app.embed_token }}"></pre>
-        </details>
+      </details>
       </div>
     </article>
     {% endfor %}
@@ -167,8 +301,100 @@
     btn.textContent = (await copyToClipboard(embedSnippet(btn.dataset))) ? T('js.copied') : T('js.copy_failed');
     setTimeout(() => (btn.textContent = label), 1500);
   }
+  // Pings the app's own webhooks (saved values) and shows each answer.
+  async function pingAppHooks(btn) {
+    const out = btn.parentElement.querySelector(".ping-result");
+    btn.disabled = true;
+    out.textContent = T("settings.sending");
+    try {
+      const resp = await fetch(`/apps/${encodeURIComponent(btn.dataset.slug)}/alerts/test`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: "ping" }),
+      });
+      if (resp.status === 401) { location.href = "/login"; return; }
+      const body = await resp.json();
+      out.textContent = (body.outcomes || [])
+        .map((o) => (o.ok ? T("settings.pong", { status: o.status, ms: o.latency_ms }) : T("settings.failed", { status: o.status ?? "—" })))
+        .join(" · ") || body.error || "";
+    } catch (e) {
+      out.textContent = e.message;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+  function badgeSnippet({ slug, token }) {
+    return `![Status](${location.origin}/badge/${slug}.svg?token=${token})`;
+  }
+  async function copyBadge(btn) {
+    const label = btn.textContent;
+    btn.textContent = (await copyToClipboard(badgeSnippet(btn.dataset))) ? T('js.copied') : T('js.copy_failed');
+    setTimeout(() => (btn.textContent = label), 1500);
+  }
+  async function copyStatusLink(btn) {
+    const label = btn.textContent;
+    const url = `${location.origin}/status/${btn.dataset.slug}`;
+    btn.textContent = (await copyToClipboard(url)) ? T('js.copied') : T('js.copy_failed');
+    setTimeout(() => (btn.textContent = label), 1500);
+  }
+  function filterApps(query) {
+    const q = query.trim().toLowerCase();
+    let shown = 0;
+    for (const entry of document.querySelectorAll(".entry[data-search]")) {
+      const match = !q || entry.dataset.search.includes(q);
+      entry.hidden = !match;
+      shown += match;
+    }
+    document.getElementById("no-match").hidden = shown > 0;
+  }
+  // Each app's live state in its header (same data as the dashboard).
+  async function loadStates() {
+    try {
+      const resp = await fetch("/api/uptime", { credentials: "same-origin" });
+      if (!resp.ok) return;
+      for (const m of (await resp.json()).monitors) {
+        const state = m.paused ? "paused" : m.status || "unknown";
+        const dot = document.querySelector(`[data-vital="${CSS.escape(m.slug)}"]`);
+        if (dot) dot.className = `vital st-${state}`;
+        const text = document.querySelector(`[data-status="${CSS.escape(m.slug)}"]`);
+        if (!text) continue;
+        const label = T(["up", "degraded", "down", "paused"].includes(state) ? `js.status_${state}` : "js.status_unknown");
+        const pct = m.uptime_24h == null ? "" : ` · ${m.uptime_24h.toFixed(m.uptime_24h === 100 ? 0 : 2)}% 24 h`;
+        text.textContent = label + pct;
+        text.className = `entry-status mono st-text-${state}`;
+      }
+    } catch {
+      // The headers just stay neutral.
+    }
+  }
+  // Menus close on outside click or Escape.
+  document.addEventListener("click", (e) => {
+    for (const menu of document.querySelectorAll("details.menu[open]")) if (!menu.contains(e.target)) menu.open = false;
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") for (const menu of document.querySelectorAll("details.menu[open]")) menu.open = false;
+  });
+  // Dialogs: buttons with data-open-dialog / data-close-dialog; a click on the backdrop
+  // (the dialog element itself, outside its content) closes too.
+  document.addEventListener("click", (e) => {
+    const opener = e.target.closest("[data-open-dialog]");
+    if (opener) {
+      const dialog = document.getElementById(opener.dataset.openDialog);
+      dialog.showModal();
+      dialog.querySelector("input:not([type=hidden])")?.focus();
+      return;
+    }
+    if (e.target.closest("[data-close-dialog]")) e.target.closest("dialog").close();
+    else if (e.target.matches("dialog.modal")) e.target.close();
+  });
   document.addEventListener("DOMContentLoaded", () => {
-    for (const pre of document.querySelectorAll(".snippet pre")) pre.textContent = embedSnippet(pre.dataset);
+    for (const dialog of document.querySelectorAll("dialog[data-open-on-load]")) dialog.showModal();
+    loadStates();
+    for (const pre of document.querySelectorAll(".snippet-code")) pre.textContent = embedSnippet(pre.dataset);
+    for (const pre of document.querySelectorAll(".badge-code")) pre.textContent = badgeSnippet(pre.dataset);
+    for (const el of document.querySelectorAll("[data-until]")) el.textContent = T("apps.until", { when: new Date(el.dataset.until * 1000).toLocaleString() });
+    for (const el of document.querySelectorAll("[data-since]")) el.textContent = T("apps.since", { when: new Date(el.dataset.since * 1000).toLocaleString() });
     // Arriving from the dashboard's "Editar" (/apps#app-slug): open that app's edit form.
     const target = location.hash && document.getElementById(location.hash.slice(1));
     const edit = target && target.querySelector(".entry-edit");
@@ -176,11 +402,22 @@
   });
 </script>
 <style>
-  .registry { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 24px; align-items: start; }
-  @media (max-width: 900px) { .registry { grid-template-columns: minmax(0, 1fr); } .intake { position: static !important; } }
+  .registry { display: block; }
+  .empty .btn { margin-left: 8px; }
+
+  /* Register modal. */
+  .modal { width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 48px); padding: 0; border: 1px solid var(--graticule-strong); border-radius: 12px; background: var(--bay); color: var(--ink); box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55); }
+  .modal[open] { animation: modal-in 200ms var(--ease-out); }
+  .modal::backdrop { background: rgba(4, 5, 6, 0.72); backdrop-filter: blur(2px); }
+  @keyframes modal-in { from { opacity: 0; transform: translateY(8px) scale(0.98); } }
+  @media (prefers-reduced-motion: reduce) { .modal[open] { animation: none; } }
+  .modal-head { display: flex; align-items: center; justify-content: space-between; }
+  .modal-close { width: 32px; height: 32px; border: 0; border-radius: 6px; background: none; color: var(--ink-3); font-size: 20px; line-height: 1; cursor: pointer; }
+  .modal-close:hover { color: var(--ink); background: var(--bay-raised); }
+  .modal-foot { position: sticky; bottom: -24px; display: flex; justify-content: flex-end; gap: 8px; margin: 0 -24px -24px; padding: 14px 24px; background: var(--bay); border-top: 1px solid var(--graticule-soft); }
 
   /* Intake form */
-  .intake { position: sticky; top: 76px; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+  .intake { padding: 24px; display: flex; flex-direction: column; gap: 16px; }
   .intake-title { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
   .intake .error-box { margin: 0; }
   .field input { width: 100%; }
@@ -209,31 +446,68 @@
   .entry-urls dt { font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); padding-top: 1px; }
   .entry-urls dd { margin: 0; font-size: 12px; color: var(--ink-2); word-break: break-all; }
   .entry-missing { color: var(--rhythm-degraded) !important; font-family: var(--font-sans); }
-  .entry-embed { padding: 14px 20px 18px; border-top: 1px solid var(--graticule-soft); display: flex; flex-direction: column; gap: 12px; }
-  .embed-head { display: flex; align-items: center; justify-content: space-between; }
-  .snippet summary { width: fit-content; font-size: 12px; color: var(--ink-3); cursor: pointer; list-style: none; }
-  .snippet summary::-webkit-details-marker { display: none; }
-  .snippet summary::before { content: "▸"; display: inline-block; margin-right: 6px; transition: transform 150ms var(--ease-out); }
-  .snippet[open] summary::before { transform: rotate(90deg); }
-  .snippet summary:hover { color: var(--ink); }
+  .entries-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 4px 0 0; }
+  .entries-head .bay-title { margin: 0; }
+  .entries-filter { width: 220px; height: 30px; font-size: 12px; }
+  .entry-id .vital { align-self: center; }
+  .entry-status { margin-left: auto; font-size: 12px; color: var(--ink-3); white-space: nowrap; }
+  .entry-status.st-text-down { color: var(--rhythm-down); }
+  .entry-status.st-text-degraded { color: var(--rhythm-degraded); }
+
+  /* Pause menu: a disclosure with one submit per duration. */
+  .menu { position: relative; }
+  .menu > summary { list-style: none; }
+  .menu > summary::-webkit-details-marker { display: none; }
+  .menu .caret { font-size: 10px; color: var(--ink-4); }
+  .menu[open] > summary { background: var(--bay-raised); color: var(--ink); }
+  .entry-actions .menu-pop, .menu-pop { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 180px; display: flex; flex-direction: column; padding: 4px; background: var(--bay-raised); border: 1px solid var(--graticule-strong); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); transform-origin: top right; animation: menu-in 150ms var(--ease-out); }
+  .menu-label { padding: 6px 10px 4px; font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); }
+  .menu-pop button { height: 30px; padding: 0 10px; border: 0; border-radius: 6px; background: none; color: var(--ink); font: 13px var(--font-sans); text-align: left; cursor: pointer; }
+  .menu-pop button:hover, .menu-pop button:focus-visible { background: var(--bay); outline: none; }
+  @keyframes menu-in { from { opacity: 0; transform: scale(0.96); } }
+  @media (prefers-reduced-motion: reduce) { .menu-pop { animation: none; } }
+
+  /* Panels: edit and share, collapsed by default. */
+  /* Both summaries share one row; an open panel drops below them, full width. */
+  .entry-panels { display: flex; flex-wrap: wrap; column-gap: 28px; padding: 12px 20px; border-top: 1px solid var(--graticule-soft); }
+  .panel { padding: 0; border: 0; }
+  .panel[open] { flex-basis: 100%; order: 2; margin-top: 4px; }
+  .panel[open] > summary { color: var(--ink); }
+  .panel > summary { width: fit-content; font-size: 12px; color: var(--ink-3); cursor: pointer; list-style: none; }
+  .panel > summary::-webkit-details-marker { display: none; }
+  .panel > summary::before { content: "▸"; display: inline-block; margin-right: 6px; transition: transform 150ms var(--ease-out); }
+  .panel[open] > summary::before { transform: rotate(90deg); }
+  .panel > summary:hover { color: var(--ink); }
+  .summary-note { color: var(--ink-2); }
+  .share-body { display: flex; flex-direction: column; gap: 16px; margin-top: 14px; }
+  .share-block { display: flex; flex-direction: column; gap: 10px; padding-top: 14px; border-top: 1px solid var(--graticule-soft); }
+  .share-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+  .share-row .hint { margin-top: 2px; }
+  .share-title { font-size: 13px; font-weight: 500; color: var(--ink); }
+  .share-actions { display: flex; gap: 8px; align-items: center; }
+  .share-rotate { padding-top: 14px; border-top: 1px solid var(--graticule-soft); }
+  .badge-preview { align-self: flex-start; height: 20px; }
+  .danger-zone { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 18px; padding: 12px 14px; border: 1px solid rgba(240, 81, 78, 0.22); border-radius: 8px; }
+  .danger-zone .hint { margin-top: 2px; }
+  .danger-title { font-size: 13px; font-weight: 500; color: var(--rhythm-down); }
+  @media (max-width: 720px) { .entry-status { margin-left: 0; width: 100%; order: 2; } .entries-filter { width: 100%; } .entries-head { flex-wrap: wrap; } }
   .chip { display: inline-flex; align-items: center; gap: 6px; height: 20px; padding: 0 8px; border-radius: 4px; background: var(--bay-raised); border: 1px solid var(--graticule); font-size: 11px; font-weight: 500; color: var(--ink-2); text-decoration: none; }
   a.chip:hover { color: var(--ink); }
   .chip .vital { width: 6px; height: 6px; }
+  .chip.warn { color: var(--rhythm-degraded); border-color: var(--rhythm-degraded); }
+  .ping-result { margin-right: auto; font-size: 12px; color: var(--ink-3); align-self: center; }
+  textarea.mono-input { width: 100%; resize: vertical; }
   .entry-id { flex-wrap: wrap; }
-  .embed-actions { display: flex; gap: 6px; align-items: center; }
-  .embed-actions form { display: contents; }
   .advanced summary, .entry-edit summary { width: fit-content; font-size: 12px; color: var(--ink-3); cursor: pointer; list-style: none; }
   .advanced summary::-webkit-details-marker, .entry-edit summary::-webkit-details-marker { display: none; }
   .advanced summary::before, .entry-edit summary::before { content: "▸"; display: inline-block; margin-right: 6px; transition: transform 150ms var(--ease-out); }
   .advanced[open] summary::before, .entry-edit[open] summary::before { transform: rotate(90deg); }
   .advanced summary:hover, .entry-edit summary:hover { color: var(--ink); }
   .advanced[open] { display: flex; flex-direction: column; gap: 16px; }
-  .entry-edit { padding: 12px 20px; border-top: 1px solid var(--graticule-soft); }
   .edit-form { display: flex; flex-direction: column; gap: 14px; margin-top: 14px; }
   .edit-form .error-box { margin: 0; }
   .field-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
-  .edit-actions { display: flex; justify-content: flex-end; }
+  .edit-actions { display: flex; justify-content: flex-end; gap: 8px; }
   .entry { scroll-margin-top: 72px; }
-  .snippet pre { margin: 10px 0 0; padding: 12px 14px; border-radius: 6px; background: var(--well); border: 1px solid var(--graticule); font-size: 12px; line-height: 1.6; color: var(--ink-2); white-space: pre-wrap; word-break: break-all; }
 </style>
 {% endblock %}

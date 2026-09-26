@@ -1,10 +1,12 @@
-//! Editable alert message templates, one per kind (down, degraded, recovered). Admins
+//! Editable alert message templates, one per kind (down, reminder, degraded, recovered). Admins
 //! change them from /settings; they're stored in `ALERT_TEMPLATES_FILE` and take effect
 //! immediately. A kind without a custom template uses the default for `APP_LANG`
 //! (`locales/<lang>.json`, keys `alert.default_*`).
 //!
 //! Placeholders: `{app}`, `{message}`, `{latency}` (e.g. `412 ms`), `{link}` (the app's
-//! dashboard page, when `PUBLIC_URL` is set) and `{mentions}` (only filled on down).
+//! dashboard page, when `PUBLIC_URL` is set), `{mentions}` (only filled on down and
+//! reminders) and `{duration}` (how long the outage has lasted, on reminders and
+//! recoveries).
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -19,12 +21,14 @@ pub const MAX_TEMPLATE_CHARS: usize = 1000;
 #[serde(rename_all = "lowercase")]
 pub enum TemplateKind {
     Down,
+    /// Still down, every `ALERT_REMIND_MINS`.
+    Reminder,
     Degraded,
     Recovered,
 }
 
 impl TemplateKind {
-    pub const ALL: [Self; 3] = [Self::Down, Self::Degraded, Self::Recovered];
+    pub const ALL: [Self; 4] = [Self::Down, Self::Reminder, Self::Degraded, Self::Recovered];
 }
 
 /// Custom templates as stored; `None` = use the default.
@@ -32,6 +36,8 @@ impl TemplateKind {
 pub struct AlertTemplates {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub down: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reminder: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub degraded: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -42,6 +48,7 @@ impl AlertTemplates {
     fn get(&self, kind: TemplateKind) -> Option<&String> {
         match kind {
             TemplateKind::Down => self.down.as_ref(),
+            TemplateKind::Reminder => self.reminder.as_ref(),
             TemplateKind::Degraded => self.degraded.as_ref(),
             TemplateKind::Recovered => self.recovered.as_ref(),
         }
@@ -53,6 +60,7 @@ impl AlertTemplates {
         let clean = |t: Option<String>| t.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         Self {
             down: clean(self.down),
+            reminder: clean(self.reminder),
             degraded: clean(self.degraded),
             recovered: clean(self.recovered),
         }
@@ -77,6 +85,8 @@ pub struct TemplateVars {
     pub latency: String,
     pub link: String,
     pub mentions: String,
+    /// `25 min`, or empty when there's no outage to measure.
+    pub duration: String,
 }
 
 /// Fills `template` and tidies what empty placeholders leave behind: leading/trailing
@@ -90,6 +100,7 @@ pub fn render(template: &str, vars: &TemplateVars) -> String {
         .replace("{latency}", &vars.latency)
         .replace("{link}", &vars.link)
         .replace("{mentions}", &vars.mentions)
+        .replace("{duration}", &vars.duration)
         .replace("( )", "")
         .replace("()", "");
     let lines: Vec<String> = filled
@@ -114,13 +125,13 @@ pub struct TemplateStore {
 
 #[derive(Debug, thiserror::Error)]
 pub enum TemplateError {
-    #[error("error de E/S en {path}: {source}")]
+    #[error("I/O error on {path}: {source}")]
     Io {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
-    #[error("{path} no es un archivo de plantillas válido: {source}")]
+    #[error("{path} is not a valid templates file: {source}")]
     Json {
         path: PathBuf,
         #[source]
@@ -141,6 +152,7 @@ impl TemplateStore {
     fn defaults(i18n: &I18n) -> AlertTemplates {
         AlertTemplates {
             down: Some(i18n.text("alert.default_down", &[])),
+            reminder: Some(i18n.text("alert.default_reminder", &[])),
             degraded: Some(i18n.text("alert.default_degraded", &[])),
             recovered: Some(i18n.text("alert.default_recovered", &[])),
         }
@@ -244,6 +256,7 @@ mod tests {
             latency: "412 ms".into(),
             link: "https://status.example.com/#billing".into(),
             mentions: "<@U1>".into(),
+            duration: "25 min".into(),
         }
     }
 
@@ -286,7 +299,7 @@ mod tests {
             .save(AlertTemplates {
                 down: Some("  ALERTA {app}  ".into()),
                 degraded: Some("   ".into()),
-                recovered: None,
+                ..AlertTemplates::default()
             })
             .await
             .unwrap();

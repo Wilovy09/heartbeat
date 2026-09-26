@@ -1,7 +1,7 @@
 use actix_web::{HttpRequest, HttpResponse, web};
-use tera::{Context, Tera};
+use tera::Tera;
 
-use crate::{auth, registry::AppRegistry};
+use crate::{auth, i18n::I18n, registry::AppRegistry};
 
 /// GET / -- the uptime view (see static/uptime.js).
 pub async fn show(
@@ -9,13 +9,13 @@ pub async fn show(
     tera: web::Data<Tera>,
     registry: web::Data<AppRegistry>,
 ) -> HttpResponse {
-    if let Err(resp) = auth::require_session(&req) {
-        return resp;
-    }
+    let session = match auth::require_session(&req) {
+        Ok(session) => session,
+        Err(resp) => return resp,
+    };
 
     let apps = registry.list().await;
-    let mut ctx = Context::new();
-    ctx.insert("active", "dashboard");
+    let mut ctx = auth::page_context(&session, "dashboard");
     ctx.insert("apps", &apps);
 
     match tera.render("dashboard.html", &ctx) {
@@ -31,13 +31,13 @@ pub async fn show_logs(
     tera: web::Data<Tera>,
     registry: web::Data<AppRegistry>,
 ) -> HttpResponse {
-    if let Err(resp) = auth::require_session(&req) {
-        return resp;
-    }
+    let session = match auth::require_admin(&req) {
+        Ok(session) => session,
+        Err(resp) => return resp,
+    };
 
     let apps = registry.list().await;
-    let mut ctx = Context::new();
-    ctx.insert("active", "logs");
+    let mut ctx = auth::page_context(&session, "logs");
     ctx.insert("apps", &apps);
 
     match tera.render("logs.html", &ctx) {
@@ -51,15 +51,17 @@ pub async fn show_app(
     req: HttpRequest,
     tera: web::Data<Tera>,
     registry: web::Data<AppRegistry>,
+    i18n: web::Data<I18n>,
     path: web::Path<String>,
 ) -> HttpResponse {
-    if let Err(resp) = auth::require_session(&req) {
-        return resp;
-    }
+    let session = match auth::require_admin(&req) {
+        Ok(session) => session,
+        Err(resp) => return resp,
+    };
 
     let slug = path.into_inner();
     let Some(app) = registry.find(&slug).await else {
-        return HttpResponse::NotFound().body(format!("App '{slug}' no está registrada"));
+        return HttpResponse::NotFound().body(i18n.text("api.not_registered", &[("slug", &slug)]));
     };
     // Monitor-only app: nothing to show here, its dashboard page is the useful view.
     if app.logs_url.is_none() {
@@ -68,8 +70,7 @@ pub async fn show_app(
             .finish();
     }
 
-    let mut ctx = Context::new();
-    ctx.insert("active", "logs");
+    let mut ctx = auth::page_context(&session, "logs");
     ctx.insert("app", &app);
 
     match tera.render("log_viewer.html", &ctx) {

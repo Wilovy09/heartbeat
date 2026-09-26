@@ -8,8 +8,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tera::{Kwargs, State, Tera, TeraResult};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Lang {
+    #[default]
     Es,
     En,
 }

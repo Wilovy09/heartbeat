@@ -6,19 +6,23 @@ pub mod dashboard;
 pub mod embed;
 pub mod health;
 pub mod login;
+pub mod metrics;
+pub mod notices;
 pub mod settings;
 pub mod status;
 pub mod uptime;
 
-use actix_files::Files;
 use actix_web::web;
 
 /// Every route and static directory. Middleware and app data are added by the caller.
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    cfg.service(Files::new("/libs", "./libs"))
-        .service(Files::new("/static", "./static"))
+    cfg.route("/libs/{path:.*}", web::get().to(crate::assets::lib_file))
+        .route(
+            "/static/{path:.*}",
+            web::get().to(crate::assets::static_file),
+        )
         .route("/healthz", web::get().to(health::healthz))
-        .route("/status", web::get().to(status::show))
+        .route("/status/{slug}", web::get().to(status::show))
         .route("/login", web::get().to(login::show_login))
         .route("/login", web::post().to(login::submit_login))
         .route("/logout", web::post().to(login::logout))
@@ -35,6 +39,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             "/apps/{slug}/rotate-token",
             web::post().to(apps::rotate_token),
         )
+        .route(
+            "/apps/{slug}/alerts/test",
+            web::post().to(apps::test_alerts),
+        )
         .route("/embed/{slug}", web::get().to(embed::status))
         .route("/api/apps/{slug}/logs", web::get().to(api::get_logs))
         .route("/settings", web::get().to(settings::show))
@@ -47,5 +55,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             web::post().to(settings::save_templates),
         )
         .route("/api/uptime", web::get().to(uptime::overview))
-        .route("/api/uptime/{slug}", web::get().to(uptime::detail));
+        .route("/api/uptime/{slug}", web::get().to(uptime::detail))
+        .route("/api/uptime/{slug}/export", web::get().to(uptime::export))
+        .route("/badge/{slug}", web::get().to(embed::badge))
+        .route("/metrics", web::get().to(metrics::show))
+        .route("/notices", web::get().to(notices::show))
+        .route("/notices", web::post().to(notices::create))
+        .route("/notices/{id}", web::post().to(notices::update))
+        .route("/notices/{id}/delete", web::post().to(notices::delete));
 }

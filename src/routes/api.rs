@@ -8,7 +8,13 @@
 use actix_web::{HttpRequest, HttpResponse, web};
 use serde::Deserialize;
 
-use crate::{auth, config::Config, outbound::Outbound, registry::AppRegistry};
+use crate::{
+    auth,
+    config::Config,
+    i18n::{I18n, Localize},
+    outbound::Outbound,
+    registry::AppRegistry,
+};
 
 #[derive(Deserialize)]
 pub struct LogsQuery {
@@ -21,25 +27,26 @@ pub async fn get_logs(
     cfg: web::Data<Config>,
     registry: web::Data<AppRegistry>,
     outbound: web::Data<Outbound>,
+    i18n: web::Data<I18n>,
     path: web::Path<String>,
     query: web::Query<LogsQuery>,
 ) -> HttpResponse {
-    let Some(token) = auth::session_token(&req) else {
-        return HttpResponse::Unauthorized().json(serde_json::json!({
-            "error": "No hay sesión activa"
-        }));
+    // Logs are admin-only: viewers get the dashboard, not the apps' output.
+    let token = match auth::require_admin_json(&req) {
+        Ok(session) => session.token,
+        Err(resp) => return resp,
     };
 
     let slug = path.into_inner();
     let Some(app) = registry.find(&slug).await else {
         return HttpResponse::NotFound().json(serde_json::json!({
-            "error": format!("App '{slug}' no está registrada")
+            "error": i18n.text("api.not_registered", &[("slug", &slug)])
         }));
     };
 
     let Some(logs_url) = app.logs_url.as_deref() else {
         return HttpResponse::NotFound().json(serde_json::json!({
-            "error": format!("'{}' es una app solo de monitoreo: no tiene endpoint de logs", app.name)
+            "error": i18n.text("api.monitor_only", &[("app", &app.name)])
         }));
     };
 
@@ -50,10 +57,20 @@ pub async fn get_logs(
         Err(e) => {
             tracing::warn!(app = %slug, error = %e, "logs proxy: refused non-allowlisted url");
             return HttpResponse::Forbidden().json(serde_json::json!({
-                "error": format!("La URL de logs de '{}' no está permitida: {e}", app.name)
+                "error": i18n.text(
+                    "api.logs_url_refused",
+                    &[("app", &app.name), ("error", &e.localize(&i18n))],
+                )
             }));
         }
     };
+
+    #[cfg(feature = "demo")]
+    if let Some(body) =
+        crate::demo::logs(&logs_url, query.stream.as_deref(), query.lines.as_deref())
+    {
+        return HttpResponse::Ok().json(body);
+    }
 
     // The user's own token still goes along (harmless, and it's what authorizes a
     // registered app that hasn't opted into the shared-key path) -- ADMIN_LOGS_KEY, when
@@ -78,7 +95,10 @@ pub async fn get_logs(
         Err(e) => {
             tracing::warn!(app = %slug, error = %e, "logs proxy: upstream request failed");
             return HttpResponse::BadGateway().json(serde_json::json!({
-                "error": format!("No se pudo conectar con '{}': {e}", app.name)
+                "error": i18n.text(
+                    "api.unreachable",
+                    &[("app", &app.name), ("error", &e.to_string())],
+                )
             }));
         }
     };
@@ -90,7 +110,10 @@ pub async fn get_logs(
         Ok(t) => t,
         Err(e) => {
             return HttpResponse::BadGateway().json(serde_json::json!({
-                "error": format!("No se pudo leer la respuesta de '{}': {e}", app.name)
+                "error": i18n.text(
+                    "api.unreadable",
+                    &[("app", &app.name), ("error", &e.to_string())],
+                )
             }));
         }
     };
@@ -103,11 +126,13 @@ pub async fn get_logs(
         // The body itself is never echoed back: if the URL ever pointed somewhere it
         // shouldn't, the response must not become a way to read that endpoint.
         Err(_) => HttpResponse::build(out_status).json(serde_json::json!({
-            "error": format!(
-                "'{}' respondió {} con un cuerpo no-JSON ({} bytes)",
-                app.name,
-                status.as_u16(),
-                raw_body.len()
+            "error": i18n.text(
+                "api.not_json",
+                &[
+                    ("app", &app.name),
+                    ("status", &status.as_u16().to_string()),
+                    ("bytes", &raw_body.len().to_string()),
+                ],
             )
         })),
     }

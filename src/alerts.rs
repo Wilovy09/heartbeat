@@ -2,21 +2,38 @@
 //! service expects: Slack incoming webhooks (`{"text"}`), Discord webhooks (`{"content"}`),
 //! or, for anything else, a structured JSON event.
 //!
-//! Webhook URLs are operator-configured (env), not admin-entered data, so they don't go
-//! through the `outbound` allowlist -- they're expected to point at third-party services.
+//! Global webhooks (`ALERT_WEBHOOK_URLS`) are operator-configured, so they're trusted and
+//! don't go through the `outbound` policy. Per-app webhooks are admin-entered: they must
+//! be https and are sent with `outbound::public_only_client`, which refuses private
+//! addresses. Every app alerts its own webhooks *and* the global ones.
 //!
-//! `ALERT_MENTIONS` pings people when an app goes down (never on recovery), written once
-//! and rendered in each service's own syntax.
+//! Delivery is retried with backoff on network errors, 5xx and 429, and the last outcome
+//! of each webhook is kept for the settings page. While an app stays down, a reminder is
+//! sent every `ALERT_REMIND_MINS`.
+//!
+//! `ALERT_MENTIONS` (plus each app's own mentions) pings people when an app goes down
+//! (never on recovery), written once and rendered in each service's own syntax.
 
-use reqwest::{Client, Url};
+use reqwest::{Client, StatusCode, Url};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::alert_templates::{self, TemplateKind, TemplateStore, TemplateVars};
-use crate::uptime::{Heartbeat, Status};
-use std::sync::Arc;
+use crate::i18n::{I18n, Lang};
+use crate::uptime::{Heartbeat, Status, unix_now};
 
 const WEBHOOK_TIMEOUT: Duration = Duration::from_secs(10);
+/// Waits between delivery attempts: a failed alert is tried up to four times over ~42 s.
+#[cfg(not(test))]
+const RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(2),
+    Duration::from_secs(10),
+    Duration::from_secs(30),
+];
+#[cfg(test)]
+const RETRY_DELAYS: [Duration; 3] = [Duration::from_millis(10); 3];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -35,6 +52,58 @@ impl From<&Url> for Flavor {
             }
             _ => Self::Generic,
         }
+    }
+}
+
+/// Where a webhook comes from, which decides how far it's trusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// `ALERT_WEBHOOK_URLS`: set by whoever runs the server.
+    Env,
+    /// An app's own webhooks, entered from /apps.
+    App,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum WebhookError {
+    #[error("invalid webhook URL: {0}")]
+    Invalid(#[from] url::ParseError),
+    #[error("webhook URLs must use https://")]
+    NotHttps,
+}
+
+/// One destination for alerts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Webhook {
+    url: Url,
+    flavor: Flavor,
+    origin: Origin,
+}
+
+impl Webhook {
+    fn new(url: Url, origin: Origin) -> Self {
+        let flavor = Flavor::from(&url);
+        Self {
+            url,
+            flavor,
+            origin,
+        }
+    }
+
+    /// An app's webhook, as entered from /apps: https only.
+    pub fn for_app(raw: &str) -> Result<Self, WebhookError> {
+        let url = Url::parse(raw.trim())?;
+        if url.scheme() != "https" {
+            return Err(WebhookError::NotHttps);
+        }
+        Ok(Self::new(url, Origin::App))
+    }
+
+    /// Transient failures worth another attempt; a 4xx other than 429 won't fix itself.
+    fn retryable(error: &reqwest::Error) -> bool {
+        error
+            .status()
+            .is_none_or(|s| s.is_server_error() || s == StatusCode::TOO_MANY_REQUESTS)
     }
 }
 
@@ -117,6 +186,32 @@ impl Mention {
     }
 }
 
+/// An app's own alert destinations, added to the global ones. Entries were validated when
+/// saved; anything that no longer parses is skipped with a warning.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AppRoute {
+    pub webhooks: Vec<String>,
+    pub mentions: Vec<String>,
+}
+
+impl AppRoute {
+    fn webhooks(&self) -> impl Iterator<Item = Webhook> + '_ {
+        self.webhooks
+            .iter()
+            .filter_map(|raw| match Webhook::for_app(raw) {
+                Ok(hook) => Some(hook),
+                Err(e) => {
+                    tracing::warn!(error = %e, "alerts: skipping an invalid app webhook");
+                    None
+                }
+            })
+    }
+
+    fn mentions(&self) -> impl Iterator<Item = Mention> + '_ {
+        self.mentions.iter().filter_map(|raw| raw.parse().ok())
+    }
+}
+
 /// Alert configuration, straight from the environment.
 #[derive(Debug, Clone, Default)]
 pub struct AlertSettings {
@@ -126,8 +221,12 @@ pub struct AlertSettings {
     pub public_url: Option<String>,
     /// `ALERT_MENTIONS` entries (see `Mention`).
     pub mentions: Vec<String>,
-    /// Editable message templates; `None` = Spanish defaults, nothing persisted (tests).
+    /// Editable message templates; `None` = defaults for `lang`, nothing persisted (tests).
     pub templates: Option<Arc<TemplateStore>>,
+    /// `ALERT_REMIND_MINS`: remind every so often while an app stays down; `None` = never.
+    pub remind_after: Option<Duration>,
+    /// Language of the fixed messages (pings, mass outages).
+    pub lang: Lang,
 }
 
 /// How serious a status is for alerting. With `on_degraded` off, degraded counts as fine,
@@ -139,7 +238,8 @@ enum Severity {
     Down,
 }
 
-/// One state change worth telling someone about.
+/// One state change worth telling someone about. `from == to == Down` is a reminder that
+/// the app is still down.
 #[derive(Debug, Clone)]
 pub struct StatusChange {
     pub slug: String,
@@ -147,6 +247,23 @@ pub struct StatusChange {
     pub from: Status,
     pub to: Status,
     pub beat: Heartbeat,
+    /// When the current (or just ended) outage started, for `{duration}`.
+    pub down_since: Option<u64>,
+    pub route: AppRoute,
+}
+
+impl StatusChange {
+    #[must_use]
+    pub fn is_reminder(&self) -> bool {
+        self.from == Status::Down && self.to == Status::Down
+    }
+}
+
+/// Many apps failing at once: most likely Heartbeat's own network, not the apps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MassOutage {
+    Started { down: usize, total: usize },
+    Ended { total: usize },
 }
 
 #[derive(Serialize)]
@@ -159,7 +276,9 @@ struct GenericEvent<'a> {
     latency_ms: Option<u32>,
     message: &'a str,
     url: Option<String>,
-    /// `ALERT_MENTIONS` entries, only on a change to down.
+    /// Seconds since the outage started, on reminders and recoveries.
+    down_for_secs: Option<u64>,
+    /// Mention entries, only on a change to down (and reminders).
     mentions: Vec<String>,
     /// The message rendered from the template, as Slack/Discord would show it.
     text: String,
@@ -171,16 +290,32 @@ struct GenericApp<'a> {
     name: &'a str,
 }
 
+/// The last delivery attempt to one webhook (real alerts and tests alike).
+#[derive(Debug, Clone, Serialize)]
+pub struct Delivery {
+    pub at: u64,
+    pub ok: bool,
+    /// HTTP status or the network error; empty on success.
+    pub detail: String,
+}
+
 #[derive(Clone)]
 pub struct Alerter {
+    /// For `ALERT_WEBHOOK_URLS` (trusted).
     client: Client,
-    webhooks: Vec<(Url, Flavor)>,
+    /// For admin-entered app webhooks (public addresses only, no redirects).
+    app_client: Client,
+    webhooks: Vec<Webhook>,
     on_degraded: bool,
     public_url: Option<String>,
     mentions: Vec<Mention>,
     /// `ALERT_MENTIONS` entries that didn't parse, shown on the settings page.
     rejected_mentions: Vec<String>,
     templates: Arc<TemplateStore>,
+    remind_after: Option<Duration>,
+    i18n: I18n,
+    /// Last delivery per webhook URL.
+    deliveries: Arc<Mutex<HashMap<String, Delivery>>>,
 }
 
 /// Which sample the settings page sends: a plain connectivity check, or one of the real
@@ -190,8 +325,20 @@ pub struct Alerter {
 pub enum TestKind {
     Ping,
     Down,
+    Reminder,
     Degraded,
     Recovered,
+}
+
+impl From<TemplateKind> for TestKind {
+    fn from(kind: TemplateKind) -> Self {
+        match kind {
+            TemplateKind::Down => Self::Down,
+            TemplateKind::Reminder => Self::Reminder,
+            TemplateKind::Degraded => Self::Degraded,
+            TemplateKind::Recovered => Self::Recovered,
+        }
+    }
 }
 
 /// One webhook as the settings page shows it -- never the full URL, which is a secret.
@@ -200,6 +347,7 @@ pub struct WebhookInfo {
     pub index: usize,
     pub service: Flavor,
     pub masked: String,
+    pub last: Option<Delivery>,
 }
 
 #[derive(Debug, Serialize)]
@@ -227,6 +375,7 @@ pub struct AlertOverview {
     pub mentions: Vec<MentionInfo>,
     pub rejected_mentions: Vec<String>,
     pub on_degraded: bool,
+    pub remind_mins: Option<u64>,
     /// Slack-flavored preview of each alert kind, exactly as it would be sent.
     pub previews: Vec<AlertPreview>,
     pub templates: Vec<TemplateInfo>,
@@ -251,7 +400,8 @@ pub struct TestOutcome {
 
 /// `https://example.com/services/T000…/B000…/…abcd`: enough to tell webhooks apart,
 /// not enough to use one.
-fn mask(url: &Url) -> String {
+#[must_use]
+pub fn mask(url: &Url) -> String {
     let segments: Vec<&str> = url.path().split('/').filter(|s| !s.is_empty()).collect();
     let masked: Vec<String> = segments
         .iter()
@@ -276,27 +426,35 @@ fn mask(url: &Url) -> String {
     )
 }
 
+/// `45 s`, `12 min`, `3 h 20 min`, `2 d 4 h`: how long an outage has lasted.
+#[must_use]
+pub fn format_duration(secs: u64) -> String {
+    let (days, hours, mins) = (secs / 86_400, secs % 86_400 / 3600, secs % 3600 / 60);
+    match (days, hours, mins) {
+        (0, 0, 0) => format!("{secs} s"),
+        (0, 0, m) => format!("{m} min"),
+        (0, h, 0) => format!("{h} h"),
+        (0, h, m) => format!("{h} h {m} min"),
+        (d, 0, _) => format!("{d} d"),
+        (d, h, _) => format!("{d} d {h} h"),
+    }
+}
+
 impl Alerter {
-    /// `None` when no webhook is configured: there's nothing to send to. Invalid webhook
-    /// URLs and mention entries are logged and skipped rather than failing startup.
-    pub fn new(settings: AlertSettings) -> Result<Option<Self>, reqwest::Error> {
-        let webhooks: Vec<(Url, Flavor)> = settings
+    /// Invalid webhook URLs and mention entries are logged and skipped rather than failing
+    /// startup. With no global webhook, only apps with their own webhooks alert.
+    pub fn new(settings: AlertSettings) -> Result<Self, reqwest::Error> {
+        let webhooks: Vec<Webhook> = settings
             .webhook_urls
             .iter()
             .filter_map(|raw| match Url::parse(raw.trim()) {
-                Ok(url) => {
-                    let flavor = Flavor::from(&url);
-                    Some((url, flavor))
-                }
+                Ok(url) => Some(Webhook::new(url, Origin::Env)),
                 Err(e) => {
                     tracing::error!(error = %e, "alerts: ignoring an invalid webhook URL");
                     None
                 }
             })
             .collect();
-        if webhooks.is_empty() {
-            return Ok(None);
-        }
         let mut mentions = Vec::new();
         let mut rejected_mentions = Vec::new();
         for raw in &settings.mentions {
@@ -312,8 +470,10 @@ impl Alerter {
             .timeout(WEBHOOK_TIMEOUT)
             .user_agent("heartbeat")
             .build()?;
-        Ok(Some(Self {
+        let i18n = I18n::new(settings.lang);
+        Ok(Self {
             client,
+            app_client: crate::outbound::public_only_client(WEBHOOK_TIMEOUT)?,
             webhooks,
             on_degraded: settings.on_degraded,
             public_url: settings
@@ -321,12 +481,24 @@ impl Alerter {
                 .map(|u| u.trim_end_matches('/').to_string()),
             mentions,
             rejected_mentions,
-            templates: settings.templates.unwrap_or_else(|| {
-                Arc::new(TemplateStore::in_memory(&crate::i18n::I18n::new(
-                    crate::i18n::Lang::Es,
-                )))
-            }),
-        }))
+            templates: settings
+                .templates
+                .unwrap_or_else(|| Arc::new(TemplateStore::in_memory(&i18n))),
+            remind_after: settings.remind_after.filter(|d| !d.is_zero()),
+            i18n,
+            deliveries: Arc::default(),
+        })
+    }
+
+    /// Whether any global webhook is configured (apps may still have their own).
+    #[must_use]
+    pub fn has_global_webhooks(&self) -> bool {
+        !self.webhooks.is_empty()
+    }
+
+    #[must_use]
+    pub fn remind_after(&self) -> Option<Duration> {
+        self.remind_after
     }
 
     fn severity(&self, status: Status) -> Severity {
@@ -343,28 +515,40 @@ impl Alerter {
         self.severity(from) != self.severity(to)
     }
 
-    /// Mentions only page on a change to down.
+    /// Mentions only page on a change to down, and on reminders.
     fn pages(&self, change: &StatusChange) -> bool {
         self.severity(change.to) == Severity::Down
     }
 
     fn kind(&self, change: &StatusChange) -> TemplateKind {
         match self.severity(change.to) {
+            Severity::Down if change.is_reminder() => TemplateKind::Reminder,
             Severity::Down => TemplateKind::Down,
             Severity::Degraded => TemplateKind::Degraded,
             Severity::Ok => TemplateKind::Recovered,
         }
     }
 
+    /// Global mentions plus the app's own, without duplicates.
+    fn mentions_for(&self, change: &StatusChange) -> Vec<Mention> {
+        if !self.pages(change) {
+            return Vec::new();
+        }
+        let mut all = self.mentions.clone();
+        for mention in change.route.mentions() {
+            if !all.contains(&mention) {
+                all.push(mention);
+            }
+        }
+        all
+    }
+
     fn vars(&self, flavor: Flavor, change: &StatusChange) -> TemplateVars {
-        let mentions: Vec<String> = if self.pages(change) {
-            self.mentions
-                .iter()
-                .filter_map(|m| m.render(flavor))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let mentions: Vec<String> = self
+            .mentions_for(change)
+            .iter()
+            .filter_map(|m| m.render(flavor))
+            .collect();
         TemplateVars {
             app: change.name.clone(),
             message: change.beat.message.clone(),
@@ -375,6 +559,10 @@ impl Alerter {
                 .unwrap_or_default(),
             link: self.dashboard_url(&change.slug).unwrap_or_default(),
             mentions: mentions.join(" "),
+            duration: change
+                .down_since
+                .map(|since| format_duration(change.beat.at.saturating_sub(since)))
+                .unwrap_or_default(),
         }
     }
 
@@ -404,7 +592,11 @@ impl Alerter {
             Flavor::Slack => serde_json::json!({ "text": self.text(flavor, change) }),
             Flavor::Discord => serde_json::json!({ "content": self.text(flavor, change) }),
             Flavor::Generic => serde_json::to_value(GenericEvent {
-                event: "status_change",
+                event: if change.is_reminder() {
+                    "still_down"
+                } else {
+                    "status_change"
+                },
                 app: GenericApp {
                     slug: &change.slug,
                     name: &change.name,
@@ -415,66 +607,211 @@ impl Alerter {
                 latency_ms: change.beat.latency_ms,
                 message: &change.beat.message,
                 url: self.dashboard_url(&change.slug),
-                mentions: if self.pages(change) {
-                    self.mentions.iter().map(Mention::raw).collect()
-                } else {
-                    Vec::new()
-                },
+                down_for_secs: change
+                    .down_since
+                    .map(|since| change.beat.at.saturating_sub(since)),
+                mentions: self.mentions_for(change).iter().map(Mention::raw).collect(),
                 text: self.text(flavor, change),
             })
             .unwrap_or_default(),
         }
     }
 
-    /// Sends to every webhook concurrently, in the background: a slow or dead webhook
-    /// never delays the next round of checks.
-    pub fn send(&self, change: &StatusChange) {
-        for (url, flavor) in &self.webhooks {
-            let request = self
-                .client
-                .post(url.clone())
-                .json(&self.payload(*flavor, change));
-            let host = url.host_str().unwrap_or_default().to_string();
-            let slug = change.slug.clone();
-            tokio::spawn(async move {
-                match request
-                    .send()
-                    .await
-                    .and_then(reqwest::Response::error_for_status)
-                {
-                    Ok(_) => tracing::info!(app = %slug, %host, "alerts: webhook delivered"),
-                    Err(e) => {
-                        tracing::error!(app = %slug, %host, error = %e, "alerts: webhook failed");
-                    }
-                }
-            });
+    /// Global webhooks plus the app's own, without duplicates.
+    fn destinations(&self, route: &AppRoute) -> Vec<Webhook> {
+        let mut all = self.webhooks.clone();
+        for hook in route.webhooks() {
+            if !all.iter().any(|h| h.url == hook.url) {
+                all.push(hook);
+            }
+        }
+        all
+    }
+
+    fn client_for(&self, hook: &Webhook) -> &Client {
+        match hook.origin {
+            Origin::Env => &self.client,
+            Origin::App => &self.app_client,
         }
     }
+
+    fn record(&self, hook: &Webhook, delivery: Delivery) {
+        self.deliveries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(hook.url.to_string(), delivery);
+    }
+
+    fn last_delivery(&self, hook: &Webhook) -> Option<Delivery> {
+        self.deliveries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(hook.url.as_str())
+            .cloned()
+    }
+
+    /// Posts `payload` to `hook` in the background, retrying transient failures
+    /// (`RETRY_DELAYS`): a slow or dead webhook never delays the next round of checks.
+    fn deliver(&self, hook: Webhook, payload: serde_json::Value, what: String) {
+        let alerter = self.clone();
+        tokio::spawn(async move {
+            let host = hook.url.host_str().unwrap_or_default().to_string();
+            let mut attempt = 0;
+            let error = loop {
+                let result = alerter
+                    .client_for(&hook)
+                    .post(hook.url.clone())
+                    .json(&payload)
+                    .send()
+                    .await
+                    .and_then(reqwest::Response::error_for_status);
+                match result {
+                    Ok(_) => {
+                        tracing::info!(%what, %host, attempt, "alerts: webhook delivered");
+                        alerter.record(
+                            &hook,
+                            Delivery {
+                                at: unix_now(),
+                                ok: true,
+                                detail: String::new(),
+                            },
+                        );
+                        return;
+                    }
+                    Err(e) if Webhook::retryable(&e) && attempt < RETRY_DELAYS.len() => {
+                        tracing::warn!(%what, %host, attempt, error = %e, "alerts: webhook failed, retrying");
+                        tokio::time::sleep(RETRY_DELAYS[attempt]).await;
+                        attempt += 1;
+                    }
+                    Err(e) => break e,
+                }
+            };
+            tracing::error!(%what, %host, attempts = attempt + 1, error = %error, "alerts: webhook failed");
+            alerter.record(
+                &hook,
+                Delivery {
+                    at: unix_now(),
+                    ok: false,
+                    detail: error.to_string(),
+                },
+            );
+        });
+    }
+
+    /// Sends `change` to every global webhook and the app's own.
+    pub fn send(&self, change: &StatusChange) {
+        for hook in self.destinations(&change.route) {
+            let payload = self.payload(hook.flavor, change);
+            self.deliver(hook, payload, change.slug.clone());
+        }
+    }
+
+    /// Mass outage notices go to the global webhooks only: they're about Heartbeat, not
+    /// about any one app.
+    pub fn send_mass(&self, outage: MassOutage) {
+        for hook in &self.webhooks {
+            let payload = self.mass_payload(hook.flavor, outage);
+            self.deliver(hook.clone(), payload, "mass-outage".to_string());
+        }
+    }
+
+    fn mass_text(&self, flavor: Flavor, outage: MassOutage) -> String {
+        let link = self.dashboard_url("").unwrap_or_default();
+        let text = match outage {
+            MassOutage::Started { down, total } => {
+                let mentions: Vec<String> = self
+                    .mentions
+                    .iter()
+                    .filter_map(|m| m.render(flavor))
+                    .collect();
+                self.i18n.text(
+                    "alert.mass_down",
+                    &[
+                        ("mentions", &mentions.join(" ")),
+                        ("down", &down.to_string()),
+                        ("total", &total.to_string()),
+                        ("link", &link),
+                    ],
+                )
+            }
+            MassOutage::Ended { total } => self.i18n.text(
+                "alert.mass_recovered",
+                &[("total", &total.to_string()), ("link", &link)],
+            ),
+        };
+        alert_templates::render(&text, &TemplateVars::default())
+    }
+
+    fn mass_payload(&self, flavor: Flavor, outage: MassOutage) -> serde_json::Value {
+        let text = self.mass_text(flavor, outage);
+        match (flavor, outage) {
+            (Flavor::Slack, _) => serde_json::json!({ "text": text }),
+            (Flavor::Discord, _) => serde_json::json!({ "content": text }),
+            (Flavor::Generic, MassOutage::Started { down, total }) => serde_json::json!({
+                "event": "mass_outage_started",
+                "down": down,
+                "total": total,
+                "at": unix_now(),
+                "mentions": self.mentions.iter().map(Mention::raw).collect::<Vec<_>>(),
+                "text": text,
+            }),
+            (Flavor::Generic, MassOutage::Ended { total }) => serde_json::json!({
+                "event": "mass_outage_ended",
+                "total": total,
+                "at": unix_now(),
+                "text": text,
+            }),
+        }
+    }
+
     /// A sample change for `kind`, marked as a test so nobody mistakes it for an outage.
     /// `None` for `Ping`, which isn't a status change.
-    fn sample(kind: TestKind) -> Option<StatusChange> {
-        let (from, to, latency_ms, message) = match kind {
+    fn sample(&self, kind: TestKind) -> Option<StatusChange> {
+        let now = unix_now();
+        let (from, to, latency_ms, message, down_for) = match kind {
             TestKind::Ping => return None,
             TestKind::Down => (
                 Status::Up,
                 Status::Down,
                 None,
                 "HTTP 503 Service Unavailable",
+                None,
             ),
-            TestKind::Degraded => (Status::Up, Status::Degraded, Some(2100), "HTTP 200 OK"),
-            TestKind::Recovered => (Status::Down, Status::Up, Some(180), "HTTP 200 OK"),
+            TestKind::Reminder => (
+                Status::Down,
+                Status::Down,
+                None,
+                "HTTP 503 Service Unavailable",
+                Some(25 * 60),
+            ),
+            TestKind::Degraded => (
+                Status::Up,
+                Status::Degraded,
+                Some(2100),
+                "HTTP 200 OK",
+                None,
+            ),
+            TestKind::Recovered => (
+                Status::Down,
+                Status::Up,
+                Some(180),
+                "HTTP 200 OK",
+                Some(420),
+            ),
         };
         Some(StatusChange {
             slug: String::new(),
-            name: "[Prueba] Heartbeat".to_string(),
+            name: self.i18n.text("alert.test_app", &[]),
             from,
             to,
             beat: Heartbeat {
-                at: crate::uptime::unix_now(),
+                at: now,
                 status: to,
                 latency_ms,
                 message: message.to_string(),
             },
+            down_since: down_for.map(|secs: u64| now - secs),
+            route: AppRoute::default(),
         })
     }
 
@@ -488,9 +825,10 @@ impl Alerter {
     }
 
     fn ping_payload(&self, flavor: Flavor) -> serde_json::Value {
+        let base = self.i18n.text("alert.ping", &[]);
         let text = match &self.public_url {
-            Some(url) => format!("🏓 Ping de Heartbeat: las alertas llegan a este canal.\n{url}/"),
-            None => "🏓 Ping de Heartbeat: las alertas llegan a este canal.".to_string(),
+            Some(url) => format!("{base}\n{url}/"),
+            None => base,
         };
         match flavor {
             Flavor::Slack => serde_json::json!({ "text": text }),
@@ -507,10 +845,11 @@ impl Alerter {
                 .webhooks
                 .iter()
                 .enumerate()
-                .map(|(index, (url, service))| WebhookInfo {
+                .map(|(index, hook)| WebhookInfo {
                     index,
-                    service: *service,
-                    masked: mask(url),
+                    service: hook.flavor,
+                    masked: mask(&hook.url),
+                    last: self.last_delivery(hook),
                 })
                 .collect(),
             mentions: self
@@ -524,15 +863,11 @@ impl Alerter {
                 .collect(),
             rejected_mentions: self.rejected_mentions.clone(),
             on_degraded: self.on_degraded,
+            remind_mins: self.remind_after.map(|d| d.as_secs() / 60),
             templates: TemplateKind::ALL
                 .into_iter()
                 .filter_map(|kind| {
-                    let test_kind = match kind {
-                        TemplateKind::Down => TestKind::Down,
-                        TemplateKind::Degraded => TestKind::Degraded,
-                        TemplateKind::Recovered => TestKind::Recovered,
-                    };
-                    Self::sample(test_kind).map(|change| TemplateInfo {
+                    self.sample(kind.into()).map(|change| TemplateInfo {
                         kind,
                         template: self.templates.effective(kind),
                         default: self.templates.default_for(kind),
@@ -541,10 +876,11 @@ impl Alerter {
                     })
                 })
                 .collect(),
-            previews: [TestKind::Down, TestKind::Degraded, TestKind::Recovered]
+            previews: TemplateKind::ALL
                 .into_iter()
+                .map(TestKind::from)
                 .filter_map(|kind| {
-                    Self::sample(kind).map(|change| AlertPreview {
+                    self.sample(kind).map(|change| AlertPreview {
                         kind,
                         text: samples.text(Flavor::Slack, &change),
                     })
@@ -553,22 +889,49 @@ impl Alerter {
         }
     }
 
-    /// Sends a test message of `kind` to one webhook (`Some(index)`) or all of them, and
-    /// waits for each answer -- unlike real alerts, the caller wants the result.
+    /// Sends a test message of `kind` to one global webhook (`Some(index)`) or all of
+    /// them, and waits for each answer -- unlike real alerts, the caller wants the result.
     pub async fn test(&self, target: Option<usize>, kind: TestKind) -> Vec<TestOutcome> {
+        let hooks: Vec<(usize, &Webhook)> = self
+            .webhooks
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| target.is_none_or(|t| t == *index))
+            .collect();
+        self.test_hooks(&hooks, kind, &AppRoute::default()).await
+    }
+
+    /// Pings (or sends a sample to) an app's own webhooks, with its own mentions.
+    pub async fn test_app(&self, route: &AppRoute, kind: TestKind) -> Vec<TestOutcome> {
+        let hooks: Vec<Webhook> = route.webhooks().collect();
+        let indexed: Vec<(usize, &Webhook)> = hooks.iter().enumerate().collect();
+        self.test_hooks(&indexed, kind, route).await
+    }
+
+    async fn test_hooks(
+        &self,
+        hooks: &[(usize, &Webhook)],
+        kind: TestKind,
+        route: &AppRoute,
+    ) -> Vec<TestOutcome> {
         let samples = self.for_samples();
-        let change = Self::sample(kind);
+        let change = self.sample(kind).map(|c| StatusChange {
+            route: route.clone(),
+            ..c
+        });
         let mut outcomes = Vec::new();
-        for (index, (url, flavor)) in self.webhooks.iter().enumerate() {
-            if target.is_some_and(|t| t != index) {
-                continue;
-            }
+        for &(index, hook) in hooks {
             let payload = match &change {
-                Some(change) => samples.payload(*flavor, change),
-                None => self.ping_payload(*flavor),
+                Some(change) => samples.payload(hook.flavor, change),
+                None => self.ping_payload(hook.flavor),
             };
             let started = Instant::now();
-            let result = self.client.post(url.clone()).json(&payload).send().await;
+            let result = self
+                .client_for(hook)
+                .post(hook.url.clone())
+                .json(&payload)
+                .send()
+                .await;
             let latency_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
             let outcome = match result {
                 Ok(resp) => {
@@ -576,7 +939,7 @@ impl Alerter {
                     let body = resp.text().await.unwrap_or_default();
                     TestOutcome {
                         index,
-                        service: *flavor,
+                        service: hook.flavor,
                         ok: status.is_success(),
                         status: Some(status.as_u16()),
                         latency_ms,
@@ -586,13 +949,25 @@ impl Alerter {
                 }
                 Err(e) => TestOutcome {
                     index,
-                    service: *flavor,
+                    service: hook.flavor,
                     ok: false,
                     status: None,
                     latency_ms,
                     detail: e.to_string(),
                 },
             };
+            self.record(
+                hook,
+                Delivery {
+                    at: unix_now(),
+                    ok: outcome.ok,
+                    detail: if outcome.ok {
+                        String::new()
+                    } else {
+                        outcome.detail.clone()
+                    },
+                },
+            );
             tracing::info!(index, ok = outcome.ok, status = ?outcome.status, ?kind, "alerts: test sent");
             outcomes.push(outcome);
         }
@@ -616,6 +991,8 @@ mod tests {
                 latency_ms: Some(1200),
                 message: "HTTP 503 Service Unavailable".to_string(),
             },
+            down_since: Some(40),
+            route: AppRoute::default(),
         }
     }
 
@@ -631,8 +1008,8 @@ mod tests {
             public_url: Some("https://status.example.com/".to_string()),
             mentions: mentions.iter().map(|m| (*m).to_string()).collect(),
             templates: None,
+            ..AlertSettings::default()
         })
-        .unwrap()
         .unwrap()
     }
 
@@ -642,9 +1019,13 @@ mod tests {
 
     #[test]
     fn detects_the_webhook_flavor_and_skips_invalid_urls() {
-        let flavors: Vec<Flavor> = alerter(false).webhooks.iter().map(|(_, f)| *f).collect();
+        let flavors: Vec<Flavor> = alerter(false).webhooks.iter().map(|h| h.flavor).collect();
         assert_eq!(flavors, [Flavor::Slack, Flavor::Discord, Flavor::Generic]);
-        assert!(Alerter::new(AlertSettings::default()).unwrap().is_none());
+        assert!(
+            !Alerter::new(AlertSettings::default())
+                .unwrap()
+                .has_global_webhooks()
+        );
     }
 
     #[test]
@@ -776,7 +1157,12 @@ mod tests {
         let kinds: Vec<TestKind> = overview.previews.iter().map(|p| p.kind).collect();
         assert_eq!(
             kinds,
-            [TestKind::Down, TestKind::Degraded, TestKind::Recovered]
+            [
+                TestKind::Down,
+                TestKind::Reminder,
+                TestKind::Degraded,
+                TestKind::Recovered
+            ]
         );
         assert!(
             overview.previews[0]
@@ -784,10 +1170,15 @@ mod tests {
                 .starts_with("<@U0123ABCD> 🔴 [Prueba]")
         );
         assert!(
-            overview.previews[1].text.starts_with("🟡"),
+            overview.previews[1].text.contains("sigue caída (25 min)"),
+            "{}",
+            overview.previews[1].text
+        );
+        assert!(
+            overview.previews[2].text.starts_with("🟡"),
             "degraded preview even when off"
         );
-        assert!(overview.previews[2].text.starts_with("🟢"));
+        assert!(overview.previews[3].text.starts_with("🟢"));
     }
 
     /// A one-shot HTTP server that answers 200 "ok" and hands back the request it got.
@@ -816,7 +1207,6 @@ mod tests {
             mentions: vec!["here".to_string()],
             ..AlertSettings::default()
         })
-        .unwrap()
         .unwrap();
         let outcomes = alerter.test(None, TestKind::Down).await;
         assert_eq!(outcomes.len(), 1);
@@ -842,7 +1232,6 @@ mod tests {
             templates: Some(store.clone()),
             ..AlertSettings::default()
         })
-        .unwrap()
         .unwrap();
         let down = change(Status::Up, Status::Down);
         assert!(
@@ -867,5 +1256,121 @@ mod tests {
             generic["text"],
             "CAÍDA Billing API -> HTTP 503 Service Unavailable"
         );
+    }
+
+    /// Answers `failures` requests with 500, then 200; reports how many it got.
+    async fn flaky_webhook(failures: usize) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/hook", listener.local_addr().unwrap());
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 16 * 1024];
+                let _ = socket.read(&mut buf).await;
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                let reply: &[u8] = if n < failures {
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                } else {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                };
+                let _ = socket.write_all(reply).await;
+            }
+        });
+        (url, hits)
+    }
+
+    async fn wait_for_delivery(alerter: &Alerter) -> Delivery {
+        for _ in 0..200 {
+            if let Some(last) = alerter.overview().webhooks[0].last.clone() {
+                return last;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("no delivery recorded");
+    }
+
+    #[tokio::test]
+    async fn transient_failures_are_retried_until_delivered() {
+        let (url, hits) = flaky_webhook(2).await;
+        let alerter = Alerter::new(AlertSettings {
+            webhook_urls: vec![url],
+            ..AlertSettings::default()
+        })
+        .unwrap();
+        alerter.send(&change(Status::Up, Status::Down));
+        let last = wait_for_delivery(&alerter).await;
+        assert!(last.ok, "{last:?}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_webhook_that_keeps_failing_is_reported() {
+        let (url, hits) = flaky_webhook(usize::MAX).await;
+        let alerter = Alerter::new(AlertSettings {
+            webhook_urls: vec![url],
+            ..AlertSettings::default()
+        })
+        .unwrap();
+        alerter.send(&change(Status::Up, Status::Down));
+        let last = wait_for_delivery(&alerter).await;
+        assert!(!last.ok && last.detail.contains("500"), "{last:?}");
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            RETRY_DELAYS.len() + 1
+        );
+    }
+
+    #[test]
+    fn app_routes_add_their_own_webhooks_and_mentions() {
+        let a = alerter_with(false, &["here"]);
+        let mut down = change(Status::Up, Status::Down);
+        down.route = AppRoute {
+            webhooks: vec![
+                "https://hooks.slack.com/services/T/B/x".into(), // already global
+                "https://hooks.slack.com/services/T/B/team".into(),
+                "http://insecure.example.com/hook".into(), // not https: skipped
+            ],
+            mentions: vec!["U0TEAM".into(), "here".into()],
+        };
+        assert_eq!(a.destinations(&down.route).len(), 4);
+        let slack = a.text(Flavor::Slack, &down);
+        assert!(slack.starts_with("<!here> <@U0TEAM> 🔴"), "{slack}");
+    }
+
+    #[test]
+    fn reminders_and_recoveries_say_how_long_it_has_been_down() {
+        let a = alerter(false);
+        let mut still = change(Status::Down, Status::Down);
+        still.beat.at = 10_000;
+        still.down_since = Some(10_000 - 25 * 60);
+        assert!(still.is_reminder());
+        assert!(
+            a.text(Flavor::Slack, &still)
+                .contains("sigue caída (25 min)")
+        );
+        assert_eq!(a.payload(Flavor::Generic, &still)["event"], "still_down");
+        assert_eq!(a.payload(Flavor::Generic, &still)["down_for_secs"], 25 * 60);
+    }
+
+    #[test]
+    fn durations_read_naturally() {
+        assert_eq!(format_duration(45), "45 s");
+        assert_eq!(format_duration(12 * 60), "12 min");
+        assert_eq!(format_duration(3 * 3600), "3 h");
+        assert_eq!(format_duration(3 * 3600 + 20 * 60), "3 h 20 min");
+        assert_eq!(format_duration(2 * 86_400 + 4 * 3600 + 59), "2 d 4 h");
+    }
+
+    #[test]
+    fn mass_outage_notices_are_short_and_page() {
+        let a = alerter_with(false, &["here"]);
+        let started = a.mass_text(Flavor::Slack, MassOutage::Started { down: 4, total: 5 });
+        assert!(started.starts_with("<!here> 🌐 4 de 5 apps"), "{started}");
+        let ended = a.mass_payload(Flavor::Generic, MassOutage::Ended { total: 5 });
+        assert_eq!(ended["event"], "mass_outage_ended");
     }
 }

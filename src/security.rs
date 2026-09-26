@@ -70,7 +70,7 @@ pub async fn csrf(
             .map(ServiceResponse::map_into_left_body);
     }
     tracing::warn!(path = %req.path(), "csrf: rejected cross-origin request");
-    let response = HttpResponse::Forbidden().body("Origen no permitido");
+    let response = HttpResponse::Forbidden().body("Cross-origin request refused");
     Ok(req.into_response(response).map_into_right_body())
 }
 

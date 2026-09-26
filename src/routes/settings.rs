@@ -30,13 +30,16 @@ struct ConfigView {
     retention_days: u32,
     dead_mans_switch: bool,
     alert_on_degraded: bool,
+    timeout_secs: u32,
+    mass_down_pct: u8,
+    remind_mins: u32,
 }
 
 impl From<&Config> for ConfigView {
     fn from(cfg: &Config) -> Self {
         let (auth_mode, login_url, admin_email) = match &cfg.auth {
-            AuthMode::Upstream { login_url } => ("upstream", Some(login_url.clone()), None),
-            AuthMode::Password { email, .. } => ("password", None, Some(email.clone())),
+            AuthMode::Upstream { login_url, .. } => ("upstream", Some(login_url.clone()), None),
+            AuthMode::Password { admin, .. } => ("password", None, Some(admin.email.clone())),
         };
         Self {
             auth_mode,
@@ -53,6 +56,9 @@ impl From<&Config> for ConfigView {
             retention_days: cfg.uptime_retention_days,
             dead_mans_switch: cfg.heartbeat_ping_url.is_some(),
             alert_on_degraded: cfg.alert_on_degraded,
+            timeout_secs: cfg.uptime_timeout_secs,
+            mass_down_pct: cfg.uptime_mass_down_pct,
+            remind_mins: cfg.alert_remind_mins,
         }
     }
 }
@@ -62,20 +68,19 @@ pub async fn show(
     req: HttpRequest,
     tera: web::Data<Tera>,
     cfg: web::Data<Config>,
-    alerter: web::Data<Option<Alerter>>,
+    alerter: web::Data<Alerter>,
 ) -> HttpResponse {
-    if let Err(resp) = auth::require_session(&req) {
+    if let Err(resp) = auth::require_admin(&req) {
         return resp;
     }
     let mut ctx = Context::new();
     ctx.insert("active", "settings");
-    let overview = alerter.as_ref().as_ref().map(Alerter::overview);
+    ctx.insert("is_admin", &true);
+    let overview = alerter.overview();
     // For the Alpine component: templates, defaults and sample values, as a JS literal.
-    let templates_json = overview
-        .as_ref()
-        .and_then(|o| serde_json::to_string(&o.templates).ok())
-        .unwrap_or_else(|| "[]".to_string());
-    let has_mentions = overview.as_ref().is_some_and(|o| !o.mentions.is_empty());
+    let templates_json =
+        serde_json::to_string(&overview.templates).unwrap_or_else(|_| "[]".to_string());
+    let has_mentions = !overview.mentions.is_empty();
     ctx.insert("alerts", &overview);
     ctx.insert("templates_json", &templates_json);
     ctx.insert("has_mentions", &has_mentions);
@@ -97,15 +102,15 @@ pub struct TestRequest {
 /// webhook's answer.
 pub async fn test_alert(
     req: HttpRequest,
-    alerter: web::Data<Option<Alerter>>,
+    alerter: web::Data<Alerter>,
     body: web::Json<TestRequest>,
 ) -> HttpResponse {
-    if auth::session_token(&req).is_none() {
-        return HttpResponse::Unauthorized().json(serde_json::json!({ "error": "unauthorized" }));
+    if let Err(resp) = auth::require_admin_json(&req) {
+        return resp;
     }
-    let Some(alerter) = alerter.as_ref().as_ref() else {
+    if !alerter.has_global_webhooks() {
         return HttpResponse::Conflict().json(serde_json::json!({ "error": "no webhooks" }));
-    };
+    }
     let outcomes = alerter.test(body.target, body.kind).await;
     HttpResponse::Ok().json(serde_json::json!({ "outcomes": outcomes }))
 }
@@ -114,15 +119,12 @@ pub async fn test_alert(
 /// the default) and answers with the fresh previews.
 pub async fn save_templates(
     req: HttpRequest,
-    alerter: web::Data<Option<Alerter>>,
+    alerter: web::Data<Alerter>,
     body: web::Json<AlertTemplates>,
 ) -> HttpResponse {
-    if auth::session_token(&req).is_none() {
-        return HttpResponse::Unauthorized().json(serde_json::json!({ "error": "unauthorized" }));
+    if let Err(resp) = auth::require_admin_json(&req) {
+        return resp;
     }
-    let Some(alerter) = alerter.as_ref().as_ref() else {
-        return HttpResponse::Conflict().json(serde_json::json!({ "error": "no webhooks" }));
-    };
     let templates = body.into_inner();
     if let Some(kind) = templates.too_long() {
         return HttpResponse::BadRequest().json(serde_json::json!({

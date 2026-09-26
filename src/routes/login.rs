@@ -2,7 +2,7 @@
 //! - `Upstream`: credentials go to an external login endpoint, and the browser gets in only
 //!   if its response says `is_admin: true` -- that verdict is the login server's own
 //!   decision, this app never re-implements it.
-//! - `Password`: one local admin, checked against an argon2 hash.
+//! - `Password`: a local admin (and optionally a viewer), checked against argon2 hashes.
 //!
 //! Failed attempts are throttled per IP and per email (`security::LoginLimiter`).
 
@@ -11,8 +11,8 @@ use serde::Deserialize;
 use tera::{Context, Tera};
 
 use crate::{
-    auth::{self, SessionStore},
-    config::{AuthMode, Config},
+    auth::{self, Role, SessionStore},
+    config::{AuthMode, Config, LocalAccount},
     i18n::I18n,
     security::{self, LoginLimiter},
 };
@@ -69,23 +69,30 @@ impl LoginFailure {
 }
 
 /// Checks the credentials; on success returns the token to keep in the session (empty when
-/// the mode has none).
-async fn authenticate(cfg: &Config, form: &LoginForm) -> Result<String, LoginFailure> {
+/// the mode has none) and the session's role.
+async fn authenticate(cfg: &Config, form: &LoginForm) -> Result<(String, Role), LoginFailure> {
     match &cfg.auth {
-        AuthMode::Upstream { login_url } => authenticate_upstream(login_url, form).await,
-        AuthMode::Password {
-            email,
-            password_hash,
-        } => authenticate_password(email, password_hash, form).await,
+        AuthMode::Upstream {
+            login_url,
+            allow_viewers,
+        } => authenticate_upstream(login_url, *allow_viewers, form).await,
+        AuthMode::Password { admin, viewer } => {
+            authenticate_password(admin, viewer.as_ref(), form).await
+        }
     }
 }
 
 async fn authenticate_password(
-    admin_email: &str,
-    password_hash: &str,
+    admin: &LocalAccount,
+    viewer: Option<&LocalAccount>,
     form: &LoginForm,
-) -> Result<String, LoginFailure> {
-    let hash = password_hash.to_string();
+) -> Result<(String, Role), LoginFailure> {
+    let email = form.email.trim();
+    let (account, role) = match viewer {
+        Some(v) if email.eq_ignore_ascii_case(&v.email) => (v, Role::Viewer),
+        _ => (admin, Role::Admin),
+    };
+    let hash = account.password_hash.clone();
     let password = form.password.clone();
     // argon2 is deliberately slow CPU work: keep it off the async executor. The password is
     // verified even when the email is wrong, so timing doesn't reveal which one failed.
@@ -93,14 +100,18 @@ async fn authenticate_password(
         tokio::task::spawn_blocking(move || crate::password::verify(&password, &hash))
             .await
             .unwrap_or(false);
-    if password_ok && form.email.trim().eq_ignore_ascii_case(admin_email) {
-        Ok(String::new())
+    if password_ok && email.eq_ignore_ascii_case(&account.email) {
+        Ok((String::new(), role))
     } else {
         Err(LoginFailure::rejected("login.invalid"))
     }
 }
 
-async fn authenticate_upstream(login_url: &str, form: &LoginForm) -> Result<String, LoginFailure> {
+async fn authenticate_upstream(
+    login_url: &str,
+    allow_viewers: bool,
+    form: &LoginForm,
+) -> Result<(String, Role), LoginFailure> {
     let resp = reqwest::Client::new()
         .post(login_url)
         .json(&serde_json::json!({ "email": form.email, "password": form.password }))
@@ -131,14 +142,18 @@ async fn authenticate_upstream(login_url: &str, form: &LoginForm) -> Result<Stri
         .get("is_admin")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    if !is_admin {
-        tracing::info!(email = %form.email, "login: valid user without admin rights, denied");
-        return Err(LoginFailure::rejected("login.not_admin"));
-    }
+    let role = match (is_admin, allow_viewers) {
+        (true, _) => Role::Admin,
+        (false, true) => Role::Viewer,
+        (false, false) => {
+            tracing::info!(email = %form.email, "login: valid user without admin rights, denied");
+            return Err(LoginFailure::rejected("login.not_admin"));
+        }
+    };
 
     body.get("access_token")
         .and_then(|v| v.as_str())
-        .map(str::to_string)
+        .map(|token| (token.to_string(), role))
         .ok_or(LoginFailure::Unavailable("login.no_token"))
 }
 
@@ -159,8 +174,8 @@ pub async fn submit_login(
         return render_login(&tera, Some(&msg), &form.email);
     }
 
-    let token = match authenticate(&cfg, &form).await {
-        Ok(token) => token,
+    let (token, role) = match authenticate(&cfg, &form).await {
+        Ok(granted) => granted,
         Err(failure) => {
             if matches!(failure, LoginFailure::Rejected { .. }) {
                 limiter.record_failure(&ip, &form.email);
@@ -170,7 +185,7 @@ pub async fn submit_login(
     };
     limiter.record_success(&ip, &form.email);
 
-    let session_id = match sessions.create(token).await {
+    let session_id = match sessions.create(token, role).await {
         Ok(id) => id,
         Err(e) => {
             tracing::error!(error = %e, "login: could not start a session");
@@ -179,7 +194,7 @@ pub async fn submit_login(
         }
     };
 
-    tracing::info!(email = %form.email, "login: admin access granted");
+    tracing::info!(email = %form.email, ?role, "login: access granted");
     HttpResponse::Found()
         .append_header(("Location", "/"))
         .cookie(auth::build_session_cookie(session_id, cfg.cookie_secure))

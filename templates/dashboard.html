@@ -39,32 +39,39 @@
           <span class="vital vital-lg" :class="'st-' + overallStatus()"></span>
           <div>
             <h1 class="verdict-title" x-text="overallMessage()"></h1>
-            <p class="page-sub" x-text="T(overview.monitors.length === 1 ? 'dash.monitored_one' : 'dash.monitored_many', {n: overview.monitors.length, secs: overview.interval_secs})"></p>
+            <p class="page-sub">
+              <span x-text="T(overview.monitors.length === 1 ? 'dash.monitored_one' : 'dash.monitored_many', {n: overview.monitors.length, secs: overview.interval_secs})"></span>
+              <template x-if="fleetUptime() !== null"><span> · <span x-text="T('dash.fleet_uptime')"></span> <span class="mono verdict-pct" x-text="fmtPct(fleetUptime())"></span></span></template>
+            </p>
           </div>
         </header>
 
+        <!-- Census: one proportional strip, a segment per state, in triage order. -->
         <div class="census bay">
-          <div class="census-cell">
-            <div class="readout-label">{{ t(k="dash.census_up") }}</div>
-            <div class="census-value mono" :class="count('up') && 'st-text-up'" x-text="count('up')"></div>
+          <div class="census-strip" role="img" :aria-label="censusLabel()">
+            <template x-for="key in CENSUS_KEYS" :key="key">
+              <span class="census-seg" :class="'seg-' + key" x-show="count(key)" :style="{ flexGrow: count(key) }"></span>
+            </template>
           </div>
-          <div class="census-cell">
-            <div class="readout-label">{{ t(k="dash.census_degraded") }}</div>
-            <div class="census-value mono" :class="count('degraded') && 'st-text-degraded'" x-text="count('degraded')"></div>
-          </div>
-          <div class="census-cell">
-            <div class="readout-label">{{ t(k="dash.census_down") }}</div>
-            <div class="census-value mono" :class="count('down') && 'st-text-down'" x-text="count('down')"></div>
-          </div>
-          <div class="census-cell">
-            <div class="readout-label">{{ t(k="dash.census_unknown") }}</div>
-            <div class="census-value mono" x-text="count('unknown')"></div>
-          </div>
-          <div class="census-cell" x-show="count('paused')">
-            <div class="readout-label">{{ t(k="dash.census_paused") }}</div>
-            <div class="census-value mono" x-text="count('paused')"></div>
+          <div class="census-legend">
+            <template x-for="key in CENSUS_KEYS" :key="key">
+              <span class="census-item" x-show="count(key) || ['up', 'degraded', 'down'].includes(key)" :class="!count(key) && 'zero'">
+                <span class="vital" :class="'st-' + key"></span>
+                <span class="census-value mono" :class="count(key) && (key === 'degraded' || key === 'down') && 'st-text-' + key" x-text="count(key)"></span>
+                <span class="census-name" x-text="T('js.census_' + key)"></span>
+              </span>
+            </template>
           </div>
         </div>
+
+        <template x-if="stalePauses().length">
+          <div class="bay notice warn">
+            <span class="vital st-paused"></span>
+            <span>{{ t(k="dash.stale_pauses") }}
+              <template x-for="(m, i) in stalePauses()" :key="m.slug"><span><a :href="'/apps#app-' + m.slug" x-text="m.name"></a><span x-text="' (' + fmtAgo(m.paused_at) + ')' + (i < stalePauses().length - 1 ? ', ' : '')"></span></span></template>
+            </span>
+          </div>
+        </template>
 
         <template x-if="attention().length">
           <div class="bay">
@@ -75,7 +82,8 @@
                   <span class="vital" :class="'st-' + m.status"></span>
                   <span class="alarm-name" x-text="m.name"></span>
                   <span class="alarm-state" :class="'st-text-' + m.status" x-text="statusLabel(m.status)"></span>
-                  <span class="alarm-msg mono" x-text="lastMessage(m)"></span>
+                  <span class="alarm-since mono" x-text="sinceLabel(m)"></span>
+                  <span class="alarm-msg mono" :title="lastRaw(m)" x-text="lastMessage(m)"></span>
                   <span class="alarm-go" aria-hidden="true">→</span>
                 </a>
               </template>
@@ -92,7 +100,7 @@
                 <time class="event-time mono" x-text="fmtDateTime(e.at)"></time>
                 <span class="event-state"><span class="vital" :class="'st-' + e.status"></span><span x-text="statusLabel(e.status)"></span></span>
                 <a class="event-app" :href="'#' + e.slug" x-text="e.name"></a>
-                <span class="event-msg mono" x-text="e.message"></span>
+                <span class="event-msg mono" :title="e.message" x-text="eventMessage(e)"></span>
               </li>
             </template>
           </ol>
@@ -111,15 +119,18 @@
           </div>
           <div class="head-actions">
             <a class="btn ghost" href="#">{{ t(k="dash.back") }}</a>
+            {% if is_admin %}
             <a class="btn ghost" :href="'/apps#app-' + current().slug">{{ t(k="dash.edit") }}</a>
             <a class="btn secondary" x-show="current().has_logs" :href="'/logs/' + current().slug">{{ t(k="dash.view_logs") }}</a>
+            {% endif %}
           </div>
         </header>
 
         <template x-if="current().paused">
           <div class="bay notice">
             <span class="vital st-paused"></span>
-            <span>{{ t(k="dash.paused_notice") }} <a :href="'/apps#app-' + current().slug">{{ t(k="nav.apps") }}</a>.</span>
+            <span>{{ t(k="dash.paused_notice") }} <a :href="'/apps#app-' + current().slug">{{ t(k="nav.apps") }}</a>.
+              <strong x-show="current().paused_until" x-text="T('apps.until', {when: fmtDateTime(current().paused_until)})"></strong></span>
           </div>
         </template>
 
@@ -202,6 +213,51 @@
             </div>
 
             <div class="bay">
+              <div class="chart-head">
+                <h2 class="bay-title" style="margin: 0">{{ t(k="dash.incidents") }}</h2>
+                <div class="export-links">
+                  <span class="readout-label">{{ t(k="dash.export") }}</span>
+                  <a class="btn ghost" :href="exportUrl('csv')">CSV</a>
+                  <a class="btn ghost" :href="exportUrl('json')">JSON</a>
+                </div>
+              </div>
+              <div class="incident-stats">
+                <div class="readout">
+                  <div class="readout-label">{{ t(k="dash.incident_count") }}</div>
+                  <div class="readout-value mono" x-text="detail.incidents.incidents.length"></div>
+                </div>
+                <div class="readout">
+                  <div class="readout-label">MTTR</div>
+                  <div class="readout-value mono" x-text="fmtDuration(detail.incidents.mttr_secs)"></div>
+                </div>
+                <div class="readout">
+                  <div class="readout-label">{{ t(k="dash.downtime") }}</div>
+                  <div class="readout-value mono" x-text="fmtDuration(detail.incidents.total_down_secs)"></div>
+                </div>
+              </div>
+              <p class="empty" x-show="detail.incidents.incidents.length === 0">{{ t(k="dash.no_incidents") }}</p>
+              <ol class="timeline">
+                <template x-for="inc in detail.incidents.incidents" :key="inc.started_at">
+                  <li class="event incident">
+                    <time class="event-time mono" x-text="fmtDateTime(inc.started_at)"></time>
+                    <span class="event-state">
+                      <span class="vital" :class="inc.ended_at ? 'st-up' : 'st-down'"></span>
+                      <span class="mono" x-text="fmtDuration(inc.duration_secs)"></span>
+                    </span>
+                    <span class="event-msg mono" :title="inc.cause" x-text="humanError(inc.cause)"></span>
+                    <span class="incident-end">
+                      <template x-if="!inc.ended_at">
+                        <span><span class="st-text-down">{{ t(k="dash.ongoing") }}</span>
+                          <a x-show="current().has_logs && {{ is_admin }}" :href="'/logs/' + current().slug">{{ t(k="dash.view_logs") }}</a></span>
+                      </template>
+                      <template x-if="inc.ended_at"><span class="muted" x-text="T('dash.resolved_at', {when: fmtDateTime(inc.ended_at)})"></span></template>
+                    </span>
+                  </li>
+                </template>
+              </ol>
+            </div>
+
+            <div class="bay">
               <h2 class="bay-title">{{ t(k="dash.events") }}</h2>
               <p class="empty" x-show="detail.events.length === 0">{{ t(k="dash.no_events") }}</p>
               <ol class="timeline">
@@ -209,7 +265,7 @@
                   <li class="event event-app-less">
                     <time class="event-time mono" x-text="fmtDateTime(e.at)"></time>
                     <span class="event-state"><span class="vital" :class="'st-' + e.status"></span><span x-text="statusLabel(e.status)"></span></span>
-                    <span class="event-msg mono" x-text="e.message"></span>
+                    <span class="event-msg mono" :title="e.message" x-text="eventMessage(e)"></span>
                   </li>
                 </template>
               </ol>
@@ -249,16 +305,29 @@
   .verdict { display: flex; align-items: center; gap: 16px; padding: 8px 0 4px; }
   .vital-lg { width: 14px; height: 14px; }
   .verdict-title { font-size: 28px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.15; }
-  .census { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); padding: 0; }
-  .census-cell { padding: 16px; }
-  .census-cell + .census-cell { border-left: 1px solid var(--graticule-soft); }
-  .census-value { font-size: 28px; font-weight: 500; line-height: 1.1; margin-top: 6px; color: var(--ink-2); }
-  @media (max-width: 640px) { .census { grid-template-columns: repeat(2, 1fr); } .census-cell:nth-child(3) { border-left: 0; } .census-cell:nth-child(n + 3) { border-top: 1px solid var(--graticule-soft); } }
+  .verdict-pct { color: var(--ink-2); }
+  .census { display: flex; flex-direction: column; gap: 14px; padding: 16px 20px; }
+  .census-strip { display: flex; gap: 3px; height: 10px; }
+  .census-seg { flex-basis: 0; min-width: 6px; border-radius: 2px; background: var(--rhythm-flat); transition: flex-grow 300ms var(--ease-out); }
+  .census-seg.seg-up { background: var(--rhythm-up); }
+  .census-seg.seg-degraded { background: var(--rhythm-degraded); }
+  .census-seg.seg-down { background: var(--rhythm-down); }
+  .census-seg.seg-paused { background: transparent; box-shadow: inset 0 0 0 1.5px var(--ink-4); }
+  .census-legend { display: flex; flex-wrap: wrap; gap: 4px 24px; margin: 0 -6px; }
+  .census-item { display: inline-flex; align-items: baseline; gap: 8px; padding: 2px 6px; color: var(--ink-2); }
+  .census-item .vital { align-self: center; }
+  .census-value { font-size: 22px; font-weight: 500; line-height: 1.1; color: var(--ink); }
+  .census-value.st-text-degraded { color: var(--rhythm-degraded); }
+  .census-value.st-text-down { color: var(--rhythm-down); }
+  .census-name { font-size: 13px; color: var(--ink-3); }
+  .census-item.zero .census-value { color: var(--ink-4); }
   .readout-label { font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); }
   .alarm-list { display: flex; flex-direction: column; margin: 0 -8px; }
-  .alarm { display: grid; grid-template-columns: 8px minmax(120px, auto) auto minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 10px 8px; border-radius: 6px; text-decoration: none; color: var(--ink); }
+  .alarm { display: grid; grid-template-columns: 8px minmax(140px, 220px) 84px 110px minmax(0, 1fr) 16px; align-items: center; gap: 12px; padding: 10px 8px; border-radius: 6px; text-decoration: none; color: var(--ink); }
+  .alarm-since { font-size: 12px; color: var(--ink-2); white-space: nowrap; }
+  @media (max-width: 720px) { .alarm { grid-template-columns: 8px minmax(0, 1fr) auto 16px; } .alarm-since, .alarm-msg { display: none; } }
   .alarm:hover { background: var(--bay-raised); }
-  .alarm-name { font-weight: 500; }
+  .alarm-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .alarm-state { font-size: 12px; font-weight: 500; }
   .alarm-msg { font-size: 12px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .alarm-go { color: var(--ink-4); }
@@ -271,6 +340,16 @@
   .event { display: grid; grid-template-columns: 130px 110px minmax(100px, 200px) minmax(0, 1fr); gap: 12px; align-items: baseline; padding: 8px 0; border-top: 1px solid var(--graticule-soft); font-size: 13px; }
   .event:first-child { border-top: 0; }
   .event-app-less { grid-template-columns: 130px 110px minmax(0, 1fr); }
+  .incident { grid-template-columns: 130px 110px minmax(0, 1fr) auto; }
+  .incident-end { font-size: 12px; display: flex; gap: 8px; }
+  .incident-end a { color: var(--ink-2); }
+  .incident-stats { display: flex; gap: 32px; margin: 12px 0; flex-wrap: wrap; }
+  .export-links { display: flex; align-items: center; gap: 6px; }
+  .export-links .btn { height: 26px; padding: 0 8px; font-size: 12px; }
+  .notice.warn { color: var(--rhythm-degraded); }
+  .notice.warn a { color: inherit; }
+  .muted { color: var(--ink-4); }
+  @media (max-width: 720px) { .incident { grid-template-columns: 1fr; } }
   .event-time { font-size: 12px; color: var(--ink-3); }
   .event-state { display: inline-flex; align-items: center; gap: 8px; }
   .event-state .vital { transform: translateY(-1px); }

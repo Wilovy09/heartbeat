@@ -1,18 +1,25 @@
-# Local demo: fake data regenerated every run (scripts/demo_data.py) and a local admin,
-# no login server needed. Sign in at http://localhost:8090 as demo@example.com / demo.
+# Local demo (`just demo` in Spanish, `just demo en` in English): fake data regenerated
+# every run (scripts/demo_data.py) and a local admin,
+# no login server needed. Sign in at http://localhost:8090 as demo@example.com / demo
+# (admin) or viewer@example.com / demo (read-only). Reminders every 2 min, /metrics with
+# "Authorization: Bearer demo". Built with the `demo` feature: the apps' logs are generated
+# (src/demo.rs), since *.heartbeat.invalid never resolves.
 # Alerts go to httpbin.org/post (a public echo endpoint), so /settings can ping and send
 # test alerts without a Slack workspace.
-demo:
+demo lang="es":
     #!/usr/bin/env bash
     set -euo pipefail
+    export APP_LANG="{{lang}}"
     python3 scripts/demo_data.py
-    cargo build -q
+    cargo build -q --features demo
     hash="$(echo demo | ./target/debug/heartbeat hash-password 2>/dev/null)"
-    echo "Heartbeat demo: http://localhost:8090  (demo@example.com / demo)"
+    echo "Heartbeat demo: http://localhost:8090  (demo@example.com / demo, viewer@example.com / demo)"
     AUTH_MODE=password ADMIN_EMAIL=demo@example.com ADMIN_PASSWORD_HASH="$hash" \
+      VIEWER_EMAIL=viewer@example.com VIEWER_PASSWORD_HASH="$hash" ALERT_REMIND_MINS=2 \
       ALLOWED_HOSTS="httpbin.org,*.invalid" COOKIE_SECURE=false \
       APPS_FILE=./data/demo/apps.json UPTIME_DIR=./data/demo/uptime \
       SESSIONS_FILE=./data/demo/sessions.json ALERT_TEMPLATES_FILE=./data/demo/alert_templates.json \
+      NOTICES_FILE=./data/demo/notices.json METRICS_TOKEN=demo \
       ALERT_WEBHOOK_URLS=https://httpbin.org/post ALERT_MENTIONS="here,U0123DEMO" \
       PUBLIC_URL=http://localhost:8090 ./target/debug/heartbeat
 
@@ -24,8 +31,9 @@ fmt:
 
 check:
     cargo fmt --all -- --check
-    RUSTC_WRAPPER= cargo clippy --all-targets -- -W clippy::pedantic -D warnings
-    cargo test
+    cargo deny check
+    RUSTC_WRAPPER= cargo clippy --all-targets --all-features -- -W clippy::pedantic -D warnings
+    cargo test --all-features
 
 e2e:
     #!/usr/bin/env bash
@@ -36,6 +44,7 @@ e2e:
     PORT=8199 COOKIE_SECURE=false AUTH_MODE=password ADMIN_EMAIL=admin@example.com \
       ADMIN_PASSWORD_HASH="$hash" ALLOWED_HOSTS="*.example.com" \
       APPS_FILE="$dir/apps.json" UPTIME_DIR="$dir/uptime" SESSIONS_FILE="$dir/sessions.json" \
+      NOTICES_FILE="$dir/notices.json" ALERT_TEMPLATES_FILE="$dir/alert_templates.json" \
       ./target/debug/heartbeat > "$dir/server.log" 2>&1 &
     pid=$!
     trap 'kill $pid; rm -rf "$dir"' EXIT

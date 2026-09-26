@@ -7,6 +7,9 @@
 //!
 //! Sessions are mirrored to `SESSIONS_FILE` (mode 600) so a restart or deploy doesn't log
 //! everyone out.
+//!
+//! A session is either an admin's or a viewer's (`Role`). Viewers see the dashboard and
+//! the uptime API, read-only; every other page and every change needs `require_admin`.
 
 use actix_web::cookie::{Cookie, SameSite, time::Duration as CookieDuration};
 use actix_web::{HttpRequest, HttpResponse, web};
@@ -26,15 +29,15 @@ const SESSION_ID_BYTES: usize = 32;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
-    #[error("no se pudo generar el ID de sesión: {0}")]
+    #[error("could not generate a session ID: {0}")]
     Token(#[from] getrandom::Error),
-    #[error("error de E/S en {path}: {source}")]
+    #[error("I/O error on {path}: {source}")]
     Io {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
-    #[error("{path} no es un archivo de sesiones válido: {source}")]
+    #[error("{path} is not a valid sessions file: {source}")]
     Json {
         path: PathBuf,
         #[source]
@@ -57,12 +60,40 @@ fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+/// What a session may do.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    /// Everything. Sessions saved before roles existed are admins.
+    #[default]
+    Admin,
+    /// The dashboard and uptime data, read-only: no logs, settings or changes.
+    Viewer,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct Session {
     /// The login server's JWT (`AuthMode::Upstream`); empty in `AuthMode::Password`.
     upstream_token: String,
     /// Unix seconds.
     expires_at: u64,
+    #[serde(default)]
+    role: Role,
+}
+
+/// A live session, as handlers see it.
+#[derive(Debug, Clone)]
+pub struct SessionInfo {
+    /// The upstream JWT; empty when there is none.
+    pub token: String,
+    pub role: Role,
+}
+
+impl SessionInfo {
+    #[must_use]
+    pub fn is_admin(&self) -> bool {
+        self.role == Role::Admin
+    }
 }
 
 pub struct SessionStore {
@@ -124,9 +155,9 @@ impl SessionStore {
             .map_err(SessionError::io(&self.path))
     }
 
-    /// Starts a session for an already verified admin; returns its ID. `upstream_token` is
+    /// Starts a session for an already verified user; returns its ID. `upstream_token` is
     /// the login server's JWT, or empty when there is none (`AuthMode::Password`).
-    pub async fn create(&self, upstream_token: String) -> Result<String, SessionError> {
+    pub async fn create(&self, upstream_token: String, role: Role) -> Result<String, SessionError> {
         let id = token::random_hex(SESSION_ID_BYTES)?;
         let now = unix_now();
         {
@@ -140,6 +171,7 @@ impl SessionStore {
                 Session {
                     upstream_token,
                     expires_at: now + SESSION_HOURS * 3600,
+                    role,
                 },
             );
         }
@@ -147,13 +179,16 @@ impl SessionStore {
         Ok(id)
     }
 
-    /// The upstream token of a live session, `None` if unknown or expired.
-    fn upstream_token(&self, id: &str) -> Option<String> {
+    /// A live session, `None` if unknown or expired.
+    fn get(&self, id: &str) -> Option<SessionInfo> {
         let sessions = self.sessions.read().unwrap_or_else(PoisonError::into_inner);
         sessions
             .get(id)
             .filter(|s| s.expires_at > unix_now())
-            .map(|s| s.upstream_token.clone())
+            .map(|s| SessionInfo {
+                token: s.upstream_token.clone(),
+                role: s.role,
+            })
     }
 
     pub async fn remove(&self, id: &str) -> Result<(), SessionError> {
@@ -170,23 +205,65 @@ impl SessionStore {
     }
 }
 
-/// The upstream token behind the request's session cookie, if it names a live session.
-/// Fails closed when the store isn't registered as app data.
-pub fn session_token(req: &HttpRequest) -> Option<String> {
+/// The live session behind the request's cookie, if any. Fails closed when the store
+/// isn't registered as app data.
+pub fn current_session(req: &HttpRequest) -> Option<SessionInfo> {
     let id = req.cookie(SESSION_COOKIE)?;
-    req.app_data::<web::Data<SessionStore>>()?
-        .upstream_token(id.value())
+    req.app_data::<web::Data<SessionStore>>()?.get(id.value())
 }
 
-/// Guard for every page route that requires a logged-in admin. Returns the session's
-/// upstream token on success, or a ready-to-return redirect-to-/login response otherwise.
+/// The upstream token of the request's session (admin or viewer).
+pub fn session_token(req: &HttpRequest) -> Option<String> {
+    current_session(req).map(|s| s.token)
+}
+
+fn to_login() -> HttpResponse {
+    HttpResponse::Found()
+        .append_header(("Location", "/login"))
+        .finish()
+}
+
+/// Guard for pages any logged-in user may see; otherwise a ready-to-return redirect to
+/// /login.
 #[allow(clippy::result_large_err)] // HttpResponse IS the value on this path, not a hot loop
-pub fn require_session(req: &HttpRequest) -> Result<String, HttpResponse> {
-    session_token(req).ok_or_else(|| {
-        HttpResponse::Found()
-            .append_header(("Location", "/login"))
-            .finish()
-    })
+pub fn require_session(req: &HttpRequest) -> Result<SessionInfo, HttpResponse> {
+    current_session(req).ok_or_else(to_login)
+}
+
+/// Guard for admin-only pages and form posts: no session redirects to /login, a viewer's
+/// gets 403.
+#[allow(clippy::result_large_err)]
+pub fn require_admin(req: &HttpRequest) -> Result<SessionInfo, HttpResponse> {
+    let session = require_session(req)?;
+    if session.is_admin() {
+        Ok(session)
+    } else {
+        Err(HttpResponse::Forbidden().body("Admins only / Solo administradores"))
+    }
+}
+
+/// `require_admin` for JSON endpoints: 401 without a session, 403 for viewers.
+#[allow(clippy::result_large_err)]
+pub fn require_admin_json(req: &HttpRequest) -> Result<SessionInfo, HttpResponse> {
+    match current_session(req) {
+        None => {
+            Err(HttpResponse::Unauthorized().json(serde_json::json!({ "error": "unauthorized" })))
+        }
+        Some(s) if !s.is_admin() => {
+            Err(HttpResponse::Forbidden().json(serde_json::json!({ "error": "admins only" })))
+        }
+        Some(s) => Ok(s),
+    }
+}
+
+/// A page's base template context: which nav entry is active and whether the user is an
+/// admin (viewers get a read-only nav).
+#[must_use]
+pub fn page_context(session: &SessionInfo, active: &str) -> tera::Context {
+    let mut ctx = tera::Context::new();
+    ctx.insert("active", active);
+    ctx.insert("is_admin", &session.is_admin());
+    ctx
 }
 
 pub fn build_session_cookie(session_id: String, secure: bool) -> Cookie<'static> {
@@ -220,10 +297,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("sessions.json");
         let store = SessionStore::load(&file).await.unwrap();
-        let id = store.create("jwt".to_string()).await.unwrap();
+        let id = store.create("jwt".to_string(), Role::Admin).await.unwrap();
         assert_eq!(id.len(), 64);
-        assert_eq!(store.upstream_token(&id).as_deref(), Some("jwt"));
-        assert_eq!(store.upstream_token("cualquier-cosa"), None);
+        assert_eq!(store.get(&id).map(|s| s.token).as_deref(), Some("jwt"));
+        assert_eq!(store.get("cualquier-cosa").map(|s| s.token), None);
 
         #[cfg(unix)]
         {
@@ -236,13 +313,20 @@ mod tests {
             );
         }
 
+        let viewer = store.create(String::new(), Role::Viewer).await.unwrap();
         let reloaded = SessionStore::load(&file).await.unwrap();
-        assert_eq!(reloaded.upstream_token(&id).as_deref(), Some("jwt"));
+        assert_eq!(reloaded.get(&viewer).map(|s| s.role), Some(Role::Viewer));
+        assert_eq!(
+            reloaded.get(&id).map(|s| s.role),
+            Some(Role::Admin),
+            "roles survive a reload"
+        );
+        assert_eq!(reloaded.get(&id).map(|s| s.token).as_deref(), Some("jwt"));
 
         reloaded.remove(&id).await.unwrap();
-        assert_eq!(reloaded.upstream_token(&id), None);
+        assert_eq!(reloaded.get(&id).map(|s| s.token), None);
         let after_logout = SessionStore::load(&file).await.unwrap();
-        assert_eq!(after_logout.upstream_token(&id), None);
+        assert_eq!(after_logout.get(&id).map(|s| s.token), None);
     }
 
     #[tokio::test]
@@ -251,6 +335,6 @@ mod tests {
         let file = dir.path().join("sessions.json");
         std::fs::write(&file, r#"{"old":{"upstream_token":"jwt","expires_at":1}}"#).unwrap();
         let store = SessionStore::load(&file).await.unwrap();
-        assert_eq!(store.upstream_token("old"), None);
+        assert_eq!(store.get("old").map(|s| s.token), None);
     }
 }

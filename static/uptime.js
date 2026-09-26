@@ -6,6 +6,9 @@ const BAR_SLOTS = 40;
 // The detail strip is wide: it draws the full history the server sends.
 const STRIP_SLOTS = 100;
 const EVENTS_COLLAPSED = 8;
+// An indefinite pause older than this is flagged (mirrors routes::apps::STALE_PAUSE_SECS).
+const STALE_PAUSE_SECS = 24 * 3600;
+const EMPTY_DETAIL = () => ({ beats: [], events: [], incidents: { incidents: [], mttr_secs: null, total_down_secs: 0 } });
 const REFRESH_MS = 30000;
 // Windows longer than this carry thousands of heartbeats -- refetched only when the range
 // changes, not on every auto-refresh tick.
@@ -24,11 +27,23 @@ const RANGES = [
 ];
 // Triage order: what needs a human first.
 const SEVERITY = { down: 0, degraded: 1, up: 2, unknown: 3, paused: 4 };
+// The census strip and its legend, in triage order too.
+const CENSUS_KEYS = ['down', 'degraded', 'up', 'unknown', 'paused'];
+// Network errors as reqwest words them ("error sending request for url (...): client error
+// (Connect): dns error: ...") are unreadable at a glance: the common causes get a short
+// name, and the full text stays in the tooltip.
+const ERROR_KINDS = [
+  [/dns error|failed to lookup|no public IP|no resuelve/i, 'js.err_dns'],
+  [/timed out|deadline has elapsed|timeout/i, 'js.err_timeout'],
+  [/connection refused/i, 'js.err_refused'],
+  [/connection reset|broken pipe|connection closed/i, 'js.err_reset'],
+  [/certificate|tls|ssl|handshake/i, 'js.err_tls'],
+];
 
 function uptimeDashboard() {
   return {
     overview: { interval_secs: 60, degraded_after_ms: 1000, monitors: [], events: [] },
-    detail: { beats: [], events: [] },
+    detail: EMPTY_DETAIL(),
     selected: null,
     hours: 6,
     search: '',
@@ -38,6 +53,7 @@ function uptimeDashboard() {
     showAllEvents: false,
     RANGES,
     STRIP_SLOTS,
+    CENSUS_KEYS,
 
     async init() {
       this.selected = location.hash.slice(1) || null;
@@ -45,7 +61,7 @@ function uptimeDashboard() {
         this.selected = location.hash.slice(1) || null;
         this.hover = null;
         this.showAllEvents = false;
-        this.detail = { beats: [], events: [] };
+        this.detail = EMPTY_DETAIL();
         this.loadDetail();
       });
       await this.refresh();
@@ -114,14 +130,70 @@ function uptimeDashboard() {
       return T('js.verdict_waiting');
     },
 
+    // Paused "until resumed" for over a day: probably forgotten.
+    stalePauses() {
+      const now = Date.now() / 1000;
+      return this.overview.monitors.filter((m) => m.paused && !m.paused_until && m.paused_at && now - m.paused_at > STALE_PAUSE_SECS);
+    },
+
+    exportUrl(format) {
+      const m = this.current();
+      return m ? `/api/uptime/${encodeURIComponent(m.slug)}/export?hours=${this.hours}&format=${format}` : '#';
+    },
+
     attention() {
       return this.filteredMonitors().filter((m) => m.status === 'down' || m.status === 'degraded');
     },
 
+    lastRaw(m) {
+      const last = m.recent[m.recent.length - 1];
+      return last ? last.message : '';
+    },
+
+    // What a human needs from the last check: the cause when down, the latency when slow.
     lastMessage(m) {
       const last = m.recent[m.recent.length - 1];
       if (!last) return '';
-      return m.status === 'degraded' ? `${last.latency_ms} ms · ${last.message}` : last.message;
+      if (m.status === 'degraded') return /^HTTP 2\d\d/.test(last.message) ? this.fmtMs(last.latency_ms) : `${this.fmtMs(last.latency_ms)} · ${last.message}`;
+      return this.humanError(last.message);
+    },
+
+    // Short name for a common network failure, keeping any retry suffix; anything else as-is.
+    humanError(message) {
+      if (!message) return '';
+      const kind = ERROR_KINDS.find(([re]) => re.test(message));
+      if (!kind) return message;
+      const attempts = message.match(/\((\d+) (?:intentos|attempts)\)\s*$/);
+      return attempts ? `${T(kind[1])} (${attempts[0].slice(1, -1)})` : T(kind[1]);
+    },
+
+    // An event row: latency for up/degraded (their message is just "HTTP 200 OK"), the
+    // cause for down.
+    eventMessage(e) {
+      if (e.status === 'down') return this.humanError(e.message);
+      const ok = /^HTTP 2\d\d/.test(e.message);
+      return ok && e.latency_ms != null ? this.fmtMs(e.latency_ms) : e.message;
+    },
+
+    // "12 min" for how long a down/degraded app has been that way, from its recent beats.
+    sinceLabel(m) {
+      const beats = m.recent;
+      if (!beats.length) return '';
+      let i = beats.length - 1;
+      while (i > 0 && beats[i - 1].status === m.status) i--;
+      const since = beats[i].at;
+      const label = this.fmtDuration(Math.max(0, Math.round(Date.now() / 1000 - since)));
+      return i === 0 && beats.length >= STRIP_SLOTS ? `> ${label}` : label;
+    },
+
+    // Mean 24 h uptime over the apps that have data -- the fleet's one number.
+    fleetUptime() {
+      const values = this.overview.monitors.filter((m) => !m.paused && m.uptime_24h != null).map((m) => m.uptime_24h);
+      return values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
+    },
+
+    censusLabel() {
+      return CENSUS_KEYS.filter((k) => this.count(k)).map((k) => `${this.count(k)} ${T('js.census_' + k)}`).join(', ');
     },
 
     // Left label under the big strip: age of its oldest drawn bar.
@@ -186,6 +258,14 @@ function uptimeDashboard() {
     },
     fmtPct(v) {
       return v == null ? '—' : `${v.toFixed(v === 100 ? 0 : 2)}%`;
+    },
+    // 45 s, 12 min, 3 h 20 min, 2 d 4 h -- mirrors alerts::format_duration.
+    fmtDuration(secs) {
+      if (secs == null) return '—';
+      const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600), m = Math.floor((secs % 3600) / 60);
+      if (d) return h ? `${d} d ${h} h` : `${d} d`;
+      if (h) return m ? `${h} h ${m} min` : `${h} h`;
+      return m ? `${m} min` : `${secs} s`;
     },
     fmtMs(v) {
       return v == null ? '—' : `${v} ms`;

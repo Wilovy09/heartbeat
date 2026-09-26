@@ -20,13 +20,15 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, thiserror::Error)]
 pub enum OutboundError {
-    #[error("URL inválida: {0}")]
+    #[error("invalid URL: {0}")]
     InvalidUrl(#[from] url::ParseError),
-    #[error("solo se permiten URLs https://")]
+    #[error("only https:// URLs are allowed")]
     NotHttps,
-    #[error("el host '{0}' no está en ALLOWED_HOSTS")]
+    #[error("a tcp:// URL needs a port (tcp://host:port)")]
+    MissingPort,
+    #[error("host '{0}' isn't in ALLOWED_HOSTS")]
     HostNotAllowed(String),
-    #[error("no se pudo crear el cliente HTTP: {0}")]
+    #[error("could not build the HTTP client: {0}")]
     Client(#[from] reqwest::Error),
 }
 
@@ -35,6 +37,7 @@ impl crate::i18n::Localize for OutboundError {
         match self {
             Self::InvalidUrl(e) => i18n.text("err.url_parse", &[("error", &e.to_string())]),
             Self::NotHttps => i18n.text("err.not_https", &[]),
+            Self::MissingPort => i18n.text("err.missing_port", &[]),
             Self::HostNotAllowed(host) => i18n.text("err.host_not_allowed", &[("host", host)]),
             Self::Client(e) => i18n.text("err.internal", &[("error", &e.to_string())]),
         }
@@ -70,24 +73,41 @@ impl From<&str> for HostPattern {
     }
 }
 
+/// The public addresses `host` resolves to; errors if there are none.
+async fn resolve_public(host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+    let public: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+        .await?
+        .filter(|addr| is_public(addr.ip()))
+        .collect();
+    if public.is_empty() {
+        return Err(std::io::Error::other(format!(
+            "'{host}' resolves to no public IP address"
+        )));
+    }
+    Ok(public)
+}
+
 /// Resolves normally, then drops every non-public address; errors if none are left.
 struct PublicOnlyResolver;
 
 impl Resolve for PublicOnlyResolver {
     fn resolve(&self, name: Name) -> Resolving {
         Box::pin(async move {
-            let host = name.as_str().to_string();
-            let public: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
-                .await?
-                .filter(|addr| is_public(addr.ip()))
-                .collect();
-            if public.is_empty() {
-                return Err(format!("'{host}' no resuelve a ninguna IP pública").into());
-            }
-            let addrs: Addrs = Box::new(public.into_iter());
+            let addrs: Addrs = Box::new(resolve_public(name.as_str(), 0).await?.into_iter());
             Ok(addrs)
         })
     }
+}
+
+/// What a health URL points at, once it passed the policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HealthTarget {
+    Http(Url),
+    /// `tcp://host:port`: the check only opens a connection.
+    Tcp {
+        host: String,
+        port: u16,
+    },
 }
 
 fn is_public(ip: IpAddr) -> bool {
@@ -120,6 +140,18 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
         || ip.is_multicast()
         || ip.is_unique_local() // fc00::/7
         || ip.is_unicast_link_local()) // fe80::/10
+}
+
+/// A client for admin-entered URLs that aren't bound to `ALLOWED_HOSTS` (per-app alert
+/// webhooks point at Slack, Discord...): it still refuses private/loopback/link-local
+/// addresses and never follows redirects, so it can't be aimed at this server's network.
+pub fn public_only_client(timeout: Duration) -> Result<Client, reqwest::Error> {
+    Client::builder()
+        .dns_resolver(Arc::new(PublicOnlyResolver))
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        .user_agent("heartbeat")
+        .build()
 }
 
 /// Shared HTTP client + allowlist for requests to registered apps. Cheap to clone.
@@ -158,16 +190,54 @@ impl Outbound {
         if url.scheme() != "https" {
             return Err(OutboundError::NotHttps);
         }
-        let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
-        if !self.allowed_hosts.iter().any(|p| p.matches(&host)) {
-            return Err(OutboundError::HostNotAllowed(host));
-        }
+        self.check_host(&url)?;
         Ok(url)
     }
 
     #[must_use]
     pub fn client(&self) -> &Client {
         &self.client
+    }
+
+    fn check_host(&self, url: &Url) -> Result<String, OutboundError> {
+        let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+        if self.allowed_hosts.iter().any(|p| p.matches(&host)) {
+            Ok(host)
+        } else {
+            Err(OutboundError::HostNotAllowed(host))
+        }
+    }
+
+    /// Like `check`, but a health URL may also be `tcp://host:port` (same allowlist).
+    pub fn check_health(&self, raw: &str) -> Result<HealthTarget, OutboundError> {
+        let url = Url::parse(raw.trim())?;
+        if url.scheme() != "tcp" {
+            return self.check(raw).map(HealthTarget::Http);
+        }
+        let host = self.check_host(&url)?;
+        let port = url.port().ok_or(OutboundError::MissingPort)?;
+        Ok(HealthTarget::Tcp { host, port })
+    }
+
+    /// Opens a TCP connection to a public address of `host`, trying each in turn.
+    pub async fn connect_tcp(
+        host: &str,
+        port: u16,
+        timeout: Duration,
+    ) -> std::io::Result<tokio::net::TcpStream> {
+        let attempt = async {
+            let mut last = None;
+            for addr in resolve_public(host, port).await? {
+                match tokio::net::TcpStream::connect(addr).await {
+                    Ok(stream) => return Ok(stream),
+                    Err(e) => last = Some(e),
+                }
+            }
+            Err(last.unwrap_or_else(|| std::io::Error::other("no address to connect to")))
+        };
+        tokio::time::timeout(timeout, attempt)
+            .await
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "connect timed out"))?
     }
 }
 
@@ -208,6 +278,30 @@ mod tests {
     }
 
     #[test]
+    fn health_urls_may_be_tcp_on_allowed_hosts_with_a_port() {
+        let out = Outbound::new("*.example.com").unwrap();
+        assert_eq!(
+            out.check_health("tcp://db.example.com:5432").unwrap(),
+            HealthTarget::Tcp {
+                host: "db.example.com".into(),
+                port: 5432
+            }
+        );
+        assert!(matches!(
+            out.check_health("https://api.example.com/health"),
+            Ok(HealthTarget::Http(_))
+        ));
+        assert!(matches!(
+            out.check_health("tcp://db.example.com"),
+            Err(OutboundError::MissingPort)
+        ));
+        assert!(matches!(
+            out.check_health("tcp://10.0.0.5:5432"),
+            Err(OutboundError::HostNotAllowed(_))
+        ));
+    }
+
+    #[test]
     fn only_public_ips_pass() {
         for blocked in [
             "127.0.0.1",
@@ -237,6 +331,6 @@ mod tests {
             .await
             .err()
             .expect("localhost must be refused");
-        assert!(err.to_string().contains("IP pública"));
+        assert!(err.to_string().contains("no public IP"));
     }
 }

@@ -12,12 +12,14 @@
   <!-- Webhooks: ping-pong -->
   <section class="bay">
     <h2 class="bay-title">{{ t(k="settings.webhooks") }}</h2>
-    {% if alerts %}
+    {% if alerts.webhooks | length > 0 %}
     <div class="hook-list">
       {% for hook in alerts.webhooks %}
       <div class="hook">
         <span class="chip service">{{ t(k="settings.service_" ~ hook.service) }}</span>
-        <span class="hook-url mono">{{ hook.masked }}</span>
+        <span class="hook-url mono">{{ hook.masked }}
+          {% if hook.last %}<span class="hook-last {% if hook.last.ok %}ok{% else %}bad{% endif %}" title="{{ hook.last.detail }}" x-text="lastDelivery({{ hook.last.at }}, {{ hook.last.ok }})"></span>{% endif %}
+        </span>
         <span class="result" x-show="results['ping-{{ hook.index }}']" x-html="resultHtml('ping-{{ hook.index }}')"></span>
         <button type="button" class="btn secondary" :disabled="busy['ping-{{ hook.index }}']" @click="send('ping', {{ hook.index }}, 'ping-{{ hook.index }}')">
           <span x-text="busy['ping-{{ hook.index }}'] ? T('settings.sending') : '{{ t(k="settings.ping") }}'"></span>
@@ -31,8 +33,7 @@
     {% endif %}
   </section>
 
-  {% if alerts %}
-  <!-- Sample alerts -->
+  <!-- Alert templates: one kind at a time, editor next to how it lands in the channel. -->
   <section class="bay">
     <div class="section-head">
       <h2 class="bay-title" style="margin: 0">{{ t(k="settings.samples") }}</h2>
@@ -48,46 +49,70 @@
       </label>
       {% endif %}
     </div>
-    <div class="samples">
+    <p class="hint section-hint">{{ t(k="settings.samples_hint") }}</p>
+
+    <div class="kind-tabs" role="tablist" aria-label="{{ t(k="settings.samples") }}">
       {% for tpl in alerts.templates %}
       {% set kind = tpl.kind %}
-      <article class="sample">
-        <header class="sample-head">
-          <span class="vital st-{% if kind == "down" %}down{% elif kind == "degraded" %}degraded{% else %}up{% endif %}"></span>
-          <h3>{{ t(k="settings.kind_" ~ kind) }}</h3>
-          <span class="tpl-state" x-text="stateLabel('{{ kind }}')"></span>
-        </header>
+      <button type="button" role="tab" class="kind-tab" :aria-selected="active === '{{ kind }}'" @click="active = '{{ kind }}'">
+        <span class="vital st-{% if kind == "down" or kind == "reminder" %}down{% elif kind == "degraded" %}degraded{% else %}up{% endif %}"></span>
+        <span>{{ t(k="settings.kind_" ~ kind) }}</span>
+        <span class="tab-mark" x-show="dirty('{{ kind }}') || tpl['{{ kind }}'].template !== tpl['{{ kind }}'].default" :class="dirty('{{ kind }}') && 'unsaved'" :title="stateLabel('{{ kind }}')"></span>
+      </button>
+      {% endfor %}
+    </div>
 
-        <label class="tpl-label" for="tpl-{{ kind }}">{{ t(k="settings.template") }}</label>
-        <textarea id="tpl-{{ kind }}" class="tpl-input mono" rows="3" spellcheck="false" x-ref="tpl_{{ kind }}" x-model="tpl['{{ kind }}'].template"></textarea>
+    {% for tpl in alerts.templates %}
+    {% set kind = tpl.kind %}
+    <div class="kind-panel" role="tabpanel" x-show="active === '{{ kind }}'">
+      <div class="editor">
+        <div class="editor-head">
+          <label class="tpl-label" for="tpl-{{ kind }}">{{ t(k="settings.template") }}</label>
+          <span class="tpl-state" x-text="stateLabel('{{ kind }}')"></span>
+        </div>
+        <textarea id="tpl-{{ kind }}" class="tpl-input mono" rows="4" spellcheck="false" x-ref="tpl_{{ kind }}" x-model="tpl['{{ kind }}'].template"></textarea>
         <div class="vars" role="group" aria-label="{{ t(k="settings.variables") }}">
           <template x-for="name in VARIABLES" :key="name">
-            <button type="button" class="var" @click="insertVar('{{ kind }}', name)" :title="T('settings.var_' + name)" x-text="'{' + name + '}'"></button>
+            <button type="button" class="var" @click="insertVar('{{ kind }}', name)" :title="T('settings.var_' + name)">
+              <span class="mono" x-text="'{' + name + '}'"></span><span class="var-desc" x-text="T('settings.var_' + name)"></span>
+            </button>
           </template>
         </div>
         {% if kind == "down" and has_mentions %}
         <p class="hint warn" x-show="!tpl['down'].template.includes('{mentions}')">{{ t(k="settings.no_mentions_var") }}</p>
         {% endif %}
-
-        <span class="tpl-label">{{ t(k="settings.preview") }}</span>
-        <pre class="preview mono" x-text="preview('{{ kind }}')"></pre>
         {% if kind == "degraded" and not alerts.on_degraded %}
         <p class="hint">{{ t(k="settings.degraded_off") }}</p>
         {% endif %}
+        {% if kind == "reminder" %}
+        <p class="hint">{% if alerts.remind_mins %}{{ t(k="settings.reminder_every", mins=alerts.remind_mins) }}{% else %}{{ t(k="settings.reminder_off") }}{% endif %}</p>
+        {% endif %}
+      </div>
 
-        <div class="sample-foot">
-          <span class="result" x-show="results['{{ kind }}']" x-html="resultHtml('{{ kind }}')"></span>
-          <button type="button" class="btn ghost" x-show="tpl['{{ kind }}'].template !== tpl['{{ kind }}'].default" @click="restore('{{ kind }}')">{{ t(k="settings.restore") }}</button>
-          <button type="button" class="btn secondary" x-show="dirty('{{ kind }}')" :disabled="saving" @click="save()">{{ t(k="settings.save") }}</button>
-          <button type="button" class="btn secondary" :disabled="busy['{{ kind }}']" @click="sendSample('{{ kind }}')">
-            <span x-text="busy['{{ kind }}'] ? T('settings.sending') : '{{ t(k="settings.send_sample") }}'"></span>
-          </button>
+      <div class="preview-col">
+        <span class="tpl-label">{{ t(k="settings.preview") }}</span>
+        <div class="chat" aria-live="polite">
+          <img class="chat-avatar" src="/static/icon.svg" alt="">
+          <div class="chat-body">
+            <div class="chat-meta"><strong>Heartbeat</strong><span class="chat-app">APP</span><span class="chat-time" x-text="T('settings.now')"></span></div>
+            <div class="chat-text" x-html="previewHtml('{{ kind }}')"></div>
+          </div>
         </div>
-      </article>
-      {% endfor %}
+      </div>
+
+      <div class="panel-foot">
+        <span class="result" x-show="results['{{ kind }}']" x-html="resultHtml('{{ kind }}')"></span>
+        <button type="button" class="btn ghost" x-show="tpl['{{ kind }}'].template !== tpl['{{ kind }}'].default" @click="restore('{{ kind }}')">{{ t(k="settings.restore") }}</button>
+        <button type="button" class="btn secondary" x-show="dirty('{{ kind }}')" :disabled="saving" @click="save()">{{ t(k="settings.save") }}</button>
+        {% if alerts.webhooks | length > 0 %}
+        <button type="button" class="btn" :disabled="busy['{{ kind }}']" @click="sendSample('{{ kind }}')">
+          <span x-text="busy['{{ kind }}'] ? T('settings.sending') : '{{ t(k="settings.send_sample") }}'"></span>
+        </button>
+        {% endif %}
+      </div>
     </div>
+    {% endfor %}
     <p class="error-box" x-show="saveError" x-text="saveError" style="margin: 12px 0 0"></p>
-    <p class="hint">{{ t(k="settings.samples_hint") }}</p>
   </section>
 
   <!-- Mentions -->
@@ -114,26 +139,42 @@
     <p class="hint">{{ t(k="settings.mentions_hint") }}</p>
     {% endif %}
   </section>
-  {% endif %}
 
   <!-- Current configuration -->
   <section class="bay">
     <h2 class="bay-title">{{ t(k="settings.current") }}</h2>
-    <dl class="config">
-      <dt>{{ t(k="settings.cfg_auth") }}</dt>
-      <dd class="mono">{{ config.auth_mode }}{% if config.login_url %} · {{ config.login_url }}{% endif %}{% if config.admin_email %} · {{ config.admin_email }}{% endif %}</dd>
-      <dt>{{ t(k="settings.cfg_lang") }}</dt><dd class="mono">{{ config.app_lang }}</dd>
-      <dt>{{ t(k="settings.cfg_public_url") }}</dt><dd class="mono">{% if config.public_url %}{{ config.public_url }}{% else %}<span class="muted">—</span>{% endif %}</dd>
-      <dt>{{ t(k="settings.cfg_allowed_hosts") }}</dt><dd class="mono">{{ config.allowed_hosts }}</dd>
-      <dt>{{ t(k="settings.cfg_logs_key") }}</dt><dd>{% if config.admin_logs_key %}{{ t(k="settings.set") }}{% else %}<span class="muted">{{ t(k="settings.not_set") }}</span>{% endif %}</dd>
-      <dt>{{ t(k="settings.cfg_interval") }}</dt><dd class="mono">{{ config.interval_secs }} s</dd>
-      <dt>{{ t(k="settings.cfg_degraded") }}</dt><dd class="mono">{{ config.degraded_ms }} ms</dd>
-      <dt>{{ t(k="settings.cfg_retries") }}</dt><dd class="mono">{{ config.retries }}</dd>
-      <dt>{{ t(k="settings.cfg_cert") }}</dt><dd class="mono">{% if config.cert_warn_days > 0 %}{{ config.cert_warn_days }} {{ t(k="settings.days") }}{% else %}<span class="muted">{{ t(k="settings.off") }}</span>{% endif %}</dd>
-      <dt>{{ t(k="settings.cfg_retention") }}</dt><dd class="mono">{{ config.retention_days }} {{ t(k="settings.days") }}</dd>
-      <dt>{{ t(k="settings.cfg_on_degraded") }}</dt><dd>{% if config.alert_on_degraded %}{{ t(k="settings.on") }}{% else %}<span class="muted">{{ t(k="settings.off") }}</span>{% endif %}</dd>
-      <dt>{{ t(k="settings.cfg_deadman") }}</dt><dd>{% if config.dead_mans_switch %}{{ t(k="settings.set") }}{% else %}<span class="muted">{{ t(k="settings.not_set") }}</span>{% endif %}</dd>
-    </dl>
+    <div class="config-groups">
+      <div class="config-group">
+        <h3 class="group-title">{{ t(k="settings.group_access") }}</h3>
+        <dl class="config">
+        <dt>{{ t(k="settings.cfg_auth") }}</dt><dd class="mono">{{ config.auth_mode }}{% if config.login_url %} · {{ config.login_url }}{% endif %}{% if config.admin_email %} · {{ config.admin_email }}{% endif %}</dd>
+        <dt>{{ t(k="settings.cfg_lang") }}</dt><dd class="mono">{{ config.app_lang }}</dd>
+        <dt>{{ t(k="settings.cfg_public_url") }}</dt><dd class="mono">{% if config.public_url %}{{ config.public_url }}{% else %}<span class="muted">—</span>{% endif %}</dd>
+        <dt>{{ t(k="settings.cfg_allowed_hosts") }}</dt><dd class="mono">{{ config.allowed_hosts }}</dd>
+        <dt>{{ t(k="settings.cfg_logs_key") }}</dt><dd>{% if config.admin_logs_key %}{{ t(k="settings.set") }}{% else %}<span class="muted">{{ t(k="settings.not_set") }}</span>{% endif %}</dd>
+        </dl>
+      </div>
+      <div class="config-group">
+        <h3 class="group-title">{{ t(k="settings.group_checks") }}</h3>
+        <dl class="config">
+        <dt>{{ t(k="settings.cfg_interval") }}</dt><dd class="mono">{{ config.interval_secs }} s</dd>
+        <dt>{{ t(k="settings.cfg_timeout") }}</dt><dd class="mono">{{ config.timeout_secs }} s</dd>
+        <dt>{{ t(k="settings.cfg_retries") }}</dt><dd class="mono">{{ config.retries }}</dd>
+        <dt>{{ t(k="settings.cfg_degraded") }}</dt><dd class="mono">{{ config.degraded_ms }} ms</dd>
+        <dt>{{ t(k="settings.cfg_cert") }}</dt><dd class="mono">{% if config.cert_warn_days > 0 %}{{ config.cert_warn_days }} {{ t(k="settings.days") }}{% else %}<span class="muted">{{ t(k="settings.off") }}</span>{% endif %}</dd>
+        <dt>{{ t(k="settings.cfg_retention") }}</dt><dd class="mono">{{ config.retention_days }} {{ t(k="settings.days") }}</dd>
+        </dl>
+      </div>
+      <div class="config-group">
+        <h3 class="group-title">{{ t(k="settings.group_alerts") }}</h3>
+        <dl class="config">
+        <dt>{{ t(k="settings.cfg_on_degraded") }}</dt><dd>{% if config.alert_on_degraded %}{{ t(k="settings.on") }}{% else %}<span class="muted">{{ t(k="settings.off") }}</span>{% endif %}</dd>
+        <dt>{{ t(k="settings.cfg_remind") }}</dt><dd class="mono">{% if config.remind_mins > 0 %}{{ config.remind_mins }} min{% else %}<span class="muted">{{ t(k="settings.off") }}</span>{% endif %}</dd>
+        <dt>{{ t(k="settings.cfg_mass") }}</dt><dd class="mono">{% if config.mass_down_pct > 0 %}{{ config.mass_down_pct }}%{% else %}<span class="muted">{{ t(k="settings.off") }}</span>{% endif %}</dd>
+        <dt>{{ t(k="settings.cfg_deadman") }}</dt><dd>{% if config.dead_mans_switch %}{{ t(k="settings.set") }}{% else %}<span class="muted">{{ t(k="settings.not_set") }}</span>{% endif %}</dd>
+        </dl>
+      </div>
+    </div>
     <p class="hint">{{ t(k="settings.env_hint") }}</p>
   </section>
 </div>
@@ -150,6 +191,8 @@
   .hook { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 12px; padding: 10px 0; }
   .hook + .hook { border-top: 1px solid var(--graticule-soft); }
   .hook-url { font-size: 12px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hook-last { margin-left: 8px; font-family: var(--font-sans); font-size: 11px; color: var(--ink-3); }
+  .hook-last.bad { color: var(--rhythm-down); }
 
   .result { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-2); }
   .result .vital { width: 6px; height: 6px; }
@@ -158,12 +201,41 @@
   .section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
   .target { display: flex; align-items: center; gap: 8px; margin: 0; text-transform: none; letter-spacing: 0; font-size: 12px; }
   .target select { max-width: 320px; }
-  .samples { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
-  .sample { display: flex; flex-direction: column; gap: 10px; padding: 14px; border: 1px solid var(--graticule); border-radius: 8px; background: var(--glass); }
-  .sample-head { display: flex; align-items: center; gap: 8px; }
-  .sample-head h3 { font-size: 14px; font-weight: 500; }
-  .preview { margin: 0; padding: 10px 12px; border-radius: 6px; background: var(--well); border: 1px solid var(--graticule-soft); font-size: 12px; line-height: 1.6; color: var(--ink-2); white-space: pre-wrap; word-break: break-word; flex: 1; }
-  .sample .hint { margin: 0; }
+  .section-hint { margin: -4px 0 14px; }
+  .kind-tabs { display: flex; gap: 2px; padding: 2px; width: fit-content; max-width: 100%; overflow-x: auto; background: var(--well); border: 1px solid var(--graticule); border-radius: 8px; }
+  .kind-tab { display: inline-flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent; color: var(--ink-3); font: 500 13px var(--font-sans); white-space: nowrap; cursor: pointer; transition: color 120ms, background-color 120ms; }
+  .kind-tab:hover { color: var(--ink); }
+  .kind-tab[aria-selected="true"] { background: var(--bay-raised); color: var(--ink); box-shadow: 0 0 0 1px var(--graticule-strong); }
+  .kind-tab .vital { width: 7px; height: 7px; }
+  .tab-mark { width: 5px; height: 5px; border-radius: 50%; background: var(--ink-3); }
+  .tab-mark.unsaved { background: var(--ink); }
+  .kind-panel { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px 24px; margin-top: 16px; }
+  @media (max-width: 900px) { .kind-panel { grid-template-columns: minmax(0, 1fr); } }
+  .editor, .preview-col { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+  .editor-head { display: flex; align-items: baseline; justify-content: space-between; }
+  .var { display: inline-flex; align-items: baseline; gap: 6px; }
+  .var .var-desc { font: 11px var(--font-sans); color: var(--ink-4); }
+  .var:hover .var-desc { color: var(--ink-3); }
+  .editor .hint { margin: 0; }
+  .panel-foot { grid-column: 1 / -1; display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding-top: 14px; border-top: 1px solid var(--graticule-soft); flex-wrap: wrap; }
+  .panel-foot .result { margin-right: auto; }
+
+  /* Preview as a chat message: how it lands in the channel, not its markup. */
+  .chat { display: flex; gap: 12px; padding: 14px; border-radius: 8px; background: var(--well); border: 1px solid var(--graticule-soft); }
+  .chat-avatar { width: 32px; height: 32px; border-radius: 6px; flex-shrink: 0; }
+  .chat-body { min-width: 0; flex: 1; }
+  .chat-meta { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; font-size: 13px; }
+  .chat-meta strong { font-weight: 600; color: var(--ink); }
+  .chat-app { padding: 0 4px; border-radius: 3px; background: var(--bay-raised); font-size: 9px; font-weight: 600; letter-spacing: 0.04em; color: var(--ink-3); }
+  .chat-time { font-size: 11px; color: var(--ink-4); }
+  .chat-text { font-size: 14px; line-height: 1.55; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .chat-text .mention { padding: 0 3px; border-radius: 3px; background: rgba(231, 233, 236, 0.12); color: var(--ink); font-weight: 500; }
+  .chat-text .link { color: var(--ink-2); text-decoration: underline; text-decoration-color: var(--ink-4); text-underline-offset: 2px; }
+  .chat-empty { color: var(--ink-4); font-style: italic; }
+
+  .config-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px 32px; }
+  .group-title { margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--ink); }
+  .config-group .config { grid-template-columns: minmax(120px, 170px) minmax(0, 1fr); }
   .hint.warn { color: var(--rhythm-degraded); }
   .tpl-state { margin-left: auto; font-size: 11px; color: var(--ink-3); }
   .tpl-label { margin: 0; font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); }
@@ -172,8 +244,6 @@
   .vars { display: flex; flex-wrap: wrap; gap: 4px; }
   .var { height: 22px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--graticule); background: var(--bay-raised); color: var(--ink-2); font: 11px var(--font-mono); cursor: pointer; transition: color 120ms, border-color 120ms; }
   .var:hover { color: var(--ink); border-color: var(--graticule-strong); }
-  .preview { flex: 0 0 auto; min-height: 58px; }
-  .sample-foot { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
 
   .mention-table td { font-size: 12px; }
   .config { display: grid; grid-template-columns: minmax(160px, 240px) minmax(0, 1fr); gap: 10px 16px; margin: 0; }

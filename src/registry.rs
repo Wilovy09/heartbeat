@@ -8,29 +8,43 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 
-/// Every way a registry operation can fail. The messages are shown to the admin as-is in
-/// the /apps form, hence Spanish.
+/// Every way a registry operation can fail. `Display` is for logs; the /apps form shows
+/// the localized text (`Localize`).
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
-    #[error("El nombre no puede estar vacío")]
+    #[error("the name can't be empty")]
     EmptyName,
-    #[error("El nombre debe tener al menos una letra o número")]
+    #[error("the name needs at least one letter or digit")]
     NameWithoutAlphanumerics,
-    #[error("La URL de {0} debe empezar con http:// o https://")]
+    #[error("the {0} URL must start with http:// or https://")]
     InvalidUrl(&'static str),
-    #[error("Ya existe una app registrada con un nombre equivalente")]
+    #[error("check interval must be between {MIN_INTERVAL_SECS} and {MAX_INTERVAL_SECS} s")]
+    IntervalOutOfRange,
+    #[error("check timeout must be between 1 and {MAX_TIMEOUT_SECS} s")]
+    TimeoutOutOfRange,
+    #[error("expected status {0} isn't an HTTP status code")]
+    InvalidStatus(u16),
+    #[error("invalid header: {0}")]
+    InvalidHeader(String),
+    #[error("invalid alert webhook {0}")]
+    InvalidWebhook(String),
+    #[error("unrecognized mention {0}")]
+    InvalidMention(String),
+    #[error("too many entries in {0}")]
+    TooMany(&'static str),
+    #[error("an app with an equivalent name is already registered")]
     SlugTaken,
-    #[error("No se encontró la app '{0}'")]
+    #[error("app '{0}' not found")]
     NotFound(String),
-    #[error("No se pudo generar el token: {0}")]
+    #[error("could not generate a token: {0}")]
     Token(#[from] getrandom::Error),
-    #[error("Error de E/S en {path}: {source}")]
+    #[error("I/O error on {path}: {source}")]
     Io {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
-    #[error("{path} no es un registro de apps válido: {source}")]
+    #[error("{path} is not a valid apps file: {source}")]
     Json {
         path: PathBuf,
         #[source]
@@ -49,12 +63,75 @@ impl RegistryError {
 
 type Result<T> = std::result::Result<T, RegistryError>;
 
+/// Per-app check interval bounds, in seconds.
+pub const MIN_INTERVAL_SECS: u32 = 10;
+pub const MAX_INTERVAL_SECS: u32 = 86_400;
+/// Longest per-app check timeout, in seconds.
+pub const MAX_TIMEOUT_SECS: u32 = 60;
+/// Most custom headers, and most alert webhooks, per app.
+const MAX_HEADERS: usize = 10;
+const MAX_WEBHOOKS: usize = 5;
+
+/// One extra request header sent with an app's health check (e.g. an auth token).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckHeader {
+    pub name: String,
+    pub value: String,
+}
+
+impl CheckHeader {
+    /// Headers that would change what the request *is* rather than annotate it.
+    const RESERVED: [&'static str; 5] = [
+        "host",
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "upgrade",
+    ];
+
+    /// Parses one `Name: value` line.
+    pub fn parse_line(line: &str) -> Result<Self> {
+        let invalid = || RegistryError::InvalidHeader(line.trim().to_string());
+        let (name, value) = line.split_once(':').ok_or_else(invalid)?;
+        let header = Self {
+            name: name.trim().to_string(),
+            value: value.trim().to_string(),
+        };
+        header.validate().map_err(|()| invalid())?;
+        Ok(header)
+    }
+
+    fn validate(&self) -> std::result::Result<(), ()> {
+        let name = reqwest::header::HeaderName::from_bytes(self.name.as_bytes()).map_err(|_| ())?;
+        reqwest::header::HeaderValue::from_str(&self.value).map_err(|_| ())?;
+        if Self::RESERVED.contains(&name.as_str()) {
+            return Err(());
+        }
+        Ok(())
+    }
+}
+
 impl crate::i18n::Localize for RegistryError {
     fn localize(&self, i18n: &crate::i18n::I18n) -> String {
         match self {
             Self::EmptyName => i18n.text("err.empty_name", &[]),
             Self::NameWithoutAlphanumerics => i18n.text("err.name_no_alnum", &[]),
             Self::InvalidUrl(label) => i18n.text("err.invalid_url", &[("label", label)]),
+            Self::IntervalOutOfRange => i18n.text(
+                "err.interval",
+                &[
+                    ("min", &MIN_INTERVAL_SECS.to_string()),
+                    ("max", &MAX_INTERVAL_SECS.to_string()),
+                ],
+            ),
+            Self::TimeoutOutOfRange => {
+                i18n.text("err.timeout", &[("max", &MAX_TIMEOUT_SECS.to_string())])
+            }
+            Self::InvalidStatus(code) => i18n.text("err.status", &[("code", &code.to_string())]),
+            Self::InvalidHeader(line) => i18n.text("err.header", &[("header", line)]),
+            Self::InvalidWebhook(url) => i18n.text("err.webhook", &[("url", url)]),
+            Self::InvalidMention(entry) => i18n.text("err.mention", &[("entry", entry)]),
+            Self::TooMany(field) => i18n.text("err.too_many", &[("field", field)]),
             Self::SlugTaken => i18n.text("err.slug_taken", &[]),
             Self::NotFound(slug) => i18n.text("err.not_found", &[("slug", slug)]),
             Self::Token(_) | Self::Io { .. } | Self::Json { .. } => {
@@ -98,6 +175,31 @@ pub struct RegisteredApp {
     /// references actually loads as JS/CSS (see `uptime::check_assets`).
     #[serde(default)]
     pub check_assets: bool,
+    /// Unix seconds when the current pause started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_at: Option<u64>,
+    /// Scheduled maintenance: the pause ends by itself at this unix time. `None` while
+    /// paused = until resumed by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_until: Option<u64>,
+    /// Seconds between checks; `None` = the global `UPTIME_INTERVAL_SECS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_secs: Option<u32>,
+    /// Seconds before a check gives up; `None` = the global `UPTIME_TIMEOUT_SECS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u32>,
+    /// Status codes that count as up; empty = any 2xx.
+    #[serde(default)]
+    pub expect_status: Vec<u16>,
+    /// Extra headers sent with the health check.
+    #[serde(default)]
+    pub headers: Vec<CheckHeader>,
+    /// This app's own alert webhooks, notified besides the global ones.
+    #[serde(default)]
+    pub alert_webhooks: Vec<String>,
+    /// This app's own mentions (`ALERT_MENTIONS` syntax), added to the global ones.
+    #[serde(default)]
+    pub alert_mentions: Vec<String>,
 }
 
 /// What an admin sets when registering or editing an app. The slug and embed token are
@@ -111,6 +213,12 @@ pub struct AppSettings {
     pub degraded_after_ms: Option<u32>,
     pub expect_body: Option<String>,
     pub check_assets: bool,
+    pub interval_secs: Option<u32>,
+    pub timeout_secs: Option<u32>,
+    pub expect_status: Vec<u16>,
+    pub headers: Vec<CheckHeader>,
+    pub alert_webhooks: Vec<String>,
+    pub alert_mentions: Vec<String>,
 }
 
 /// `AppSettings` after `normalized`: trimmed, validated, blanks turned into `None`.
@@ -121,6 +229,12 @@ struct ValidSettings {
     degraded_after_ms: Option<u32>,
     expect_body: Option<String>,
     check_assets: bool,
+    interval_secs: Option<u32>,
+    timeout_secs: Option<u32>,
+    expect_status: Vec<u16>,
+    headers: Vec<CheckHeader>,
+    alert_webhooks: Vec<String>,
+    alert_mentions: Vec<String>,
 }
 
 impl AppSettings {
@@ -133,13 +247,54 @@ impl AppSettings {
         let logs_url = Some(self.logs_url.trim().to_string()).filter(|u| !u.is_empty());
         let health_url = self.health_url.trim().to_string();
         if let Some(url) = &logs_url {
-            validate_url(url, "logs")?;
+            validate_url(url, "logs", &["http://", "https://"])?;
         }
-        validate_url(&health_url, "health")?;
+        validate_url(&health_url, "health", &["http://", "https://", "tcp://"])?;
         let expect_body = self
             .expect_body
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+        let interval_secs = self.interval_secs.filter(|&s| s > 0);
+        if interval_secs.is_some_and(|s| !(MIN_INTERVAL_SECS..=MAX_INTERVAL_SECS).contains(&s)) {
+            return Err(RegistryError::IntervalOutOfRange);
+        }
+        let timeout_secs = self.timeout_secs.filter(|&s| s > 0);
+        if timeout_secs.is_some_and(|s| s > MAX_TIMEOUT_SECS) {
+            return Err(RegistryError::TimeoutOutOfRange);
+        }
+        if let Some(&code) = self
+            .expect_status
+            .iter()
+            .find(|c| !(100..=599).contains(*c))
+        {
+            return Err(RegistryError::InvalidStatus(code));
+        }
+        if self.headers.len() > MAX_HEADERS {
+            return Err(RegistryError::TooMany("headers"));
+        }
+        if let Some(bad) = self.headers.iter().find(|h| h.validate().is_err()) {
+            return Err(RegistryError::InvalidHeader(bad.name.clone()));
+        }
+        let alert_webhooks = trimmed(self.alert_webhooks);
+        if alert_webhooks.len() > MAX_WEBHOOKS {
+            return Err(RegistryError::TooMany("webhooks"));
+        }
+        if let Some(bad) = alert_webhooks
+            .iter()
+            .find(|u| crate::alerts::Webhook::for_app(u).is_err())
+        {
+            return Err(RegistryError::InvalidWebhook(bad.clone()));
+        }
+        let alert_mentions = trimmed(self.alert_mentions);
+        if let Some(bad) = alert_mentions
+            .iter()
+            .find(|m| m.parse::<crate::alerts::Mention>().is_err())
+        {
+            return Err(RegistryError::InvalidMention(bad.clone()));
+        }
+        let mut expect_status = self.expect_status;
+        expect_status.sort_unstable();
+        expect_status.dedup();
         Ok(ValidSettings {
             name,
             logs_url,
@@ -147,24 +302,64 @@ impl AppSettings {
             degraded_after_ms: self.degraded_after_ms.filter(|&ms| ms > 0),
             expect_body,
             check_assets: self.check_assets,
+            interval_secs,
+            timeout_secs,
+            expect_status,
+            headers: self.headers,
+            alert_webhooks,
+            alert_mentions,
         })
     }
 }
 
+/// Trimmed, without blanks or duplicates, order kept.
+fn trimmed(entries: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let entry = entry.trim().to_string();
+        if !entry.is_empty() && !out.contains(&entry) {
+            out.push(entry);
+        }
+    }
+    out
+}
+
 impl RegisteredApp {
+    /// Where this app's alerts go besides the global webhooks.
+    #[must_use]
+    pub fn alert_route(&self) -> crate::alerts::AppRoute {
+        crate::alerts::AppRoute {
+            webhooks: self.alert_webhooks.clone(),
+            mentions: self.alert_mentions.clone(),
+        }
+    }
+
+    /// Whether this app gets health checks at all.
+    #[must_use]
+    pub fn is_monitored(&self) -> bool {
+        !self.paused && self.health_url.is_some()
+    }
+
+    fn apply(&mut self, settings: ValidSettings) {
+        self.name = settings.name;
+        self.logs_url = settings.logs_url;
+        self.health_url = Some(settings.health_url);
+        self.degraded_after_ms = settings.degraded_after_ms;
+        self.expect_body = settings.expect_body;
+        self.check_assets = settings.check_assets;
+        self.interval_secs = settings.interval_secs;
+        self.timeout_secs = settings.timeout_secs;
+        self.expect_status = settings.expect_status;
+        self.headers = settings.headers;
+        self.alert_webhooks = settings.alert_webhooks;
+        self.alert_mentions = settings.alert_mentions;
+    }
+
     /// Constant-time comparison, so response timing doesn't leak how much of a guessed
     /// token was right.
     #[must_use]
     pub fn embed_token_matches(&self, candidate: &str) -> bool {
-        let expected = self.embed_token.as_bytes();
-        let candidate = candidate.as_bytes();
-        !expected.is_empty()
-            && expected.len() == candidate.len()
-            && expected
-                .iter()
-                .zip(candidate)
-                .fold(0u8, |diff, (a, b)| diff | (a ^ b))
-                == 0
+        crate::token::secret_matches(&self.embed_token, candidate)
     }
 }
 
@@ -198,8 +393,8 @@ fn slugify(name: &str) -> String {
     slug
 }
 
-fn validate_url(url: &str, label: &'static str) -> Result<()> {
-    if url.starts_with("http://") || url.starts_with("https://") {
+fn validate_url(url: &str, label: &'static str, schemes: &[&str]) -> Result<()> {
+    if schemes.iter().any(|scheme| url.starts_with(scheme)) {
         Ok(())
     } else {
         Err(RegistryError::InvalidUrl(label))
@@ -232,6 +427,7 @@ impl AppRegistry {
         Ok(registry)
     }
 
+    /// Temp file + rename, so a crash mid-write never leaves a truncated registry.
     async fn persist(&self, apps: &[RegisteredApp]) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             tokio::fs::create_dir_all(parent)
@@ -242,7 +438,11 @@ impl AppRegistry {
             path: self.path.clone(),
             source,
         })?;
-        tokio::fs::write(&self.path, raw)
+        let tmp = self.path.with_extension("json.tmp");
+        tokio::fs::write(&tmp, raw)
+            .await
+            .map_err(RegistryError::io(&tmp))?;
+        tokio::fs::rename(&tmp, &self.path)
             .await
             .map_err(RegistryError::io(&self.path))
     }
@@ -274,18 +474,28 @@ impl AppRegistry {
         if apps.iter().any(|a| a.slug == slug) {
             return Err(RegistryError::SlugTaken);
         }
-        apps.push(RegisteredApp {
+        let mut app = RegisteredApp {
             slug: slug.clone(),
-            name: settings.name,
-            logs_url: settings.logs_url,
-            health_url: Some(settings.health_url),
+            name: String::new(),
+            logs_url: None,
+            health_url: None,
             embed_token: new_embed_token()?,
             paused: false,
             public: false,
-            degraded_after_ms: settings.degraded_after_ms,
-            expect_body: settings.expect_body,
-            check_assets: settings.check_assets,
-        });
+            degraded_after_ms: None,
+            expect_body: None,
+            check_assets: false,
+            paused_at: None,
+            paused_until: None,
+            interval_secs: None,
+            timeout_secs: None,
+            expect_status: Vec::new(),
+            headers: Vec::new(),
+            alert_webhooks: Vec::new(),
+            alert_mentions: Vec::new(),
+        };
+        app.apply(settings);
+        apps.push(app);
         self.persist(&apps).await?;
         Ok(slug)
     }
@@ -309,23 +519,46 @@ impl AppRegistry {
     pub async fn update(&self, slug: &str, settings: AppSettings) -> Result<()> {
         let settings = settings.normalized()?;
         self.modify(slug, |app| {
-            app.name = settings.name;
-            app.logs_url = settings.logs_url;
-            app.health_url = Some(settings.health_url);
-            app.degraded_after_ms = settings.degraded_after_ms;
-            app.expect_body = settings.expect_body;
-            app.check_assets = settings.check_assets;
+            app.apply(settings);
             Ok(())
         })
         .await
     }
 
-    pub async fn set_paused(&self, slug: &str, paused: bool) -> Result<()> {
+    /// Pauses (optionally until `until`, unix seconds) or resumes an app's checks.
+    pub async fn set_paused(&self, slug: &str, paused: bool, until: Option<u64>) -> Result<()> {
+        let now = crate::uptime::unix_now();
         self.modify(slug, |app| {
+            // Re-pausing a paused app (e.g. to set an end time) keeps when the pause began.
+            app.paused_at = match (paused, app.paused) {
+                (true, true) => app.paused_at.or(Some(now)),
+                (true, false) => Some(now),
+                (false, _) => None,
+            };
             app.paused = paused;
+            app.paused_until = until.filter(|_| paused);
             Ok(())
         })
         .await
+    }
+
+    /// Ends every scheduled pause whose time has come; returns the slugs it resumed.
+    pub async fn resume_expired(&self, now: u64) -> Result<Vec<String>> {
+        let mut apps = self.apps.write().await;
+        let mut resumed = Vec::new();
+        for app in apps
+            .iter_mut()
+            .filter(|a| a.paused && a.paused_until.is_some_and(|until| until <= now))
+        {
+            app.paused = false;
+            app.paused_at = None;
+            app.paused_until = None;
+            resumed.push(app.slug.clone());
+        }
+        if !resumed.is_empty() {
+            self.persist(&apps).await?;
+        }
+        Ok(resumed)
     }
 
     pub async fn set_public(&self, slug: &str, public: bool) -> Result<()> {
@@ -388,7 +621,7 @@ mod tests {
         changed.degraded_after_ms = Some(1500);
         changed.expect_body = Some("  ok  ".to_string());
         registry.update(&slug, changed).await.unwrap();
-        registry.set_paused(&slug, true).await.unwrap();
+        registry.set_paused(&slug, true, None).await.unwrap();
         registry.set_public(&slug, true).await.unwrap();
 
         let app = AppRegistry::load(&file)
@@ -603,5 +836,118 @@ mod tests {
         assert!(app.check_assets);
         // The field is left out of the file entirely.
         assert!(!std::fs::read_to_string(&file).unwrap().contains("logs_url"));
+    }
+
+    /// Breaks one field, then checks the error it produces.
+    type Case = (fn(&mut AppSettings), fn(&RegistryError) -> bool);
+
+    #[tokio::test]
+    async fn check_options_are_validated_and_normalized() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = AppRegistry::load(dir.path().join("apps.json"))
+            .await
+            .unwrap();
+        let mut good = settings("Db", "", "tcp://db.example.com:5432");
+        good.interval_secs = Some(30);
+        good.expect_status = vec![401, 200, 401];
+        good.headers = vec![CheckHeader::parse_line("X-Token: abc").unwrap()];
+        good.alert_webhooks = vec![
+            " https://hooks.slack.com/services/T/B/x ".into(),
+            String::new(),
+        ];
+        good.alert_mentions = vec!["U0TEAM".into()];
+        let slug = registry.add(good).await.unwrap();
+        let app = registry.find(&slug).await.unwrap();
+        assert_eq!(app.expect_status, [200, 401]);
+        assert_eq!(
+            app.alert_webhooks,
+            ["https://hooks.slack.com/services/T/B/x"]
+        );
+        assert_eq!(app.alert_route().mentions, ["U0TEAM"]);
+
+        let cases: [Case; 5] = [
+            (
+                |s| s.interval_secs = Some(5),
+                |e| matches!(e, RegistryError::IntervalOutOfRange),
+            ),
+            (
+                |s| s.timeout_secs = Some(600),
+                |e| matches!(e, RegistryError::TimeoutOutOfRange),
+            ),
+            (
+                |s| s.expect_status = vec![42],
+                |e| matches!(e, RegistryError::InvalidStatus(42)),
+            ),
+            (
+                |s| s.alert_webhooks = vec!["http://hooks.example.com/x".into()],
+                |e| matches!(e, RegistryError::InvalidWebhook(_)),
+            ),
+            (
+                |s| s.alert_mentions = vec!["@someone".into()],
+                |e| matches!(e, RegistryError::InvalidMention(_)),
+            ),
+        ];
+        for (i, (break_it, expected)) in cases.into_iter().enumerate() {
+            let mut bad = settings(&format!("Bad {i}"), "", "https://x.example.com/health");
+            break_it(&mut bad);
+            let err = registry.add(bad).await.unwrap_err();
+            assert!(expected(&err), "case {i}: {err}");
+        }
+    }
+
+    #[test]
+    fn headers_parse_from_lines_and_reserved_ones_are_refused() {
+        let h = CheckHeader::parse_line("Authorization:  Bearer x ").unwrap();
+        assert_eq!(
+            (h.name.as_str(), h.value.as_str()),
+            ("Authorization", "Bearer x")
+        );
+        for bad in [
+            "no colon",
+            "Host: evil.example.com",
+            "Bad Name: x",
+            "Connection: close",
+        ] {
+            assert!(CheckHeader::parse_line(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduled_pauses_end_by_themselves() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = AppRegistry::load(dir.path().join("apps.json"))
+            .await
+            .unwrap();
+        let a = registry
+            .add(settings("A", "", "https://x/health"))
+            .await
+            .unwrap();
+        let b = registry
+            .add(settings("B", "", "https://y/health"))
+            .await
+            .unwrap();
+        registry.set_paused(&a, true, Some(1000)).await.unwrap();
+        registry.set_paused(&b, true, None).await.unwrap();
+        let paused_at = registry.find(&b).await.unwrap().paused_at;
+        assert!(paused_at.is_some());
+
+        assert_eq!(
+            registry.resume_expired(999).await.unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(registry.resume_expired(1000).await.unwrap(), [a.as_str()]);
+        let resumed = registry.find(&a).await.unwrap();
+        assert!(!resumed.paused && resumed.paused_until.is_none() && resumed.paused_at.is_none());
+        assert!(
+            registry.find(&b).await.unwrap().paused,
+            "indefinite pauses stay"
+        );
+
+        registry.set_paused(&b, true, Some(5000)).await.unwrap();
+        assert_eq!(
+            registry.find(&b).await.unwrap().paused_at,
+            paused_at,
+            "rescheduling keeps when the pause began"
+        );
     }
 }
