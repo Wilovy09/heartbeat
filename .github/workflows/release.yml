@@ -39,7 +39,7 @@ jobs:
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           # From inside dist/ so the checksum file names the bare file, not "dist/...".
           (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-${{ matrix.arch }}
           path: dist/*.tar.gz*
