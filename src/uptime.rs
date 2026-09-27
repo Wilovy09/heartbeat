@@ -926,9 +926,10 @@ impl UptimeMonitor {
         if checks + days > 0 {
             tracing::info!(checks, days, "uptime: pruned old history");
         }
-        // Lets SQLite refresh its query planner statistics now and then.
+        // Lets SQLite refresh its query planner statistics now and then. It may write
+        // them, so it runs on the writer.
         self.db
-            .read(|conn| Ok(conn.execute_batch("PRAGMA optimize")?))
+            .write(|tx| Ok(tx.execute_batch("PRAGMA optimize")?))
             .await?;
         Ok(())
     }
@@ -1209,6 +1210,24 @@ mod tests {
         let left = db.read(|conn| store::since(conn, "app", 0)).await.unwrap();
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].at, 5 * DAY_SECS + 10);
+    }
+
+    #[tokio::test]
+    async fn the_hourly_prune_runs_on_a_file_database() {
+        // A file database has read-only readers next to the writer (memory ones don't):
+        // everything the prune does must go through the writer.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("heartbeat.db")).await.unwrap();
+        let app = registered("app");
+        db.write(move |tx| crate::registry::save_app(tx, &app))
+            .await
+            .unwrap();
+        store_beats(&db, "app", vec![beat(10, Status::Up, None)]).await;
+        let monitor = UptimeMonitor::load(db, policy(), outbound(), Notifiers::default())
+            .await
+            .unwrap();
+        monitor.prune(unix_now()).await.unwrap();
+        assert!(monitor.export("app", RETENTION * 100).await.is_empty());
     }
 
     #[tokio::test]

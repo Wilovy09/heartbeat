@@ -86,6 +86,10 @@ async fn main() -> ExitCode {
     if std::env::args().nth(1).as_deref() == Some("migrate") {
         return migrate_command().await;
     }
+    // `heartbeat backup <file>`: a consistent copy of the database, taken while it runs.
+    if std::env::args().nth(1).as_deref() == Some("backup") {
+        return backup_command().await;
+    }
 
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
@@ -237,6 +241,46 @@ async fn migrate_command() -> ExitCode {
         }
         Err(e) => {
             eprintln!("Migration failed, nothing was changed: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn backup_command() -> ExitCode {
+    let Some(dest) = std::env::args().nth(2) else {
+        eprintln!("Usage: heartbeat backup <file>");
+        return ExitCode::FAILURE;
+    };
+    let cfg = match Config::from_env() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // Opening a missing path would create an empty database and back that up.
+    if !std::path::Path::new(&cfg.database_path).exists() {
+        eprintln!(
+            "There's no database at {} (DATABASE_PATH).",
+            cfg.database_path
+        );
+        return ExitCode::FAILURE;
+    }
+    let result = match db::Db::open(&cfg.database_path).await {
+        Ok(db) => db.backup_to(dest.clone().into()).await,
+        Err(e) => Err(e),
+    };
+    match result {
+        Ok(bytes) => {
+            println!(
+                "Backed up {} to {dest} ({} KB)",
+                cfg.database_path,
+                bytes / 1024
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("Backup failed: {e}");
             ExitCode::FAILURE
         }
     }

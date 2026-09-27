@@ -65,6 +65,8 @@ pub enum DbError {
     },
     #[error("a database task failed: {0}")]
     Task(#[from] tokio::task::JoinError),
+    #[error("{0} already exists: a backup never overwrites a file")]
+    BackupExists(PathBuf),
 }
 
 impl crate::i18n::Localize for DbError {
@@ -176,13 +178,19 @@ impl Db {
     {
         let inner = Arc::clone(&self.inner);
         tokio::task::spawn_blocking(move || {
-            let conn = if inner.readers.is_empty() {
-                &inner.writer
-            } else {
-                let i = inner.next_reader.fetch_add(1, Ordering::Relaxed) % inner.readers.len();
-                &inner.readers[i]
-            };
-            f(&conn.lock().unwrap_or_else(PoisonError::into_inner))
+            if inner.readers.is_empty() {
+                // In memory the writer serves reads too; `query_only` makes it refuse
+                // writes meanwhile, like a file database's readers do.
+                let conn = inner.writer.lock().unwrap_or_else(PoisonError::into_inner);
+                conn.pragma_update(None, "query_only", true)?;
+                let result = f(&conn);
+                conn.pragma_update(None, "query_only", false)?;
+                return result;
+            }
+            let i = inner.next_reader.fetch_add(1, Ordering::Relaxed) % inner.readers.len();
+            f(&inner.readers[i]
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner))
         })
         .await?
     }
@@ -203,6 +211,66 @@ impl Db {
             let value = f(&tx)?;
             tx.commit()?;
             Ok(value)
+        })
+        .await?
+    }
+}
+
+impl Db {
+    /// Copies the database to `dest` while it stays in use (SQLite's online backup: other
+    /// connections keep reading and writing), then checks the copy. `dest` must not exist;
+    /// it's created for this user only, as a plain (non-WAL) database file. Returns its size.
+    pub async fn backup_to(&self, dest: PathBuf) -> Result<u64, DbError> {
+        let inner = Arc::clone(&self.inner);
+        tokio::task::spawn_blocking(move || {
+            let io = |source| DbError::Io {
+                path: dest.clone(),
+                source,
+            };
+            if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent).map_err(io)?;
+            }
+            // Reserves the name (and its permissions) before anything is written.
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+            match options.open(&dest) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Err(DbError::BackupExists(dest));
+                }
+                Err(e) => return Err(io(e)),
+            }
+            let copy = || -> Result<(), DbError> {
+                let source = inner
+                    .readers
+                    .first()
+                    .unwrap_or(&inner.writer)
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                let mut target = Connection::open(&dest)?;
+                rusqlite::backup::Backup::new(&source, &mut target)?.run_to_completion(
+                    256,
+                    Duration::from_millis(25),
+                    None,
+                )?;
+                drop(source);
+                target.pragma_update(None, "journal_mode", "DELETE")?;
+                let check: String = target.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+                if check != "ok" {
+                    return Err(DbError::Integrity(format!(
+                        "the backup failed its check: {check}"
+                    )));
+                }
+                Ok(())
+            };
+            if let Err(e) = copy() {
+                // Don't leave a half-written file that looks like a backup.
+                let _ = std::fs::remove_file(&dest);
+                return Err(e);
+            }
+            Ok(std::fs::metadata(&dest).map_err(io)?.len())
         })
         .await?
     }
@@ -402,6 +470,58 @@ mod tests {
             matches!(err, DbError::TooNew { found: 99, supported, .. } if supported == MIGRATIONS.len()),
             "{err}"
         );
+    }
+
+    #[tokio::test]
+    async fn backups_copy_a_live_database_and_never_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("heartbeat.db")).await.unwrap();
+        db.write(|tx| {
+            tx.execute("INSERT INTO kv (key, value) VALUES ('k', 'v')", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let dest = dir.path().join("backups/copy.db");
+        let size = db.backup_to(dest.clone()).await.unwrap();
+        assert!(size > 0);
+        let copy = Connection::open(&dest).unwrap();
+        let value: String = copy
+            .query_row("SELECT value FROM kv WHERE key = 'k'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(value, "v");
+        let mode: String = copy
+            .pragma_query_value(None, "journal_mode", |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete", "a backup is a single self-contained file");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert!(matches!(
+            db.backup_to(dest).await,
+            Err(DbError::BackupExists(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn reads_cannot_write_in_memory_either() {
+        let db = Db::open_in_memory();
+        let result = db
+            .read(|conn| {
+                conn.execute("INSERT INTO kv (key, value) VALUES ('k', 'v')", [])?;
+                Ok(())
+            })
+            .await;
+        assert!(result.is_err());
+        db.write(|tx| {
+            tx.execute("INSERT INTO kv (key, value) VALUES ('k', 'v')", [])?;
+            Ok(())
+        })
+        .await
+        .expect("writes work again after the read");
     }
 
     #[tokio::test]
