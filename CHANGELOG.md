@@ -21,6 +21,8 @@ before 0.2.0 were reconstructed from the git history.
 - Landing page and documentation in English and Spanish (`site/`), built from the READMEs
   with the app's own color tokens (system, light and dark) and published to GitHub Pages
   on every push to `main` (`.github/workflows/pages.yml`). `just site` previews it.
+- Theme builder page: pick the base colors on a live copy of the dashboard, check the
+  text contrast and copy or download the CSS for Settings → Custom theme.
 
 ## [0.2.0] - 2026-09-26
 
