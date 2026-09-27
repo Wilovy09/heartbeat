@@ -1191,6 +1191,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn events_match_a_full_scan_on_random_histories() {
+        // Every flip, found the slow way: walk the whole history.
+        fn full_scan(beats: &[Heartbeat], max: usize) -> Vec<u64> {
+            let mut events: Vec<u64> = beats
+                .iter()
+                .enumerate()
+                .filter(|(i, b)| *i == 0 || beats[i - 1].status != b.status)
+                .map(|(_, b)| b.at)
+                .collect();
+            events.reverse();
+            events.truncate(max);
+            events
+        }
+        let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
+        for round in 0..50 {
+            let db = db_with(&["app"]).await;
+            let len = 1 + usize::try_from(seed % 200).unwrap();
+            let beats: Vec<Heartbeat> = (0..len)
+                .map(|i| {
+                    // xorshift: runs of every length, including single checks.
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    let status = match seed % 7 {
+                        0 => Status::Down,
+                        1 => Status::Degraded,
+                        _ => Status::Up,
+                    };
+                    beat(1000 + 60 * i as u64, status, None)
+                })
+                .collect();
+            store_beats(&db, "app", beats.clone()).await;
+            for max in [1, 5, 30] {
+                let found: Vec<u64> = db
+                    .read(move |conn| store::events(conn, "app", max))
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|b| b.at)
+                    .collect();
+                assert_eq!(found, full_scan(&beats, max), "round {round}, max {max}");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn prune_drops_checks_and_days_past_their_retention() {
         let db = db_with(&["app"]).await;
         store_beats(
