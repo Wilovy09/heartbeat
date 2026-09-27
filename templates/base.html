@@ -9,39 +9,10 @@
   <script src="/static/i18n/{{ lang() }}.js"></script>
   <script src="/static/i18n/t.js"></script>
   <script defer src="/libs/alpinejs/alpine.js"></script>
+  <link rel="stylesheet" href="/static/tokens.css">
+  <link rel="stylesheet" href="/theme/custom.css" id="hb-custom-theme" media="not all">
+  <script src="/static/theme.js"></script>
   <style>
-    :root {
-      /* Monitor glass and the bays mounted on it: one hue, lightness steps only. */
-      --glass: #0b0c0e;
-      --bay: #111316;
-      --bay-raised: #171a1e;
-      --well: #08090a;
-      /* Graticule: the grid lines of the monitor, doubling as every border. */
-      --graticule-soft: rgba(255, 255, 255, 0.045);
-      --graticule: rgba(255, 255, 255, 0.075);
-      --graticule-strong: rgba(255, 255, 255, 0.12);
-      /* Ink, four tiers. */
-      --ink: #e7e9ec;
-      --ink-2: #a4a9b1;
-      --ink-3: #6e737c;
-      --ink-4: #454a52;
-      /* Rhythm: the only color on screen, and it always means state. */
-      --rhythm-up: #3fd68a;
-      --rhythm-degraded: #f0b43c;
-      --rhythm-down: #f0514e;
-      --rhythm-flat: #262a30;
-      --pulse: #dd1818; /* brand: logo only, never a state */
-
-      --font-sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-      --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
-
-      /* Legacy names still used by the per-app log viewer. */
-      --bg: var(--glass); --panel: var(--bay); --border: var(--graticule-strong);
-      --text: var(--ink); --muted: var(--ink-3); --accent: var(--ink-2);
-      --info: #8aa4e8; --warn: var(--rhythm-degraded); --error: var(--rhythm-down); --debug: var(--ink-3);
-      --up: var(--rhythm-up); --unknown: var(--rhythm-flat);
-    }
     * { box-sizing: border-box; }
     html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
     body { margin: 0; background: var(--glass); color: var(--ink); font: 14px/1.5 var(--font-sans); }
@@ -49,14 +20,38 @@
     a { color: inherit; }
 
     /* Top bar */
-    .topbar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 24px; height: 52px; padding: 0 24px; background: rgba(11, 12, 14, 0.86); backdrop-filter: blur(10px); border-bottom: 1px solid var(--graticule); }
+    .topbar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 24px; height: 52px; padding: 0 24px; background: var(--topbar); backdrop-filter: blur(10px); border-bottom: 1px solid var(--graticule); }
     .brand { display: flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; font-weight: 600; font-size: 15px; letter-spacing: -0.01em; }
     .brand img { width: 22px; height: 22px; border-radius: 6px; }
     .topnav { display: flex; gap: 2px; }
     .topnav a { padding: 6px 10px; border-radius: 6px; color: var(--ink-3); text-decoration: none; font-size: 13px; font-weight: 500; transition: color 120ms, background-color 120ms; }
     .topnav a:hover { color: var(--ink); }
     .topnav a.active { color: var(--ink); background: var(--bay-raised); }
-    .topbar .logout { margin-left: auto; }
+    .topbar-end { display: flex; align-items: center; gap: 12px; margin-left: auto; }
+
+    /* Disclosure menus (theme, pause): a <details> with a floating panel. */
+    .menu { position: relative; }
+    .menu > summary { list-style: none; cursor: pointer; }
+    .menu > summary::-webkit-details-marker { display: none; }
+    .menu-pop { position: absolute; right: 0; top: calc(100% + 4px); z-index: 30; min-width: 180px; display: flex; flex-direction: column; padding: 4px; background: var(--bay-raised); border: 1px solid var(--graticule-strong); border-radius: 8px; box-shadow: 0 8px 24px var(--shadow); transform-origin: top right; animation: menu-in 150ms var(--ease-out); }
+    .menu-label { padding: 6px 10px 4px; font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); }
+    .menu-pop button { display: flex; align-items: center; gap: 10px; height: 30px; padding: 0 10px; border: 0; border-radius: 6px; background: none; color: var(--ink); font: 13px var(--font-sans); text-align: left; cursor: pointer; }
+    .menu-pop button:hover, .menu-pop button:focus-visible { background: var(--bay); outline: none; }
+    @keyframes menu-in { from { opacity: 0; transform: scale(0.96); } }
+    @media (prefers-reduced-motion: reduce) { .menu-pop { animation: none; } }
+
+    /* Theme switch: the icon shows the current theme; the menu marks the chosen one. */
+    .theme-btn { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 6px; color: var(--ink-3); transition: color 120ms, background-color 120ms; }
+    .theme-btn:hover, .theme-menu[open] > .theme-btn { color: var(--ink); background: var(--bay-raised); }
+    .theme-btn .ico { width: 16px; height: 16px; display: none; }
+    :root[data-theme-choice="dark"] .ico-dark, :root[data-theme-choice="light"] .ico-light,
+    :root[data-theme-choice="system"] .ico-system, :root[data-theme-choice="custom"] .ico-custom { display: block; }
+    .theme-menu .menu-pop button[aria-checked="true"]::after { content: "✓"; margin-left: auto; color: var(--ink-2); }
+    .swatch { width: 12px; height: 12px; border-radius: 3px; box-shadow: inset 0 0 0 1px var(--graticule-strong); }
+    .swatch-dark { background: #0b0c0e; }
+    .swatch-light { background: #f3f4f6; }
+    .swatch-system { background: linear-gradient(135deg, #0b0c0e 50%, #f3f4f6 50%); }
+    .swatch-custom { background: conic-gradient(var(--rhythm-up) 0 33%, var(--rhythm-degraded) 0 66%, var(--rhythm-down) 0); }
     .topbar .logout button { background: none; border: 0; padding: 6px 0; color: var(--ink-3); font: 13px var(--font-sans); cursor: pointer; }
     .topbar .logout button:hover { color: var(--ink); }
     main { padding: 24px; max-width: 1440px; margin: 0 auto; }
@@ -73,37 +68,37 @@
 
     /* Controls */
     .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: 6px; border: 1px solid transparent; background: var(--ink); color: var(--glass); font: 500 13px/1 var(--font-sans); cursor: pointer; text-decoration: none; white-space: nowrap; transition: background-color 120ms, border-color 120ms, color 120ms, transform 120ms var(--ease-out); }
-    .btn:hover { background: #ffffff; }
+    .btn:hover { background: var(--btn-hover); }
     .btn:active { transform: scale(0.97); }
-    .btn:focus-visible, input:focus-visible, select:focus-visible, .topnav a:focus-visible, summary:focus-visible { outline: 2px solid rgba(231, 233, 236, 0.35); outline-offset: 2px; }
+    .btn:focus-visible, input:focus-visible, select:focus-visible, .topnav a:focus-visible, summary:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
     .btn.secondary { background: transparent; border-color: var(--graticule-strong); color: var(--ink); }
     .btn.secondary:hover { background: var(--bay-raised); }
     .btn.ghost { background: transparent; color: var(--ink-3); }
     .btn.ghost:hover { color: var(--ink); background: var(--bay-raised); }
-    .btn.danger { background: transparent; border-color: rgba(240, 81, 78, 0.28); color: var(--rhythm-down); }
-    .btn.danger:hover { background: rgba(240, 81, 78, 0.08); }
+    .btn.danger { background: transparent; border-color: var(--down-line); color: var(--rhythm-down); }
+    .btn.danger:hover { background: var(--down-tint); }
     .btn:disabled { opacity: 0.5; cursor: default; transform: none; }
     input, select { height: 34px; background: var(--well); border: 1px solid var(--graticule-strong); color: var(--ink); padding: 0 10px; border-radius: 6px; font: 13px var(--font-sans); transition: border-color 120ms; }
     input::placeholder { color: var(--ink-4); }
-    input:hover, select:hover, textarea:hover { border-color: rgba(255, 255, 255, 0.18); }
+    input:hover, select:hover, textarea:hover { border-color: var(--input-border-hover); }
     textarea { min-height: 58px; padding: 8px 10px; background: var(--well); border: 1px solid var(--graticule-strong); border-radius: 6px; color: var(--ink); font: 13px/1.5 var(--font-sans); transition: border-color 120ms; }
     textarea::placeholder { color: var(--ink-4); }
-    textarea:focus-visible { outline: 2px solid rgba(231, 233, 236, 0.35); outline-offset: 2px; }
+    textarea:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
     input[type="checkbox"] { accent-color: var(--ink); width: 14px; height: 14px; }
     label { font-size: 11px; font-weight: 500; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.06em; display: block; margin-bottom: 6px; }
     table { width: 100%; border-collapse: collapse; }
     th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--graticule-soft); font-size: 13px; }
     th { color: var(--ink-3); text-transform: uppercase; font-size: 11px; font-weight: 500; letter-spacing: 0.06em; }
     .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
-    .error-box { background: rgba(240, 81, 78, 0.08); color: #f7a3a1; border: 1px solid rgba(240, 81, 78, 0.25); padding: 10px 12px; border-radius: 6px; font-size: 13px; margin-bottom: 16px; }
+    .error-box { background: var(--down-tint); color: var(--down-ink); border: 1px solid var(--down-line); padding: 10px 12px; border-radius: 6px; font-size: 13px; margin-bottom: 16px; }
     .empty { color: var(--ink-3); font-size: 13px; }
     .empty a { color: var(--ink); }
 
     /* Vital: the status dot. Alive = beats; slow when degraded; flatline when down. */
-    .vital { position: relative; flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; background: var(--rhythm-flat); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12); }
+    .vital { position: relative; flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; background: var(--rhythm-flat); box-shadow: inset 0 0 0 1px var(--overlay-strong); }
     .vital.st-up { background: var(--rhythm-up); box-shadow: none; }
     .vital.st-degraded { background: var(--rhythm-degraded); box-shadow: none; }
-    .vital.st-down { background: var(--rhythm-down); box-shadow: 0 0 0 3px rgba(240, 81, 78, 0.18); }
+    .vital.st-down { background: var(--rhythm-down); box-shadow: 0 0 0 3px var(--down-halo); }
     .vital.st-paused { background: transparent; box-shadow: inset 0 0 0 1.5px var(--ink-3); }
     .vital.st-up::after, .vital.st-degraded::after { content: ""; position: absolute; inset: 0; border-radius: 50%; background: inherit; animation: beat 2.4s var(--ease-out) infinite; }
     .vital.st-degraded::after { animation-duration: 3.6s; }
@@ -124,12 +119,12 @@
 
     /* Log viewer */
     .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
-    .tag-info { background: rgba(138, 164, 232, 0.12); color: var(--info); }
-    .tag-warn { background: rgba(240, 180, 60, 0.12); color: var(--warn); }
-    .tag-error { background: rgba(240, 81, 78, 0.12); color: var(--error); }
-    .tag-debug, .tag-trace { background: rgba(110, 115, 124, 0.14); color: var(--debug); }
+    .tag-info { background: var(--info-tint); color: var(--info); }
+    .tag-warn { background: var(--degraded-tint); color: var(--warn); }
+    .tag-error { background: var(--down-tint-strong); color: var(--error); }
+    .tag-debug, .tag-trace { background: var(--debug-tint); color: var(--debug); }
     .logline { position: relative; border-bottom: 1px solid var(--graticule-soft); padding: 6px 30px 6px 2px; font-family: var(--font-mono); font-size: 12px; cursor: pointer; }
-    .logline:hover { background: rgba(255, 255, 255, 0.02); }
+    .logline:hover { background: var(--overlay); }
     .logline pre { white-space: pre-wrap; word-break: break-word; margin: 6px 0 0; color: var(--ink-2); }
     .copy-btn {
       position: absolute; top: 4px; right: 4px; width: 22px; height: 22px;
@@ -156,7 +151,10 @@
       <a href="/settings" class="{% if active == "settings" %}active{% endif %}">{{ t(k="nav.settings") }}</a>
       {% endif %}
     </nav>
-    <form class="logout" method="post" action="/logout"><button type="submit">{{ t(k="nav.logout") }}</button></form>
+    <div class="topbar-end">
+      {% include "partials/theme_menu.html" %}
+      <form class="logout" method="post" action="/logout"><button type="submit">{{ t(k="nav.logout") }}</button></form>
+    </div>
     {% endblock %}
   </header>
   <main>

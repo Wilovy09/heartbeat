@@ -133,6 +133,8 @@ pub struct Config {
     pub sessions_file: String,
     /// Where the /status incident notices are stored.
     pub notices_file: String,
+    /// Where the custom theme CSS (edited in /settings) is stored.
+    pub theme_file: String,
     /// Bearer token for `GET /metrics`; `None` = the endpoint is off.
     pub metrics_token: Option<String>,
     /// Comma-separated hosts registered apps' URLs may point at (`*.example.com` = any
@@ -217,6 +219,7 @@ impl Config {
                 .unwrap_or_else(|| "./data/sessions.json".to_string()),
             notices_file: optional("NOTICES_FILE")
                 .unwrap_or_else(|| "./data/notices.json".to_string()),
+            theme_file: optional("THEME_FILE").unwrap_or_else(|| "./data/theme.css".to_string()),
             metrics_token: optional("METRICS_TOKEN"),
             allowed_hosts: required("ALLOWED_HOSTS")?,
             cookie_secure: parsed("COOKIE_SECURE", true)?,

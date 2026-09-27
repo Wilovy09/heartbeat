@@ -159,3 +159,100 @@ function settingsPage(templates = []) {
     },
   };
 }
+
+// Alpine component for the custom theme editor: preview on this page, upload a .css,
+// start from the current tokens, save to /settings/theme.
+function themeEditor(initial = '') {
+  return {
+    css: initial,
+    saved: initial,
+    saving: false,
+    previewing: false,
+    error: '',
+    savedNote: '',
+
+    stateLabel() {
+      if (this.css !== this.saved) return T('settings.unsaved');
+      return this.saved.trim() ? T('theme.state_set') : T('theme.state_empty');
+    },
+
+    // The default tokens (the first :root block of tokens.css), as a starting point.
+    async insertTemplate() {
+      try {
+        const source = await (await fetch('/static/tokens.css')).text();
+        const start = source.indexOf(':root {');
+        const end = source.indexOf('\n}', start);
+        if (start >= 0 && end > start) this.css = source.slice(start, end + 2).trim() + '\n';
+      } catch (e) {
+        this.error = e.message;
+      }
+    },
+
+    upload(event) {
+      const file = event.target.files && event.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => { this.css = String(reader.result || ''); this.error = ''; };
+      reader.readAsText(file);
+      event.target.value = '';
+    },
+
+    download() {
+      const url = URL.createObjectURL(new Blob([this.css], { type: 'text/css' }));
+      const a = Object.assign(document.createElement('a'), { href: url, download: 'heartbeat-theme.css' });
+      a.click();
+      URL.revokeObjectURL(url);
+    },
+
+    // Applies the textarea to this page only, as a <style> (textContent: nothing in it is
+    // parsed as HTML), on top of the dark tokens like the real custom theme.
+    preview() {
+      let style = document.getElementById('hb-theme-preview');
+      if (!style) {
+        style = document.createElement('style');
+        style.id = 'hb-theme-preview';
+        document.head.appendChild(style);
+      }
+      style.textContent = this.css;
+      document.getElementById('hb-custom-theme').media = 'not all';
+      document.documentElement.dataset.theme = 'custom';
+      document.dispatchEvent(new CustomEvent('hb:theme', { detail: 'custom' }));
+      this.previewing = true;
+    },
+
+    stopPreview() {
+      document.getElementById('hb-theme-preview')?.remove();
+      window.HBTheme.apply(window.HBTheme.current());
+      this.previewing = false;
+    },
+
+    async save() {
+      this.saving = true;
+      this.error = '';
+      this.savedNote = '';
+      try {
+        const resp = await fetch('/settings/theme', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ css: this.css }),
+        });
+        if (resp.status === 401) {
+          location.href = '/login';
+          return;
+        }
+        const body = await resp.json();
+        if (!resp.ok) throw new Error(body.error || `HTTP ${resp.status}`);
+        this.css = this.css.trim();
+        this.saved = this.css;
+        // Reload the served theme so pages using "Custom" pick it up right away.
+        document.getElementById('hb-custom-theme').href = `/theme/custom.css?v=${Date.now()}`;
+        this.savedNote = this.css ? T('theme.saved') : T('theme.removed');
+      } catch (e) {
+        this.error = e.message;
+      } finally {
+        this.saving = false;
+      }
+    },
+  };
+}

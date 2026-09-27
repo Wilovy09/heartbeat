@@ -22,6 +22,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             web::get().to(crate::assets::static_file),
         )
         .route("/healthz", web::get().to(health::healthz))
+        .route("/theme/custom.css", web::get().to(settings::custom_css))
+        .route("/settings/theme", web::post().to(settings::save_theme))
         .route("/status/{slug}", web::get().to(status::show))
         .route("/login", web::get().to(login::show_login))
         .route("/login", web::post().to(login::submit_login))

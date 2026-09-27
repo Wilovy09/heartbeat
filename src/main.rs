@@ -15,6 +15,7 @@ mod password;
 mod registry;
 mod routes;
 mod security;
+mod theme;
 mod token;
 mod uptime;
 
@@ -56,6 +57,8 @@ enum StartupError {
     Sessions(#[from] auth::SessionError),
     #[error(transparent)]
     Notices(#[from] notices::NoticeError),
+    #[error(transparent)]
+    Theme(#[from] theme::ThemeError),
     #[error("HTTP server error: {0}")]
     Server(#[from] std::io::Error),
 }
@@ -132,6 +135,7 @@ async fn run() -> Result<(), StartupError> {
 
     let sessions = SessionStore::load(&cfg.sessions_file).await?;
     let notices = notices::NoticeStore::load(&cfg.notices_file).await?;
+    let themes = theme::ThemeStore::load(&cfg.theme_file).await?;
 
     let auth_mode = match &cfg.auth {
         config::AuthMode::Upstream { .. } => "upstream",
@@ -155,6 +159,7 @@ async fn run() -> Result<(), StartupError> {
     let outbound_data = web::Data::new(outbound);
     let monitor_data = web::Data::new(monitor);
     let notices_data = web::Data::new(notices);
+    let themes_data = web::Data::new(themes);
 
     tokio::spawn(
         monitor_data
@@ -177,6 +182,7 @@ async fn run() -> Result<(), StartupError> {
             .app_data(outbound_data.clone())
             .app_data(monitor_data.clone())
             .app_data(notices_data.clone())
+            .app_data(themes_data.clone())
             .configure(routes::configure)
     })
     .bind((host, port))?

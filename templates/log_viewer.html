@@ -153,7 +153,7 @@
   .search kbd { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); min-width: 18px; height: 18px; padding: 0 4px; border: 1px solid var(--graticule-strong); border-radius: 4px; font: 11px/16px var(--font-mono); color: var(--ink-4); text-align: center; pointer-events: none; }
   .toolbar-end { display: flex; align-items: center; gap: 8px; margin-left: auto; }
   .freshness { font-size: 11px; color: var(--ink-3); white-space: nowrap; }
-  .live[aria-pressed="true"] { border-color: rgba(63, 214, 138, 0.35); }
+  .live[aria-pressed="true"] { border-color: var(--up-line); }
   .live .vital { width: 7px; height: 7px; }
   .btn .icon { width: 14px; height: 14px; }
   .btn .icon.spin { animation: icon-spin 0.9s linear infinite; }
@@ -197,11 +197,11 @@
   /* One log event: time · level · module · message + fields, on a fixed grid so the eye
      can run down each column. Errors and warnings carry a 2px bar in their state color. */
   .line { position: relative; font: 12px/1.55 var(--font-mono); border-left: 2px solid transparent; }
-  .line:hover { background: rgba(255, 255, 255, 0.025); }
-  .line.lv-error { border-left-color: var(--rhythm-down); background: rgba(240, 81, 78, 0.045); }
+  .line:hover { background: var(--overlay); }
+  .line.lv-error { border-left-color: var(--rhythm-down); background: var(--down-tint); }
   .line.lv-warn { border-left-color: var(--rhythm-degraded); }
   .line-main { display: grid; grid-template-columns: 96px 44px minmax(0, 180px) minmax(0, 1fr); gap: 12px; align-items: baseline; width: 100%; padding: 3px 40px 3px 14px; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-  .line-main:focus-visible { outline: 2px solid rgba(231, 233, 236, 0.35); outline-offset: -2px; }
+  .line-main:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
   .line-time { color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .line-level { font-size: 10px; font-weight: 600; letter-spacing: 0.04em; color: var(--ink-3); }
   .line-target { color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
@@ -210,7 +210,7 @@
   .line.open .line-msg, .raw-line .line-msg { overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; }
   .line-field { color: var(--ink-2); }
   .line-field .k { color: var(--ink-3); }
-  .line mark { background: rgba(231, 233, 236, 0.2); color: var(--ink); border-radius: 2px; box-shadow: 0 0 0 1px rgba(231, 233, 236, 0.2); }
+  .line mark { background: var(--highlight); color: var(--ink); border-radius: 2px; box-shadow: 0 0 0 1px var(--highlight); }
   .line.open { background: var(--bay); }
   .line-raw { margin: 2px 16px 8px 14px; padding: 10px 12px; border-radius: 6px; background: var(--well); border: 1px solid var(--graticule); color: var(--ink-2); font: 12px/1.6 var(--font-mono); white-space: pre-wrap; word-break: break-word; }
   .raw-line { display: block; padding: 3px 40px 3px 14px; }

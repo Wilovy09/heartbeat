@@ -36,6 +36,7 @@ struct TestState {
     monitor: web::Data<UptimeMonitor>,
     alerter: web::Data<Alerter>,
     notices: web::Data<NoticeStore>,
+    themes: web::Data<crate::theme::ThemeStore>,
 }
 
 async fn state() -> TestState {
@@ -73,6 +74,7 @@ async fn state() -> TestState {
         public_url: None,
         sessions_file: path("sessions.json"),
         notices_file: path("notices.json"),
+        theme_file: path("theme.css"),
         metrics_token: Some(METRICS_TOKEN.into()),
         allowed_hosts: "*.example.com".into(),
         cookie_secure: false,
@@ -109,6 +111,11 @@ async fn state() -> TestState {
         monitor: web::Data::new(monitor),
         alerter: web::Data::new(Alerter::new(AlertSettings::default()).unwrap()),
         notices: web::Data::new(NoticeStore::load(path("notices.json")).await.unwrap()),
+        themes: web::Data::new(
+            crate::theme::ThemeStore::load(path("theme.css"))
+                .await
+                .unwrap(),
+        ),
         tera: web::Data::new(tera),
         i18n: web::Data::new(i18n),
         cfg: web::Data::new(cfg),
@@ -132,6 +139,7 @@ macro_rules! app {
                 .app_data($s.monitor.clone())
                 .app_data($s.alerter.clone())
                 .app_data($s.notices.clone())
+                .app_data($s.themes.clone())
                 .configure(routes::configure),
         )
         .await
@@ -646,4 +654,51 @@ async fn status_pages_are_per_published_app_with_their_notices() {
             test::call_service(&app, test::TestRequest::get().uri(hidden).to_request()).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{hidden}");
     }
+}
+
+#[actix_web::test]
+async fn the_custom_theme_is_public_to_read_and_admin_only_to_write() {
+    let s = state().await;
+    let app = app!(s);
+    let save = |css: &str| post("/settings/theme").set_json(serde_json::json!({ "css": css }));
+    let viewer = login_as!(app, VIEWER_EMAIL);
+    let resp = test::call_service(&app, save(":root{}").cookie(viewer).to_request()).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    let admin = login_as!(app, ADMIN_EMAIL);
+    let refused = test::call_service(
+        &app,
+        save("@import 'https://evil.example/x.css';")
+            .cookie(admin.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    let ok = test::call_service(
+        &app,
+        save(":root { --glass: #101820; }")
+            .cookie(admin)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(ok.status(), StatusCode::OK);
+
+    let css = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/theme/custom.css")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(css.status(), StatusCode::OK);
+    assert!(
+        css.headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("text/css")
+    );
+    let body = String::from_utf8(test::read_body(css).await.to_vec()).unwrap();
+    assert_eq!(body, ":root { --glass: #101820; }");
 }
