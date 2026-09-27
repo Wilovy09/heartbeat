@@ -38,7 +38,7 @@
         {% for day in row.days %}<span class="day day-{{ day.level }}" data-day="{{ day.start }}" data-uptime="{{ day.uptime }}"></span>{% endfor %}
       </div>
       <div class="days-axis">
-        <span class="axis-full">{{ t(k="status.days_ago", n=history_days) }}</span><span class="axis-short">{{ t(k="status.days_ago", n=14) }}</span>
+        <span class="axis-full">{{ t(k="status.days_ago", n=history_days) }}</span><span class="axis-short">{{ t(k="status.days_ago", n=30) }}</span>
         <span class="axis-pct mono">{{ row.uptime }} {{ t(k="status.uptime_word") }}</span>
         <span>{{ t(k="status.today") }}</span>
       </div>
@@ -122,7 +122,7 @@
   .notice-body { margin: 0; font-size: 14px; line-height: 1.55; color: var(--ink-2); white-space: pre-wrap; text-wrap: pretty; }
   .notice-meta { margin: 0; font-size: 12px; color: var(--ink-3); }
 
-  /* Services: 30 daily bars, the latest on the right. */
+  /* Services: 90 daily bars, the latest on the right. */
   .service-list { padding: 0; }
   .service { padding: 18px 20px; }
   .service + .service { border-top: 1px solid var(--graticule-soft); }
@@ -130,8 +130,8 @@
   .service-name { flex: 1; min-width: 0; font-size: 12px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); }
   .service-state { font-size: 13px; font-weight: 500; }
   .service-state.st-text-paused, .service-state.st-text-unknown { color: var(--ink-3); }
-  .days { display: flex; gap: 3px; height: 32px; }
-  .day { flex: 1; border-radius: 2px; background: var(--rhythm-flat); transition: opacity 120ms; }
+  .days { display: flex; gap: 2px; height: 32px; }
+  .day { flex: 1; min-width: 0; border-radius: 1.5px; background: var(--rhythm-flat); transition: opacity 120ms; }
   .day-up { background: var(--rhythm-up); }
   .day-degraded { background: var(--rhythm-degraded); }
   .day-down { background: var(--rhythm-down); }
@@ -153,7 +153,7 @@
   .past-head h3 { font-size: 14px; font-weight: 600; }
   .past-state { font-size: 12px; color: var(--ink-3); }
   .status-foot { margin: 8px 0 0; text-align: center; font-size: 12px; color: var(--ink-4); }
-  /* 30 bars don't fit a phone comfortably: keep the latest 14. */
-  @media (max-width: 560px) { .days .day:nth-child(-n + 16) { display: none; } .axis-full { display: none; } .axis-short { display: inline; } .verdict-title { font-size: 22px; } }
+  /* 90 bars don't fit a phone: keep the latest 30. */
+  @media (max-width: 560px) { .days { gap: 3px; } .days .day:nth-child(-n + 60) { display: none; } .axis-full { display: none; } .axis-short { display: inline; } .verdict-title { font-size: 22px; } }
 </style>
 {% endblock %}

@@ -1,4 +1,4 @@
-"""Demo data for `just demo`: apps.json + 30 days of uptime/*.jsonl, relative to *now*,
+"""Demo data for `just demo`: apps.json + up to 90 days of uptime/*.jsonl, relative to *now*,
 written to data/demo/. Every app lands in a different state (steady, flapping, down,
 degrading, recovered, brand new, never monitored). The health URLs are chosen so live
 checks keep each state: httpbin.org answers 200 (up) or after 2 s (degraded), and the
@@ -59,15 +59,27 @@ def noise(base, jitter=0.25):
         ms *= random.uniform(2, 4)
     return ms
 
+# Past the 30 days of kept checks only the daily counts survive the import (the status
+# page's 90 bars): a check every 10 minutes is plenty there.
+OLD_STEP = 600
+RETAINED = 30 * DAY
+
 def series(start, fn):
-    return [fn(at, NOW - at) for at in range(start, NOW - 5, STEP)]
+    beats, at = [], start
+    while at < NOW - 5:
+        beats.append(fn(at, NOW - at))
+        at += OLD_STEP if NOW - at > RETAINED else STEP
+    return beats
 
 # 1. Always up, fast.
 def estable(at, ago):
     return up(at, noise(40 + 8 * math.sin(at / 3600)))
 
-# 2. Mostly up; a 15-min outage 3 days ago and a 5-min 503 blip 9 days ago.
+# 2. Mostly up; a 15-min outage 3 days ago, a 5-min 503 blip 9 days ago and a 3-hour
+#    outage 52 days ago.
 def backend(at, ago):
+    if 52 * DAY <= ago < 52 * DAY + 3 * 3600:
+        return down(at, "HTTP 503 Service Unavailable", noise(30))
     if 3 * DAY <= ago < 3 * DAY + 900:
         return down(at, REFUSED)
     if 9 * DAY <= ago < 9 * DAY + 300:
@@ -106,10 +118,10 @@ def recuperada(at, ago):
     return up(at, noise(150))
 
 apps = [
-    ("demo-estable", app_name("estable"), REAL_HEALTH, NOW - 30 * DAY, estable),
-    ("demo-backend", app_name("backend"), REAL_HEALTH, NOW - 30 * DAY, backend),
-    ("demo-intermitente", app_name("intermitente"), REAL_HEALTH, NOW - 30 * DAY, intermitente),
-    ("demo-caida", app_name("caida"), DEAD_HEALTH, NOW - 30 * DAY, caida),
+    ("demo-estable", app_name("estable"), REAL_HEALTH, NOW - 90 * DAY, estable),
+    ("demo-backend", app_name("backend"), REAL_HEALTH, NOW - 90 * DAY, backend),
+    ("demo-intermitente", app_name("intermitente"), REAL_HEALTH, NOW - 60 * DAY, intermitente),
+    ("demo-caida", app_name("caida"), DEAD_HEALTH, NOW - 90 * DAY, caida),
     ("demo-degradada", app_name("degradada"), SLOW_HEALTH, NOW - 7 * DAY, degradada),
     ("demo-recuperada", app_name("recuperada"), REAL_HEALTH, NOW - 14 * DAY, recuperada),
     ("demo-nueva", app_name("nueva"), REAL_HEALTH, NOW - 12 * STEP, estable),
