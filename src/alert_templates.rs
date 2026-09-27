@@ -1,6 +1,6 @@
 //! Editable alert message templates, one per kind (down, reminder, degraded, recovered). Admins
-//! change them from /settings; they're stored in `ALERT_TEMPLATES_FILE` and take effect
-//! immediately. A kind without a custom template uses the default for `APP_LANG`
+//! change them from /settings; they're stored in the `alert_templates` table and take
+//! effect immediately. A kind without a custom template uses the default for `APP_LANG`
 //! (`locales/<lang>.json`, keys `alert.default_*`).
 //!
 //! Placeholders: `{app}`, `{message}`, `{latency}` (e.g. `412 ms`), `{link}` (the app's
@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{PoisonError, RwLock};
 
+use crate::db::{Db, DbError};
 use crate::i18n::I18n;
 
 /// Longest template accepted from the settings page.
@@ -29,6 +30,16 @@ pub enum TemplateKind {
 
 impl TemplateKind {
     pub const ALL: [Self; 4] = [Self::Down, Self::Reminder, Self::Degraded, Self::Recovered];
+
+    /// How the `alert_templates.kind` column spells it (the same as the JSON).
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Down => "down",
+            Self::Reminder => "reminder",
+            Self::Degraded => "degraded",
+            Self::Recovered => "recovered",
+        }
+    }
 }
 
 /// Custom templates as stored; `None` = use the default.
@@ -45,7 +56,16 @@ pub struct AlertTemplates {
 }
 
 impl AlertTemplates {
-    fn get(&self, kind: TemplateKind) -> Option<&String> {
+    fn slot(&mut self, kind: TemplateKind) -> &mut Option<String> {
+        match kind {
+            TemplateKind::Down => &mut self.down,
+            TemplateKind::Reminder => &mut self.reminder,
+            TemplateKind::Degraded => &mut self.degraded,
+            TemplateKind::Recovered => &mut self.recovered,
+        }
+    }
+
+    pub(crate) fn get(&self, kind: TemplateKind) -> Option<&String> {
         match kind {
             TemplateKind::Down => self.down.as_ref(),
             TemplateKind::Reminder => self.reminder.as_ref(),
@@ -118,7 +138,8 @@ pub fn render(template: &str, vars: &TemplateVars) -> String {
 /// settings page (editing).
 #[derive(Debug)]
 pub struct TemplateStore {
-    path: Option<PathBuf>,
+    /// `None`: nothing is stored (tests).
+    db: Option<Db>,
     custom: RwLock<AlertTemplates>,
     defaults: AlertTemplates,
 }
@@ -137,6 +158,39 @@ pub enum TemplateError {
         #[source]
         source: serde_json::Error,
     },
+    #[error(transparent)]
+    Db(#[from] DbError),
+}
+
+/// Replaces every stored template with `templates` (already normalized).
+pub(crate) fn save_templates(
+    tx: &rusqlite::Transaction<'_>,
+    templates: &AlertTemplates,
+) -> Result<(), DbError> {
+    tx.execute("DELETE FROM alert_templates", [])?;
+    let mut insert =
+        tx.prepare_cached("INSERT INTO alert_templates (kind, text) VALUES (?1, ?2)")?;
+    for kind in TemplateKind::ALL {
+        if let Some(text) = templates.get(kind) {
+            insert.execute([kind.as_str(), text])?;
+        }
+    }
+    Ok(())
+}
+
+/// Reads a 0.2 `alert_templates.json` (for `heartbeat migrate`); a missing file is no
+/// custom templates.
+pub(crate) fn read_legacy_file(path: &Path) -> Result<AlertTemplates, TemplateError> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => Ok(serde_json::from_str::<AlertTemplates>(&raw)
+            .map_err(|source| TemplateError::Json {
+                path: path.to_path_buf(),
+                source,
+            })?
+            .normalized()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(AlertTemplates::default()),
+        Err(e) => Err(TemplateError::io(path)(e)),
+    }
 }
 
 impl TemplateError {
@@ -158,21 +212,24 @@ impl TemplateStore {
         }
     }
 
-    /// Loads the custom templates from `path` (a missing file = none customized).
-    pub async fn load(path: impl Into<PathBuf>, i18n: &I18n) -> Result<Self, TemplateError> {
-        let path = path.into();
-        let custom = match tokio::fs::read_to_string(&path).await {
-            Ok(raw) => serde_json::from_str::<AlertTemplates>(&raw)
-                .map_err(|source| TemplateError::Json {
-                    path: path.clone(),
-                    source,
-                })?
-                .normalized(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => AlertTemplates::default(),
-            Err(e) => return Err(TemplateError::io(&path)(e)),
-        };
+    /// Loads the custom templates (none stored = none customized).
+    pub async fn load(db: Db, i18n: &I18n) -> Result<Self, TemplateError> {
+        let custom = db
+            .read(|conn| {
+                let mut custom = AlertTemplates::default();
+                let mut stmt = conn.prepare("SELECT kind, text FROM alert_templates")?;
+                let mut rows = stmt.query([])?;
+                while let Some(row) = rows.next()? {
+                    let kind: String = row.get(0)?;
+                    if let Some(kind) = TemplateKind::ALL.into_iter().find(|k| k.as_str() == kind) {
+                        *custom.slot(kind) = Some(row.get(1)?);
+                    }
+                }
+                Ok(custom.normalized())
+            })
+            .await?;
         Ok(Self {
-            path: Some(path),
+            db: Some(db),
             custom: RwLock::new(custom),
             defaults: Self::defaults(i18n),
         })
@@ -182,7 +239,7 @@ impl TemplateStore {
     #[must_use]
     pub fn in_memory(i18n: &I18n) -> Self {
         Self {
-            path: None,
+            db: None,
             custom: RwLock::new(AlertTemplates::default()),
             defaults: Self::defaults(i18n),
         }
@@ -216,28 +273,12 @@ impl TemplateStore {
             .unwrap_or_else(|| self.default_for(kind))
     }
 
-    /// Replaces the custom templates (blank = default) and persists them: temp file +
-    /// rename, so a crash never leaves a half-written file.
+    /// Replaces the custom templates (blank = default) and stores them.
     pub async fn save(&self, templates: AlertTemplates) -> Result<(), TemplateError> {
         let templates = templates.normalized();
-        if let Some(path) = &self.path {
-            let raw =
-                serde_json::to_string_pretty(&templates).map_err(|source| TemplateError::Json {
-                    path: path.clone(),
-                    source,
-                })?;
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .map_err(TemplateError::io(parent))?;
-            }
-            let tmp = path.with_extension("json.tmp");
-            tokio::fs::write(&tmp, raw)
-                .await
-                .map_err(TemplateError::io(&tmp))?;
-            tokio::fs::rename(&tmp, path)
-                .await
-                .map_err(TemplateError::io(path))?;
+        if let Some(db) = &self.db {
+            let stored = templates.clone();
+            db.write(move |tx| save_templates(tx, &stored)).await?;
         }
         *self.custom.write().unwrap_or_else(PoisonError::into_inner) = templates;
         Ok(())
@@ -291,10 +332,9 @@ mod tests {
 
     #[tokio::test]
     async fn custom_templates_persist_and_blank_means_default() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("alert_templates.json");
+        let db = Db::open_in_memory();
         let i18n = I18n::new(Lang::Es);
-        let store = TemplateStore::load(&file, &i18n).await.unwrap();
+        let store = TemplateStore::load(db.clone(), &i18n).await.unwrap();
         store
             .save(AlertTemplates {
                 down: Some("  ALERTA {app}  ".into()),
@@ -309,7 +349,7 @@ mod tests {
             store.default_for(TemplateKind::Degraded)
         );
 
-        let reloaded = TemplateStore::load(&file, &i18n).await.unwrap();
+        let reloaded = TemplateStore::load(db, &i18n).await.unwrap();
         assert_eq!(reloaded.effective(TemplateKind::Down), "ALERTA {app}");
         assert_eq!(reloaded.custom().degraded, None);
     }

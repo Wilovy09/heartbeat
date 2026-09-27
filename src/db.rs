@@ -78,6 +78,14 @@ pub struct Db {
     inner: Arc<Inner>,
 }
 
+impl std::fmt::Debug for Db {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Db")
+            .field("path", &self.inner.path)
+            .finish()
+    }
+}
+
 struct Inner {
     path: PathBuf,
     writer: Mutex<Connection>,
@@ -389,7 +397,7 @@ mod tests {
             let conn = Connection::open(&path).unwrap();
             conn.pragma_update(None, "user_version", 99_i64).unwrap();
         }
-        let err = Db::open(&path).await.err().expect("newer schema refused");
+        let err = Db::open(&path).await.expect_err("newer schema refused");
         assert!(
             matches!(err, DbError::TooNew { found: 99, supported, .. } if supported == MIGRATIONS.len()),
             "{err}"
