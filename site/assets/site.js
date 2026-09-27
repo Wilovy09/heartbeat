@@ -36,8 +36,11 @@
 
   function initTheme() {
     applyTheme(savedTheme());
-    const group = document.querySelector('.theme-switch');
-    if (!group) return;
+    // Two copies of the switch: the bar's and, on phones, the menu's.
+    for (const group of document.querySelectorAll('.theme-switch')) initSwitch(group);
+  }
+
+  function initSwitch(group) {
     group.addEventListener('click', (e) => {
       const button = e.target.closest('[data-theme-choice]');
       if (!button) return;
@@ -61,6 +64,33 @@
       next.click();
       e.preventDefault();
     });
+  }
+
+  // ---------- Mobile menu ----------
+
+  function initMenu() {
+    const nav = document.querySelector('.nav');
+    const button = nav && nav.querySelector('.nav-menu-btn');
+    if (!button) return;
+    const setOpen = (open) => {
+      nav.classList.toggle('open', open);
+      button.setAttribute('aria-expanded', String(open));
+    };
+    button.addEventListener('click', () => setOpen(!nav.classList.contains('open')));
+    // Following a link (often an anchor on this same page) closes it.
+    nav.querySelector('.nav-links').addEventListener('click', (e) => {
+      if (e.target.closest('a')) setOpen(false);
+    });
+    document.addEventListener('click', (e) => {
+      if (!nav.contains(e.target)) setOpen(false);
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && nav.classList.contains('open')) {
+        setOpen(false);
+        button.focus();
+      }
+    });
+    window.matchMedia('(min-width: 1021px)').addEventListener('change', () => setOpen(false));
   }
 
   // ---------- Hero monitor: four apps beating, one goes down and recovers ----------
@@ -281,6 +311,7 @@
 
   document.addEventListener('DOMContentLoaded', () => {
     initTheme();
+    initMenu();
     initMonitor();
     initTabs();
     initCopy();
