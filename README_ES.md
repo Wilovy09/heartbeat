@@ -92,10 +92,10 @@ Un solo binario de Rust, sin base de datos: todo se guarda en archivos bajo `dat
 - **Alertas** (`ALERT_WEBHOOK_URLS`): solo en cambios de estado confirmados (caída y
   recuperación; degradado es opcional con `ALERT_ON_DEGRADED`), con el nombre de la app y
   un link a ella. Slack y Discord reciben su formato nativo; cualquier otra URL recibe un
-  JSON con el evento. `ALERT_MENTIONS` etiqueta a gente cuando una app se cae: `here`,
+  JSON con el evento. `ALERT_MENTIONS` etiqueta a personas cuando una app se cae: `here`,
   `channel`, IDs de usuario (`U…`) o grupo (`S…`) de Slack, usuarios o roles (`&…`) de
   Discord; ver `.env.example`.
-  - Cada app puede sumar **sus propios webhooks y menciones** desde `/apps`, además de los
+  - Cada app puede agregar **sus propios webhooks y menciones** desde `/apps`, además de los
     globales, y probarlos desde ahí.
   - Un envío fallido se **reintenta** (2 s, 10 s, 30 s) y `/settings` muestra el último
     resultado de cada webhook.
@@ -258,7 +258,7 @@ Y espera JSON con esta forma (líneas de la más vieja a la más nueva, como `ta
 - Un `error` por stream (string) indica que ese stream no se pudo leer.
 
 La app autoriza la llamada con el JWT del usuario o, para ver logs entre ambientes, con la
-llave compartida del header `X-Admin-Logs-Key` (comparada en tiempo constante).
+clave compartida del header `X-Admin-Logs-Key` (comparada en tiempo constante).
 
 ## Seguridad
 
@@ -288,7 +288,7 @@ Solo dos son obligatorias:
 - `LOGIN_URL` en modo `upstream`, o `ADMIN_EMAIL` + `ADMIN_PASSWORD_HASH` en modo
   `password`.
 
-## Correr localmente
+## Ejecutar localmente
 
 ```bash
 cp .env.example .env    # editar ALLOWED_HOSTS y la autenticación; COOKIE_SECURE=false sin TLS
@@ -299,14 +299,17 @@ Abre `http://localhost:8090`.
 
 Con [`just`](https://github.com/casey/just):
 
-- `just demo` (español) o `just demo en` (inglés): arranca con datos de ejemplo (una app en cada estado) y un admin local;
-  entra en `http://localhost:8090` con `demo@example.com` / `demo` (admin) o
+- `just demo` (español) o `just demo en` (inglés): inicia con datos de ejemplo (una app en cada estado) y un admin local;
+  entra a `http://localhost:8090` con `demo@example.com` / `demo` (admin) o
   `viewer@example.com` / `demo` (solo lectura). Los logs de cada app se generan en vivo
   (feature `demo`, nunca en un release) según su estado: la caída tiene errores y panics,
   la estable casi todo INFO. Requiere Python 3.
 - `just check`: formato, `cargo deny` (vulnerabilidades y licencias), clippy pedantic y
   tests, lo mismo que el CI.
 - `just e2e`: smoke test en navegador contra un servidor temporal (requiere Node).
+- `just site`: construye el sitio web (landing y esta documentación, desde `site/`) y lo sirve
+  en http://localhost:8200 (requiere [uv](https://docs.astral.sh/uv/)). Cada push a `main` lo
+  publica en GitHub Pages.
 
 ## Despliegue
 
@@ -317,7 +320,7 @@ cp .env.example .env   # editar
 docker compose up -d
 ```
 
-La imagen corre como usuario sin privilegios y guarda todo en el volumen `./data`. Cada
+La imagen se ejecuta como usuario sin privilegios y guarda todo en el volumen `./data`. Cada
 release también publica una imagen multi-arquitectura (amd64 y arm64):
 
 ```bash
@@ -327,7 +330,7 @@ docker run -d --env-file .env -p 8090:8090 -v ./data:/app/data ghcr.io/OWNER/hea
 ### En un servidor (pm2 + nginx)
 
 Binario bajo pm2, con nginx como reverse proxy y TLS de Let's Encrypt. La app escucha en
-`8090`; ese puerto nunca se expone directo.
+`8090`; ese puerto nunca se expone directamente.
 
 Primera vez:
 
@@ -373,7 +376,7 @@ tormenta de alertas cuando falla su red, pero no reemplaza sondas desde varias r
 
 [Elastic License 2.0](LICENSE) (ELv2). Puedes usar, copiar, modificar y redistribuir
 Heartbeat, incluso dentro de tu empresa y para los servicios de tus clientes, pero no
-puedes ofrecerlo a terceros como servicio hosteado o administrado (un SaaS construido
+puedes ofrecerlo a terceros como servicio alojado o administrado (un SaaS construido
 sobre él). Es código disponible (source-available), no una licencia open source
 aprobada por la OSI.
 

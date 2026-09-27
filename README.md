@@ -303,6 +303,9 @@ With [`just`](https://github.com/casey/just):
 - `just check`: formatting, `cargo deny` (vulnerabilities and licenses), pedantic clippy
   and tests, the same as CI.
 - `just e2e`: browser smoke test against a throwaway server (requires Node).
+- `just site`: builds the website (landing and these docs, from `site/`) and serves it on
+  http://localhost:8200 (requires [uv](https://docs.astral.sh/uv/)). Pushes to `main` publish
+  it to GitHub Pages.
 
 ## Deployment
 

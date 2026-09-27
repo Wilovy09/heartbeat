@@ -17,6 +17,11 @@ before 0.2.0 were reconstructed from the git history.
   the latency chart reads them at draw time and redraws on a theme change, and the embed
   previews in Apps follow the page theme.
 
+### Website
+- Landing page and documentation in English and Spanish (`site/`), built from the READMEs
+  with the app's own color tokens (system, light and dark) and published to GitHub Pages
+  on every push to `main` (`.github/workflows/pages.yml`). `just site` previews it.
+
 ## [0.2.0] - 2026-09-26
 
 ### Upgrading from 0.1.x
