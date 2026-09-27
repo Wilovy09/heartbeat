@@ -55,6 +55,8 @@ pub enum DbError {
     Sqlite(#[from] rusqlite::Error),
     #[error("stored data is not valid JSON: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("the data doesn't add up: {0}")]
+    Integrity(String),
     #[error("I/O error on {path}: {source}")]
     Io {
         path: PathBuf,
@@ -131,8 +133,9 @@ impl Db {
         Ok(Self::from_parts(path, writer, readers))
     }
 
-    /// A private, empty database with the current schema, for tests.
-    #[cfg(test)]
+    /// A private, empty database with the current schema: for tests and for
+    /// `heartbeat migrate --dry-run`. Only a broken embedded migration can make it fail.
+    #[must_use]
     pub fn open_in_memory() -> Self {
         let mut conn = Connection::open_in_memory().expect("in-memory database");
         configure(&conn).expect("configure in-memory database");

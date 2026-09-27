@@ -1,7 +1,8 @@
 //! Uptime monitoring: a background loop hits every registered app's `health_url` on a
-//! fixed interval and records one heartbeat per check. History is kept in memory (bounded
-//! to `CheckPolicy::retention`) and mirrored to one JSONL file per app -- appended on every
-//! check, rewritten ("compacted") on startup and periodically so files don't grow forever.
+//! fixed interval and records one heartbeat per check in the database (`store`): every
+//! check for `CheckPolicy::retention`, and per-day counts for much longer. What the
+//! dashboard polls (latest checks, status changes, 24 h / 30 d figures) is kept in memory
+//! and refreshed after every round, so page loads never wait on the database.
 //!
 //! Each app is checked on its own interval (the global one unless it sets its own), and
 //! apps under scheduled maintenance resume by themselves when it ends.
@@ -12,26 +13,29 @@
 
 mod gate;
 pub mod incidents;
+mod store;
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::error::Error as _;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 
 use crate::alerts::{Alerter, StatusChange};
 use crate::bundles;
+use crate::db::{Db, DbError};
 use crate::i18n::{I18n, Lang, Localize};
 use crate::outbound::{HealthTarget, Outbound};
 use crate::registry::{AppRegistry, CheckHeader, RegisteredApp};
 use gate::OutageGate;
 use incidents::IncidentReport;
+use store::Stats;
+pub(crate) use store::{count_day as count_heartbeat_day, insert as store_heartbeat};
 
-const COMPACT_EVERY: Duration = Duration::from_secs(3600);
+/// How often old checks and daily counts are deleted, and every app's figures recomputed.
+const PRUNE_EVERY: Duration = Duration::from_secs(3600);
 /// How often the scheduler looks for apps that are due: the finest per-app interval
 /// granularity.
 const SCHEDULER_TICK: Duration = Duration::from_secs(5);
@@ -53,23 +57,8 @@ const MAX_INCIDENTS: usize = 50;
 
 #[derive(Debug, thiserror::Error)]
 pub enum UptimeError {
-    #[error("I/O error on {path}: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("could not serialize a heartbeat: {0}")]
-    Serialize(#[from] serde_json::Error),
-}
-
-impl UptimeError {
-    fn io(path: &Path) -> impl FnOnce(std::io::Error) -> Self + '_ {
-        move |source| Self::Io {
-            path: path.to_path_buf(),
-            source,
-        }
-    }
+    #[error(transparent)]
+    Db(#[from] DbError),
 }
 
 /// Traffic-light state of one check: green, yellow, red.
@@ -122,7 +111,10 @@ pub struct CheckPolicy {
     pub retries: u32,
     /// A certificate expiring within this many days marks the app degraded.
     pub cert_warn_days: u32,
+    /// How long every check is kept.
     pub retention: Duration,
+    /// How long the per-day counts (status page, 30-day uptime) are kept.
+    pub daily_retention: Duration,
     /// Global check timeout; an app's own `timeout_secs` overrides it.
     pub timeout: Duration,
     /// `UPTIME_MASS_DOWN_PCT`: share of apps down at once that counts as a mass outage
@@ -380,58 +372,11 @@ pub(crate) fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// One app's heartbeat history, oldest first.
+/// A run of heartbeats, oldest first: what the aggregations below work on.
 #[derive(Debug, Default)]
 struct History(VecDeque<Heartbeat>);
 
 impl History {
-    fn push(&mut self, beat: Heartbeat, retention: Duration) {
-        self.0.push_back(beat);
-        self.prune(unix_now(), retention);
-    }
-
-    fn prune(&mut self, now: u64, retention: Duration) {
-        let cutoff = now.saturating_sub(retention.as_secs());
-        while self.0.front().is_some_and(|b| b.at < cutoff) {
-            self.0.pop_front();
-        }
-    }
-
-    /// When the current run of down checks started; `None` if the last check wasn't down.
-    fn down_streak_start(&self) -> Option<u64> {
-        self.0
-            .iter()
-            .rev()
-            .take_while(|b| b.status == Status::Down)
-            .last()
-            .map(|b| b.at)
-    }
-
-    /// One entry per UTC day for the last `days` days (oldest first, today last): the share
-    /// of available checks that day, or `None` without data.
-    fn daily(&self, now: u64, days: u64) -> Vec<DayUptime> {
-        let today = now / DAY_SECS;
-        let first = today.saturating_sub(days.saturating_sub(1));
-        let mut counts = vec![(0u32, 0u32); usize::try_from(today - first + 1).unwrap_or(0)];
-        for beat in self.since(first * DAY_SECS) {
-            let Ok(i) = usize::try_from(beat.at / DAY_SECS - first) else {
-                continue;
-            };
-            if let Some((up, total)) = counts.get_mut(i) {
-                *up += u32::from(beat.status.is_available());
-                *total += 1;
-            }
-        }
-        counts
-            .into_iter()
-            .zip(first..)
-            .map(|((up, total), day)| DayUptime {
-                start: day * DAY_SECS,
-                uptime: (total > 0).then(|| f64::from(up) * 100.0 / f64::from(total)),
-            })
-            .collect()
-    }
-
     fn since(&self, cutoff: u64) -> impl Iterator<Item = &Heartbeat> {
         self.0.iter().filter(move |b| b.at >= cutoff)
     }
@@ -452,50 +397,6 @@ impl History {
             .filter_map(|b| b.latency_ms)
             .fold((0u64, 0u64), |(sum, n), ms| (sum + u64::from(ms), n + 1));
         (n > 0).then(|| u32::try_from(sum / n).unwrap_or(u32::MAX))
-    }
-
-    /// Heartbeats where the status flipped (the first one counts), newest first.
-    fn events(&self) -> Vec<Heartbeat> {
-        let mut prev = None;
-        let mut events: Vec<Heartbeat> = self
-            .0
-            .iter()
-            .filter(|b| {
-                let changed = prev != Some(b.status);
-                prev = Some(b.status);
-                changed
-            })
-            .cloned()
-            .collect();
-        events.reverse();
-        events.truncate(MAX_EVENTS);
-        events
-    }
-
-    fn summary(
-        &self,
-        app: &RegisteredApp,
-        now: u64,
-        cert_expires_at: Option<u64>,
-    ) -> MonitorSummary {
-        let last = self.0.back();
-        let day_ago = now.saturating_sub(DAY_SECS);
-        MonitorSummary {
-            slug: app.slug.clone(),
-            name: app.name.clone(),
-            health_url: app.health_url.clone(),
-            has_logs: app.logs_url.is_some(),
-            paused: app.paused,
-            paused_at: app.paused_at,
-            paused_until: app.paused_until,
-            status: last.map(|b| b.status),
-            latency_ms: last.and_then(|b| b.latency_ms),
-            avg_latency_24h_ms: self.avg_latency_ms(day_ago),
-            uptime_24h: self.uptime_pct(day_ago),
-            uptime_30d: self.uptime_pct(now.saturating_sub(30 * DAY_SECS)),
-            cert_expires_at,
-            recent: self.recent(RECENT_BEATS),
-        }
     }
 
     /// Beats since `cutoff`, aggregated into at most `max_points` time buckets when there
@@ -543,13 +444,83 @@ impl History {
         }
         out
     }
+}
 
-    fn recent(&self, n: usize) -> Vec<Heartbeat> {
-        self.0
-            .iter()
-            .skip(self.0.len().saturating_sub(n))
-            .cloned()
-            .collect()
+/// What's kept in memory about one app between rounds.
+#[derive(Debug, Default)]
+struct Live {
+    /// The latest `RECENT_BEATS` checks, oldest first.
+    recent: VecDeque<Heartbeat>,
+    /// Start of the outage in progress; `None` unless the last check was down.
+    down_since: Option<u64>,
+    /// Status changes, newest first, at most `MAX_EVENTS`.
+    events: Vec<Heartbeat>,
+    stats: Stats,
+}
+
+impl Live {
+    /// Rebuilds an app's state from its stored history (startup).
+    fn load(conn: &rusqlite::Connection, slug: &str, now: u64) -> Result<Self, DbError> {
+        let recent: VecDeque<Heartbeat> = store::recent(conn, slug, RECENT_BEATS)?.into();
+        let down_since = if recent.back().is_some_and(|b| b.status == Status::Down) {
+            store::down_since(conn, slug)?
+        } else {
+            None
+        };
+        Ok(Self {
+            recent,
+            down_since,
+            events: store::events(conn, slug, MAX_EVENTS)?,
+            stats: store::stats(conn, slug, now)?,
+        })
+    }
+
+    /// Takes in a new check; reports what came before it.
+    fn push(&mut self, beat: &Heartbeat) -> Recorded {
+        let previous = self.recent.back().map(|b| b.status);
+        let down_since = match (previous, beat.status) {
+            (Some(Status::Down), _) => self.down_since.or(Some(beat.at)),
+            (_, Status::Down) => Some(beat.at),
+            _ => None,
+        };
+        self.down_since = down_since.filter(|_| beat.status == Status::Down);
+        if previous != Some(beat.status) {
+            self.events.insert(0, beat.clone());
+            self.events.truncate(MAX_EVENTS);
+        }
+        self.recent.push_back(beat.clone());
+        while self.recent.len() > RECENT_BEATS {
+            self.recent.pop_front();
+        }
+        Recorded {
+            previous,
+            down_since,
+        }
+    }
+
+    fn summary(&self, app: &RegisteredApp, cert_expires_at: Option<u64>) -> MonitorSummary {
+        let last = self.recent.back();
+        MonitorSummary {
+            slug: app.slug.clone(),
+            name: app.name.clone(),
+            health_url: app.health_url.clone(),
+            has_logs: app.logs_url.is_some(),
+            paused: app.paused,
+            paused_at: app.paused_at,
+            paused_until: app.paused_until,
+            status: last.map(|b| b.status),
+            latency_ms: last.and_then(|b| b.latency_ms),
+            avg_latency_24h_ms: self.stats.avg_latency_24h_ms,
+            uptime_24h: self.stats.uptime_24h,
+            uptime_30d: self.stats.uptime_30d,
+            cert_expires_at,
+            recent: self.recent.iter().cloned().collect(),
+        }
+    }
+
+    /// Status changes still inside the retention window.
+    fn events_since(&self, cutoff: u64) -> impl Iterator<Item = &Heartbeat> {
+        self.events.iter().filter(move |b| b.at >= cutoff)
     }
 }
 
@@ -628,11 +599,11 @@ pub struct Notifiers {
 }
 
 pub struct UptimeMonitor {
-    dir: PathBuf,
+    db: Db,
     policy: CheckPolicy,
     outbound: Outbound,
     notifiers: Notifiers,
-    histories: RwLock<HashMap<String, History>>,
+    live: RwLock<HashMap<String, Live>>,
     /// Latest TLS certificate expiry per app (memory only; refreshed every check).
     certs: RwLock<HashMap<String, u64>>,
     gate: Mutex<OutageGate>,
@@ -642,78 +613,44 @@ pub struct UptimeMonitor {
 }
 
 impl UptimeMonitor {
-    /// Loads (and compacts) every `<slug>.jsonl` found in `dir`. Malformed lines are skipped
-    /// with a warning rather than failing startup over one torn write.
+    /// Rebuilds every registered app's in-memory state from the database.
     pub async fn load(
-        dir: impl Into<PathBuf>,
+        db: Db,
         policy: CheckPolicy,
         outbound: Outbound,
         notifiers: Notifiers,
     ) -> Result<Self, UptimeError> {
-        let dir = dir.into();
-        tokio::fs::create_dir_all(&dir)
-            .await
-            .map_err(UptimeError::io(&dir))?;
-
-        let mut histories = HashMap::new();
-        let mut entries = tokio::fs::read_dir(&dir)
-            .await
-            .map_err(UptimeError::io(&dir))?;
-        while let Some(entry) = entries.next_entry().await.map_err(UptimeError::io(&dir))? {
-            let path = entry.path();
-            if path.extension().is_none_or(|ext| ext != "jsonl") {
-                continue;
-            }
-            let Some(slug) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            let raw = tokio::fs::read_to_string(&path)
-                .await
-                .map_err(UptimeError::io(&path))?;
-            let mut history = History(
-                raw.lines()
-                    .filter(|l| !l.trim().is_empty())
-                    .filter_map(|l| match serde_json::from_str(l) {
-                        Ok(beat) => Some(beat),
-                        Err(e) => {
-                            tracing::warn!(file = %path.display(), error = %e, "uptime: skipping malformed heartbeat");
-                            None
-                        }
-                    })
-                    .collect(),
-            );
-            history.prune(unix_now(), policy.retention);
-            histories.insert(slug.to_string(), history);
-        }
-
-        let monitor = Self {
-            dir,
+        let live = db
+            .read(|conn| {
+                let now = unix_now();
+                store::slugs(conn)?
+                    .into_iter()
+                    .map(|slug| Ok((slug.clone(), Live::load(conn, &slug, now)?)))
+                    .collect::<Result<HashMap<_, _>, DbError>>()
+            })
+            .await?;
+        Ok(Self {
+            db,
             policy,
             outbound,
             notifiers,
-            histories: RwLock::new(histories),
+            live: RwLock::new(live),
             certs: RwLock::default(),
             gate: Mutex::default(),
             i18n: I18n::new(policy.lang),
             reminded: Mutex::default(),
-        };
-        monitor.compact_all().await?;
-        Ok(monitor)
-    }
-
-    fn file_for(&self, slug: &str) -> PathBuf {
-        self.dir.join(format!("{slug}.jsonl"))
+        })
     }
 
     /// Runs forever: every `SCHEDULER_TICK`, ends expired maintenance and checks the apps
-    /// that are due; pings the dead man's switch once per global interval and compacts
-    /// once an hour.
+    /// that are due; pings the dead man's switch once per global interval and prunes old
+    /// history once an hour.
     pub async fn run(self: Arc<Self>, registry: Arc<AppRegistry>) {
         let mut ticker = tokio::time::interval(SCHEDULER_TICK.min(self.policy.interval));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut next_due: HashMap<String, Instant> = HashMap::new();
         let mut last_ping: Option<Instant> = None;
-        let mut last_compact = Instant::now();
+        let mut last_prune: Option<Instant> = None;
         let ping_client = reqwest::Client::builder()
             .timeout(PING_TIMEOUT)
             .build()
@@ -757,16 +694,18 @@ impl UptimeMonitor {
                     tracing::warn!(error = %e, "uptime: dead man's switch ping failed");
                 }
             }
-            if last_compact.elapsed() >= COMPACT_EVERY {
-                if let Err(e) = self.compact_all().await {
-                    tracing::error!(error = %e, "uptime: compaction failed");
+            if last_prune.is_none_or(|at| at.elapsed() >= PRUNE_EVERY) {
+                last_prune = Some(Instant::now());
+                if let Err(e) = self.prune(unix_now()).await {
+                    tracing::error!(error = %e, "uptime: pruning old history failed");
                 }
-                last_compact = Instant::now();
+                let slugs: Vec<String> = apps.iter().map(|a| a.slug.clone()).collect();
+                self.refresh_stats(slugs).await;
             }
         }
     }
 
-    /// Probes `due` concurrently, records each result and alerts; `all` is every
+    /// Probes `due` concurrently, records the round and alerts; `all` is every
     /// registered app, for the mass-outage count.
     async fn check_all(&self, due: &[RegisteredApp], all: &[RegisteredApp]) {
         let mut probes = JoinSet::new();
@@ -782,26 +721,34 @@ impl UptimeMonitor {
                 (app, result)
             });
         }
-        let mut changes = Vec::new();
+        let mut done = Vec::new();
         while let Some(joined) = probes.join_next().await {
-            let (app, result) = match joined {
-                Ok(done) => done,
-                Err(e) => {
-                    tracing::error!(error = %e, "uptime: probe task panicked");
-                    continue;
-                }
-            };
-            if let Some(expires) = result.cert_expires_at {
-                self.certs.write().await.insert(app.slug.clone(), expires);
+            match joined {
+                Ok(probe) => done.push(probe),
+                Err(e) => tracing::error!(error = %e, "uptime: probe task panicked"),
             }
-            match self.record(&app.slug, result.beat.clone()).await {
-                Ok(recorded) => changes.extend(self.alert_for(&app, &recorded, result.beat)),
-                Err(e) => {
-                    tracing::error!(app = %app.slug, error = %e, "uptime: failed to persist heartbeat");
+        }
+        {
+            let mut certs = self.certs.write().await;
+            for (app, result) in &done {
+                if let Some(expires) = result.cert_expires_at {
+                    certs.insert(app.slug.clone(), expires);
                 }
             }
         }
+        let beats = done
+            .iter()
+            .map(|(app, result)| (app.slug.clone(), result.beat.clone()))
+            .collect();
+        let recorded = self.record_all(beats).await;
+        let changes = done
+            .into_iter()
+            .zip(recorded)
+            .filter_map(|((app, result), recorded)| self.alert_for(&app, &recorded, result.beat))
+            .collect();
         self.dispatch(changes, all).await;
+        self.refresh_stats(due.iter().map(|a| a.slug.clone()).collect())
+            .await;
     }
 
     /// The alert this check deserves, if any: a status change, or a reminder that the
@@ -849,13 +796,13 @@ impl UptimeMonitor {
         };
         let monitored: Vec<&RegisteredApp> = all.iter().filter(|a| a.is_monitored()).collect();
         let latest: HashMap<&str, (Heartbeat, Option<u64>)> = {
-            let histories = self.histories.read().await;
+            let live = self.live.read().await;
             monitored
                 .iter()
                 .filter_map(|app| {
-                    let history = histories.get(&app.slug)?;
-                    let last = history.0.back()?.clone();
-                    Some((app.slug.as_str(), (last, history.down_streak_start())))
+                    let state = live.get(&app.slug)?;
+                    let last = state.recent.back()?.clone();
+                    Some((app.slug.as_str(), (last, state.down_since)))
                 })
                 .collect()
         };
@@ -901,108 +848,115 @@ impl UptimeMonitor {
         }
     }
 
-    /// Stores a heartbeat and reports what came before it.
-    async fn record(&self, slug: &str, beat: Heartbeat) -> Result<Recorded, UptimeError> {
-        match beat.status {
-            Status::Down => {
-                tracing::warn!(app = %slug, message = %beat.message, "uptime: app is down");
+    /// Stores a round of heartbeats in one transaction and reports, for each, what came
+    /// before it. If the database write fails the round still counts in memory: the
+    /// dashboard and the alerts keep working, only the stored history has a gap.
+    async fn record_all(&self, beats: Vec<(String, Heartbeat)>) -> Vec<Recorded> {
+        for (slug, beat) in &beats {
+            match beat.status {
+                Status::Down => {
+                    tracing::warn!(app = %slug, message = %beat.message, "uptime: app is down");
+                }
+                Status::Degraded => {
+                    tracing::warn!(app = %slug, latency_ms = ?beat.latency_ms, "uptime: app is slow");
+                }
+                Status::Up => {}
             }
-            Status::Degraded => {
-                tracing::warn!(app = %slug, latency_ms = ?beat.latency_ms, "uptime: app is slow");
-            }
-            Status::Up => {}
         }
-        let mut line = serde_json::to_string(&beat)?;
-        line.push('\n');
-        let recorded = {
-            let mut histories = self.histories.write().await;
-            let history = histories.entry(slug.to_string()).or_default();
-            let previous = history.0.back().map(|b| b.status);
-            let down_since = match (previous, beat.status) {
-                (Some(Status::Down), _) => history.down_streak_start(),
-                (_, Status::Down) => Some(beat.at),
-                _ => None,
-            };
-            history.push(beat, self.policy.retention);
-            Recorded {
-                previous,
-                down_since,
-            }
-        };
-
-        let path = self.file_for(slug);
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .await
-            .map_err(UptimeError::io(&path))?;
-        file.write_all(line.as_bytes())
-            .await
-            .map_err(UptimeError::io(&path))?;
-        Ok(recorded)
+        let to_store = beats.clone();
+        let stored = self
+            .db
+            .write(move |tx| {
+                for (slug, beat) in &to_store {
+                    store::insert(tx, slug, beat)?;
+                }
+                Ok(())
+            })
+            .await;
+        if let Err(e) = stored {
+            tracing::error!(error = %e, checks = beats.len(), "uptime: failed to store heartbeats");
+        }
+        let mut live = self.live.write().await;
+        beats
+            .iter()
+            .map(|(slug, beat)| live.entry(slug.clone()).or_default().push(beat))
+            .collect()
     }
 
-    /// Rewrites every app's file with only its retained heartbeats (temp file + rename, so a
-    /// crash mid-write never leaves a truncated history).
-    async fn compact_all(&self) -> Result<(), UptimeError> {
-        let snapshots: Vec<(String, String)> = {
-            let mut histories = self.histories.write().await;
-            let now = unix_now();
-            histories
-                .iter_mut()
-                .map(|(slug, history)| {
-                    history.prune(now, self.policy.retention);
-                    let body = history
-                        .0
-                        .iter()
-                        .map(|b| serde_json::to_string(b).map(|l| l + "\n"))
-                        .collect::<Result<String, _>>()?;
-                    Ok((slug.clone(), body))
-                })
-                .collect::<Result<_, UptimeError>>()?
-        };
-        for (slug, body) in snapshots {
-            let path = self.file_for(&slug);
-            let tmp = path.with_extension("jsonl.tmp");
-            tokio::fs::write(&tmp, body)
-                .await
-                .map_err(UptimeError::io(&tmp))?;
-            tokio::fs::rename(&tmp, &path)
-                .await
-                .map_err(UptimeError::io(&path))?;
+    /// Stores one heartbeat (tests; the monitor records whole rounds).
+    #[cfg(test)]
+    async fn record(&self, slug: &str, beat: Heartbeat) -> Recorded {
+        self.record_all(vec![(slug.to_string(), beat)])
+            .await
+            .remove(0)
+    }
+
+    /// Recomputes the 24 h / 30 d figures of `slugs` from the database.
+    async fn refresh_stats(&self, slugs: Vec<String>) {
+        let fresh = self
+            .db
+            .read(move |conn| {
+                let now = unix_now();
+                slugs
+                    .into_iter()
+                    .map(|slug| Ok((store::stats(conn, &slug, now)?, slug)))
+                    .collect::<Result<Vec<_>, DbError>>()
+            })
+            .await;
+        match fresh {
+            Ok(fresh) => {
+                let mut live = self.live.write().await;
+                for (stats, slug) in fresh {
+                    live.entry(slug).or_default().stats = stats;
+                }
+            }
+            Err(e) => tracing::error!(error = %e, "uptime: could not refresh uptime figures"),
         }
+    }
+
+    /// Deletes checks past `retention` and daily counts past `daily_retention`.
+    async fn prune(&self, now: u64) -> Result<(), UptimeError> {
+        let checks_before = now.saturating_sub(self.policy.retention.as_secs());
+        let days_before =
+            now.saturating_sub(self.policy.daily_retention.as_secs()) / DAY_SECS * DAY_SECS;
+        let (checks, days) = self
+            .db
+            .write(move |tx| store::prune(tx, checks_before, days_before))
+            .await?;
+        if checks + days > 0 {
+            tracing::info!(checks, days, "uptime: pruned old history");
+        }
+        // Lets SQLite refresh its query planner statistics now and then.
+        self.db
+            .read(|conn| Ok(conn.execute_batch("PRAGMA optimize")?))
+            .await?;
         Ok(())
     }
 
-    /// Drops an app's history (memory + file) -- called when the app is unregistered, so a
-    /// later registration under the same slug starts clean.
-    pub async fn forget(&self, slug: &str) -> Result<(), UptimeError> {
-        self.histories.write().await.remove(slug);
-        let path = self.file_for(slug);
-        match tokio::fs::remove_file(&path).await {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(UptimeError::io(&path)(e)),
-            _ => Ok(()),
-        }
+    /// Drops an app's in-memory state -- called when the app is unregistered; its stored
+    /// history goes with the app itself (`ON DELETE CASCADE`).
+    pub async fn forget(&self, slug: &str) {
+        self.live.write().await.remove(slug);
+        self.certs.write().await.remove(slug);
     }
 
     pub async fn overview(&self, apps: &[RegisteredApp]) -> Overview {
-        let histories = self.histories.read().await;
+        let live = self.live.read().await;
         let certs = self.certs.read().await;
-        let now = unix_now();
-        let empty = History::default();
+        let cutoff = unix_now().saturating_sub(self.policy.retention.as_secs());
+        let empty = Live::default();
 
         let mut events = Vec::new();
         let monitors = apps
             .iter()
             .map(|app| {
-                let history = histories.get(&app.slug).unwrap_or(&empty);
-                events.extend(history.events().into_iter().map(|beat| AppEvent {
+                let state = live.get(&app.slug).unwrap_or(&empty);
+                events.extend(state.events_since(cutoff).map(|beat| AppEvent {
                     slug: app.slug.clone(),
                     name: app.name.clone(),
-                    beat,
+                    beat: beat.clone(),
                 }));
-                history.summary(app, now, certs.get(&app.slug).copied())
+                state.summary(app, certs.get(&app.slug).copied())
             })
             .collect();
         events.sort_by_key(|e| std::cmp::Reverse(e.beat.at));
@@ -1018,50 +972,78 @@ impl UptimeMonitor {
 
     /// One app's summary -- what the public embed endpoint serves.
     pub async fn summary(&self, app: &RegisteredApp) -> MonitorSummary {
-        let histories = self.histories.read().await;
+        let live = self.live.read().await;
         let cert = self.certs.read().await.get(&app.slug).copied();
-        histories
-            .get(&app.slug)
-            .unwrap_or(&History::default())
-            .summary(app, unix_now(), cert)
+        live.get(&app.slug)
+            .unwrap_or(&Live::default())
+            .summary(app, cert)
     }
 
     pub async fn detail(&self, slug: &str, window: Duration) -> MonitorDetail {
-        let histories = self.histories.read().await;
-        let Some(history) = histories.get(slug) else {
-            return MonitorDetail {
-                beats: Vec::new(),
-                events: Vec::new(),
-                incidents: IncidentReport::default(),
-            };
-        };
         let now = unix_now();
         let cutoff = now.saturating_sub(window.as_secs());
+        let events: Vec<Heartbeat> = {
+            let retained = now.saturating_sub(self.policy.retention.as_secs());
+            let live = self.live.read().await;
+            live.get(slug)
+                .map(|state| state.events_since(retained).cloned().collect())
+                .unwrap_or_default()
+        };
+        let owned = slug.to_string();
+        let beats = self
+            .db
+            .read(move |conn| {
+                // From before the window when an outage was already going on at its start,
+                // so that incident is reported from its real beginning.
+                let from = store::window_start(conn, &owned, cutoff)?;
+                store::since(conn, &owned, from)
+            })
+            .await;
+        let history = History(match beats {
+            Ok(beats) => beats.into(),
+            Err(e) => {
+                tracing::error!(app = %slug, error = %e, "uptime: could not read the history");
+                VecDeque::new()
+            }
+        });
         MonitorDetail {
             beats: history.downsampled(cutoff, now, MAX_DETAIL_POINTS),
-            events: history.events(),
+            events,
             incidents: IncidentReport::build(history.0.iter(), cutoff, now, MAX_INCIDENTS),
         }
     }
 
     /// Daily uptime for the last `days` days, oldest first.
     pub async fn daily(&self, slug: &str, days: u64) -> Vec<DayUptime> {
-        let histories = self.histories.read().await;
-        histories
-            .get(slug)
-            .unwrap_or(&History::default())
-            .daily(unix_now(), days)
+        let owned = slug.to_string();
+        match self
+            .db
+            .read(move |conn| store::daily(conn, &owned, unix_now(), days))
+            .await
+        {
+            Ok(days) => days,
+            Err(e) => {
+                tracing::error!(app = %slug, error = %e, "uptime: could not read daily uptime");
+                Vec::new()
+            }
+        }
     }
 
     /// Every heartbeat in the window, not aggregated (for exports).
     pub async fn export(&self, slug: &str, window: Duration) -> Vec<Heartbeat> {
         let cutoff = unix_now().saturating_sub(window.as_secs());
-        self.histories
-            .read()
+        let owned = slug.to_string();
+        match self
+            .db
+            .read(move |conn| store::since(conn, &owned, cutoff))
             .await
-            .get(slug)
-            .map(|h| h.since(cutoff).cloned().collect())
-            .unwrap_or_default()
+        {
+            Ok(beats) => beats,
+            Err(e) => {
+                tracing::error!(app = %slug, error = %e, "uptime: could not export the history");
+                Vec::new()
+            }
+        }
     }
 }
 
@@ -1082,6 +1064,7 @@ mod tests {
             retries: 0,
             cert_warn_days: 14,
             retention: RETENTION,
+            daily_retention: Duration::from_hours(400 * 24),
             timeout: Duration::from_secs(10),
             mass_down_pct: 50,
             lang: Lang::Es,
@@ -1151,55 +1134,124 @@ mod tests {
         assert_eq!(Status::classify(false, 5000, 1000), Status::Down);
     }
 
-    #[test]
-    fn events_are_status_flips_newest_first() {
-        let history = History(VecDeque::from([
-            beat(1, Status::Up, None),
-            beat(2, Status::Up, None),
-            beat(3, Status::Down, None),
-            beat(4, Status::Degraded, None),
-            beat(5, Status::Up, None),
-        ]));
-        let ats: Vec<u64> = history.events().iter().map(|b| b.at).collect();
-        assert_eq!(ats, [5, 4, 3, 1]);
+    /// A database with these apps registered (history rows need their app).
+    async fn db_with(slugs: &[&str]) -> Db {
+        let db = Db::open_in_memory();
+        let apps: Vec<RegisteredApp> = slugs.iter().map(|s| registered(s)).collect();
+        db.write(move |tx| {
+            for app in &apps {
+                crate::registry::save_app(tx, app)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+        db
     }
 
-    #[test]
-    fn prune_drops_heartbeats_past_retention() {
-        let now = RETENTION.as_secs() + 1000;
-        let mut history = History(VecDeque::from([
-            beat(500, Status::Up, None),
-            beat(1500, Status::Up, None),
-        ]));
-        history.prune(now, RETENTION);
-        assert_eq!(history.0.len(), 1);
-        assert_eq!(history.0[0].at, 1500);
+    /// Stores `beats` for `slug` directly, the way a round of checks does.
+    async fn store_beats(db: &Db, slug: &str, beats: Vec<Heartbeat>) {
+        let slug = slug.to_string();
+        db.write(move |tx| {
+            for beat in &beats {
+                store::insert(tx, &slug, beat)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn events_are_status_flips_newest_first() {
+        let db = db_with(&["app"]).await;
+        store_beats(
+            &db,
+            "app",
+            vec![
+                beat(1, Status::Up, None),
+                beat(2, Status::Up, None),
+                beat(3, Status::Down, None),
+                beat(4, Status::Degraded, None),
+                beat(5, Status::Up, None),
+            ],
+        )
+        .await;
+        for (max, expected) in [(30, vec![5, 4, 3, 1]), (2, vec![5, 4])] {
+            let ats: Vec<u64> = db
+                .read(move |conn| store::events(conn, "app", max))
+                .await
+                .unwrap()
+                .iter()
+                .map(|b| b.at)
+                .collect();
+            assert_eq!(ats, expected, "max {max}");
+        }
+    }
+
+    #[tokio::test]
+    async fn prune_drops_checks_and_days_past_their_retention() {
+        let db = db_with(&["app"]).await;
+        store_beats(
+            &db,
+            "app",
+            vec![
+                beat(DAY_SECS + 10, Status::Up, None),
+                beat(5 * DAY_SECS + 10, Status::Up, None),
+            ],
+        )
+        .await;
+        let (checks, days) = db
+            .write(|tx| store::prune(tx, 3 * DAY_SECS, 2 * DAY_SECS))
+            .await
+            .unwrap();
+        assert_eq!((checks, days), (1, 1));
+        let left = db.read(|conn| store::since(conn, "app", 0)).await.unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].at, 5 * DAY_SECS + 10);
+    }
+
+    #[tokio::test]
+    async fn a_repeated_second_is_stored_and_counted_once() {
+        let db = db_with(&["app"]).await;
+        let inserted = db
+            .write(|tx| {
+                let first = store::insert(tx, "app", &beat(100, Status::Up, Some(5)))?;
+                let again = store::insert(tx, "app", &beat(100, Status::Down, None))?;
+                Ok((first, again))
+            })
+            .await
+            .unwrap();
+        assert_eq!(inserted, (true, false));
+        let days = db
+            .read(|conn| store::daily(conn, "app", 200, 1))
+            .await
+            .unwrap();
+        assert_eq!(days[0].uptime, Some(100.0));
     }
 
     #[tokio::test]
     async fn records_persist_across_a_reload_and_forget_removes_them() {
-        let dir = tempfile::tempdir().unwrap();
+        let db = db_with(&["app"]).await;
         {
             let monitor =
-                UptimeMonitor::load(dir.path(), policy(), outbound(), Notifiers::default())
+                UptimeMonitor::load(db.clone(), policy(), outbound(), Notifiers::default())
                     .await
                     .unwrap();
             let first = monitor
                 .record("app", beat(unix_now(), Status::Up, Some(12)))
-                .await
-                .unwrap();
+                .await;
             assert_eq!(
                 first.previous, None,
                 "an app's first heartbeat has no predecessor"
             );
             let second = monitor
-                .record("app", beat(unix_now(), Status::Down, None))
-                .await
-                .unwrap();
+                .record("app", beat(unix_now() + 1, Status::Down, None))
+                .await;
             assert_eq!(second.previous, Some(Status::Up));
             assert!(second.down_since.is_some(), "a new outage starts now");
         }
-        let monitor = UptimeMonitor::load(dir.path(), policy(), outbound(), Notifiers::default())
+        let monitor = UptimeMonitor::load(db.clone(), policy(), outbound(), Notifiers::default())
             .await
             .unwrap();
         assert_eq!(
@@ -1210,9 +1262,81 @@ mod tests {
                 .len(),
             2
         );
-        monitor.forget("app").await.unwrap();
-        assert!(!dir.path().join("app.jsonl").exists());
+        // Unregistering the app deletes its rows; `forget` drops what's in memory.
+        db.write(|tx| {
+            tx.execute("DELETE FROM apps WHERE slug = 'app'", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        monitor.forget("app").await;
         assert!(monitor.detail("app", RETENTION).await.beats.is_empty());
+        assert!(
+            monitor.overview(&[registered("app")]).await.monitors[0]
+                .recent
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_restart_rebuilds_the_outage_in_progress() {
+        let db = db_with(&["api"]).await;
+        let t = unix_now() - 600;
+        store_beats(
+            &db,
+            "api",
+            vec![
+                beat(t, Status::Down, None),
+                beat(t + 60, Status::Up, Some(80)),
+                beat(t + 120, Status::Down, None),
+                beat(t + 180, Status::Down, None),
+            ],
+        )
+        .await;
+        let monitor = UptimeMonitor::load(db, policy(), outbound(), Notifiers::default())
+            .await
+            .unwrap();
+        let summary = monitor.summary(&registered("api")).await;
+        assert_eq!(summary.recent.len(), 4);
+        assert_eq!(
+            summary.uptime_24h,
+            Some(25.0),
+            "loaded from the stored checks"
+        );
+
+        let recovered = monitor
+            .record("api", beat(t + 240, Status::Up, Some(90)))
+            .await;
+        assert_eq!(recovered.previous, Some(Status::Down));
+        assert_eq!(
+            recovered.down_since,
+            Some(t + 120),
+            "the outage began at the first down after the last up"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_detail_reports_an_outage_that_began_before_the_window() {
+        let db = db_with(&["api"]).await;
+        let now = unix_now();
+        store_beats(
+            &db,
+            "api",
+            vec![
+                beat(now - 7200, Status::Up, Some(50)),
+                beat(now - 5400, Status::Down, None),
+                beat(now - 1800, Status::Down, None),
+                beat(now - 600, Status::Up, Some(50)),
+            ],
+        )
+        .await;
+        let monitor = UptimeMonitor::load(db, policy(), outbound(), Notifiers::default())
+            .await
+            .unwrap();
+        let detail = monitor.detail("api", Duration::from_secs(3600)).await;
+        assert_eq!(detail.beats.len(), 2, "only the window's checks are drawn");
+        assert_eq!(detail.incidents.incidents.len(), 1);
+        assert_eq!(detail.incidents.incidents[0].started_at, now - 5400);
     }
 
     #[test]
@@ -1277,7 +1401,7 @@ mod tests {
         status: Status,
     ) -> Option<StatusChange> {
         let beat = beat(at, status, None);
-        let recorded = monitor.record(&app.slug, beat.clone()).await.unwrap();
+        let recorded = monitor.record(&app.slug, beat.clone()).await;
         let change = monitor.alert_for(app, &recorded, beat);
         monitor
             .dispatch(
@@ -1290,7 +1414,6 @@ mod tests {
 
     #[tokio::test]
     async fn reminders_repeat_on_schedule_and_stop_after_recovery() {
-        let dir = tempfile::tempdir().unwrap();
         let alerter = Alerter::new(crate::alerts::AlertSettings {
             remind_after: Some(Duration::from_mins(10)),
             ..Default::default()
@@ -1300,7 +1423,7 @@ mod tests {
             alerter: Some(alerter),
             ping_url: None,
         };
-        let monitor = UptimeMonitor::load(dir.path(), policy(), outbound(), notifiers)
+        let monitor = UptimeMonitor::load(db_with(&["api"]).await, policy(), outbound(), notifiers)
             .await
             .unwrap();
         let app = registered("api");
@@ -1342,15 +1465,24 @@ mod tests {
         assert!(!t.accepts(reqwest::StatusCode::OK));
     }
 
-    #[test]
-    fn daily_uptime_buckets_by_utc_day() {
+    #[tokio::test]
+    async fn daily_uptime_buckets_by_utc_day() {
         let day = DAY_SECS;
-        let history = History(VecDeque::from([
-            beat(10 * day + 10, Status::Up, None),
-            beat(10 * day + 20, Status::Down, None),
-            beat(12 * day + 5, Status::Degraded, None),
-        ]));
-        let days = history.daily(12 * day + 100, 3);
+        let db = db_with(&["app"]).await;
+        store_beats(
+            &db,
+            "app",
+            vec![
+                beat(10 * day + 10, Status::Up, None),
+                beat(10 * day + 20, Status::Down, None),
+                beat(12 * day + 5, Status::Degraded, None),
+            ],
+        )
+        .await;
+        let days = db
+            .read(move |conn| store::daily(conn, "app", 12 * day + 100, 3))
+            .await
+            .unwrap();
         assert_eq!(days.len(), 3);
         assert_eq!(
             days[0],
@@ -1365,18 +1497,5 @@ mod tests {
             Some(100.0),
             "degraded still counts as available"
         );
-    }
-
-    #[test]
-    fn down_streak_start_finds_where_the_outage_began() {
-        let history = History(VecDeque::from([
-            beat(0, Status::Down, None),
-            beat(60, Status::Up, None),
-            beat(120, Status::Down, None),
-            beat(180, Status::Down, None),
-        ]));
-        assert_eq!(history.down_streak_start(), Some(120));
-        let up = History(VecDeque::from([beat(0, Status::Up, None)]));
-        assert_eq!(up.down_streak_start(), None);
     }
 }
