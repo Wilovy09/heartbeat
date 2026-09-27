@@ -19,7 +19,7 @@ demo lang="es":
       ALLOWED_HOSTS="httpbin.org,*.invalid" COOKIE_SECURE=false \
       APPS_FILE=./data/demo/apps.json UPTIME_DIR=./data/demo/uptime \
       SESSIONS_FILE=./data/demo/sessions.json ALERT_TEMPLATES_FILE=./data/demo/alert_templates.json \
-      NOTICES_FILE=./data/demo/notices.json METRICS_TOKEN=demo \
+      NOTICES_FILE=./data/demo/notices.json THEME_FILE=./data/demo/theme.css METRICS_TOKEN=demo \
       ALERT_WEBHOOK_URLS=https://httpbin.org/post ALERT_MENTIONS="here,U0123DEMO" \
       PUBLIC_URL=http://localhost:8090 ./target/debug/heartbeat
 
@@ -44,7 +44,7 @@ e2e:
     PORT=8199 COOKIE_SECURE=false AUTH_MODE=password ADMIN_EMAIL=admin@example.com \
       ADMIN_PASSWORD_HASH="$hash" ALLOWED_HOSTS="*.example.com" \
       APPS_FILE="$dir/apps.json" UPTIME_DIR="$dir/uptime" SESSIONS_FILE="$dir/sessions.json" \
-      NOTICES_FILE="$dir/notices.json" ALERT_TEMPLATES_FILE="$dir/alert_templates.json" \
+      NOTICES_FILE="$dir/notices.json" ALERT_TEMPLATES_FILE="$dir/alert_templates.json" THEME_FILE="$dir/theme.css" \
       ./target/debug/heartbeat > "$dir/server.log" 2>&1 &
     pid=$!
     trap 'kill $pid; rm -rf "$dir"' EXIT

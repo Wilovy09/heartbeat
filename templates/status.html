@@ -3,6 +3,7 @@
 {% block topbar %}
 <span class="brand"><img src="/static/icon.svg" alt=""><span>{{ row.name }}</span></span>
 <span class="topbar-note">{{ t(k="status.header") }}</span>
+<div class="topbar-end">{% include "partials/theme_menu.html" %}</div>
 {% endblock %}
 {% block content %}
 <div class="status-page">

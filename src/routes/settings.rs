@@ -11,6 +11,8 @@ use crate::{
     alerts::{Alerter, TestKind},
     auth,
     config::{AuthMode, Config},
+    i18n::{I18n, Localize},
+    theme::{ThemeError, ThemeStore},
 };
 
 /// Configuration as the page shows it: secrets reduced to "set / not set".
@@ -69,6 +71,7 @@ pub async fn show(
     tera: web::Data<Tera>,
     cfg: web::Data<Config>,
     alerter: web::Data<Alerter>,
+    themes: web::Data<ThemeStore>,
 ) -> HttpResponse {
     if let Err(resp) = auth::require_admin(&req) {
         return resp;
@@ -84,6 +87,11 @@ pub async fn show(
     ctx.insert("alerts", &overview);
     ctx.insert("templates_json", &templates_json);
     ctx.insert("has_mentions", &has_mentions);
+    ctx.insert(
+        "theme_json",
+        &serde_json::to_string(&themes.css()).unwrap_or_else(|_| "\"\"".to_string()),
+    );
+    ctx.insert("theme_max_kb", &(crate::theme::MAX_THEME_BYTES / 1024));
     ctx.insert("config", &ConfigView::from(cfg.get_ref()));
     match tera.render("settings.html", &ctx) {
         Ok(html) => HttpResponse::Ok().content_type("text/html").body(html),
@@ -143,4 +151,62 @@ pub async fn save_templates(
         "templates": overview.templates,
         "previews": overview.previews,
     }))
+}
+
+#[derive(Deserialize)]
+pub struct ThemeRequest {
+    css: String,
+}
+
+/// POST /settings/theme -- saves the custom theme CSS (blank = none).
+pub async fn save_theme(
+    req: HttpRequest,
+    themes: web::Data<ThemeStore>,
+    i18n: web::Data<I18n>,
+    body: web::Json<ThemeRequest>,
+) -> HttpResponse {
+    if let Err(resp) = auth::require_admin_json(&req) {
+        return resp;
+    }
+    match themes.save(&body.css).await {
+        Ok(()) => {
+            tracing::info!("settings: custom theme updated");
+            HttpResponse::Ok().json(serde_json::json!({ "ok": true }))
+        }
+        Err(e @ ThemeError::Io { .. }) => {
+            tracing::error!(error = %e, "settings: could not save the custom theme");
+            HttpResponse::InternalServerError()
+                .json(serde_json::json!({ "error": e.localize(&i18n) }))
+        }
+        Err(e) => {
+            HttpResponse::BadRequest().json(serde_json::json!({ "error": e.localize(&i18n) }))
+        }
+    }
+}
+
+/// GET /theme/custom.css -- the custom theme, public: the login and status pages use it
+/// too. Revalidated on every load (cheap 304s), so a saved change shows up right away.
+pub async fn custom_css(req: HttpRequest, themes: web::Data<ThemeStore>) -> HttpResponse {
+    let css = themes.css();
+    let etag = format!(
+        "\"{:x}\"",
+        css.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+        })
+    );
+    let fresh = req
+        .headers()
+        .get(actix_web::http::header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v == etag);
+    if fresh {
+        return HttpResponse::NotModified()
+            .insert_header(("ETag", etag))
+            .finish();
+    }
+    HttpResponse::Ok()
+        .content_type("text/css; charset=utf-8")
+        .insert_header(("Cache-Control", "no-cache"))
+        .insert_header(("ETag", etag))
+        .body(css)
 }

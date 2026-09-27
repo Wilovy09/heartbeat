@@ -1,0 +1,110 @@
+/* Design tokens for every page. Dark is the default; [data-theme="light"] swaps the
+   lightness steps and keeps the same roles. A custom theme (/theme/custom.css, edited in
+   Settings) loads after this file when chosen and can override any of these. */
+:root {
+  color-scheme: dark;
+
+  /* Monitor glass and the bays mounted on it: one hue, lightness steps only. */
+  --glass: #0b0c0e;
+  --bay: #111316;
+  --bay-raised: #171a1e;
+  --well: #08090a;
+  /* Graticule: the grid lines of the monitor, doubling as every border. */
+  --graticule-soft: rgba(255, 255, 255, 0.045);
+  --graticule: rgba(255, 255, 255, 0.075);
+  --graticule-strong: rgba(255, 255, 255, 0.12);
+  /* Ink, four tiers. */
+  --ink: #e7e9ec;
+  --ink-2: #a4a9b1;
+  --ink-3: #6e737c;
+  --ink-4: #454a52;
+  /* Rhythm: the only color on screen, and it always means state. */
+  --rhythm-up: #3fd68a;
+  --rhythm-degraded: #f0b43c;
+  --rhythm-down: #f0514e;
+  --rhythm-flat: #262a30;
+  --pulse: #dd1818; /* brand: logo only, never a state */
+
+  /* Overlays, focus and depth. */
+  --overlay: rgba(255, 255, 255, 0.025);
+  --overlay-strong: rgba(255, 255, 255, 0.12);
+  --input-border-hover: rgba(255, 255, 255, 0.18);
+  --focus-ring: rgba(231, 233, 236, 0.35);
+  --highlight: rgba(231, 233, 236, 0.18);
+  --topbar: rgba(11, 12, 14, 0.86);
+  --shadow: rgba(0, 0, 0, 0.45);
+  --backdrop: rgba(4, 5, 6, 0.72);
+  --btn-hover: #ffffff;
+
+  /* State tints: backgrounds and borders derived from the rhythm colors. */
+  --down-tint: rgba(240, 81, 78, 0.08);
+  --down-tint-strong: rgba(240, 81, 78, 0.12);
+  --down-line: rgba(240, 81, 78, 0.26);
+  --down-halo: rgba(240, 81, 78, 0.18);
+  --down-ink: #f7a3a1;
+  --degraded-tint: rgba(240, 180, 60, 0.12);
+  --up-line: rgba(63, 214, 138, 0.35);
+  --info: #8aa4e8;
+  --info-tint: rgba(138, 164, 232, 0.12);
+  --debug-tint: rgba(110, 115, 124, 0.14);
+
+  /* Latency chart grid (ECG paper). */
+  --grid-minor: rgba(255, 255, 255, 0.028);
+  --grid-major: rgba(255, 255, 255, 0.055);
+
+  --font-sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+
+  /* Legacy names still used by the per-app log viewer. */
+  --bg: var(--glass); --panel: var(--bay); --border: var(--graticule-strong);
+  --text: var(--ink); --muted: var(--ink-3); --accent: var(--ink-2);
+  --warn: var(--rhythm-degraded); --error: var(--rhythm-down); --debug: var(--ink-3);
+  --up: var(--rhythm-up); --unknown: var(--rhythm-flat);
+}
+
+/* Light: printed chart paper. Same roles; the rhythm colors are deepened so they keep
+   their contrast on white. */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --glass: #f3f4f6;
+  --bay: #ffffff;
+  --bay-raised: #eceef1;
+  --well: #f7f8fa;
+  --graticule-soft: rgba(16, 20, 28, 0.06);
+  --graticule: rgba(16, 20, 28, 0.1);
+  --graticule-strong: rgba(16, 20, 28, 0.17);
+  --ink: #15171b;
+  --ink-2: #474c55;
+  --ink-3: #6a707a;
+  --ink-4: #9aa0a9;
+  --rhythm-up: #12a05f;
+  --rhythm-degraded: #c4860a;
+  --rhythm-down: #d8392f;
+  --rhythm-flat: #dde0e5;
+
+  --overlay: rgba(16, 20, 28, 0.03);
+  --overlay-strong: rgba(16, 20, 28, 0.16);
+  --input-border-hover: rgba(16, 20, 28, 0.3);
+  --focus-ring: rgba(21, 23, 27, 0.35);
+  --highlight: rgba(21, 23, 27, 0.11);
+  --topbar: rgba(243, 244, 246, 0.86);
+  --shadow: rgba(16, 20, 28, 0.14);
+  --backdrop: rgba(16, 20, 28, 0.34);
+  --btn-hover: #2c2f35;
+
+  --down-tint: rgba(216, 57, 47, 0.07);
+  --down-tint-strong: rgba(216, 57, 47, 0.11);
+  --down-line: rgba(216, 57, 47, 0.32);
+  --down-halo: rgba(216, 57, 47, 0.16);
+  --down-ink: #a8271f;
+  --degraded-tint: rgba(196, 134, 10, 0.13);
+  --up-line: rgba(18, 160, 95, 0.4);
+  --info: #3a5fc4;
+  --info-tint: rgba(58, 95, 196, 0.1);
+  --debug-tint: rgba(106, 112, 122, 0.12);
+
+  --grid-minor: rgba(16, 20, 28, 0.035);
+  --grid-major: rgba(16, 20, 28, 0.075);
+}

@@ -388,8 +388,15 @@
     if (e.target.closest("[data-close-dialog]")) e.target.closest("dialog").close();
     else if (e.target.matches("dialog.modal")) e.target.close();
   });
+  // The embed previews follow the page: light on the light theme, dark otherwise.
+  function syncEmbedThemes() {
+    const theme = window.HBTheme && window.HBTheme.resolved() === "light" ? "light" : "dark";
+    for (const embed of document.querySelectorAll("heartbeat-status")) embed.setAttribute("theme", theme);
+  }
+  document.addEventListener("hb:theme", syncEmbedThemes);
   document.addEventListener("DOMContentLoaded", () => {
     for (const dialog of document.querySelectorAll("dialog[data-open-on-load]")) dialog.showModal();
+    syncEmbedThemes();
     loadStates();
     for (const pre of document.querySelectorAll(".snippet-code")) pre.textContent = embedSnippet(pre.dataset);
     for (const pre of document.querySelectorAll(".badge-code")) pre.textContent = badgeSnippet(pre.dataset);
@@ -406,9 +413,9 @@
   .empty .btn { margin-left: 8px; }
 
   /* Register modal. */
-  .modal { width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 48px); padding: 0; border: 1px solid var(--graticule-strong); border-radius: 12px; background: var(--bay); color: var(--ink); box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55); }
+  .modal { width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 48px); padding: 0; border: 1px solid var(--graticule-strong); border-radius: 12px; background: var(--bay); color: var(--ink); box-shadow: 0 24px 64px var(--shadow); }
   .modal[open] { animation: modal-in 200ms var(--ease-out); }
-  .modal::backdrop { background: rgba(4, 5, 6, 0.72); backdrop-filter: blur(2px); }
+  .modal::backdrop { background: var(--backdrop); backdrop-filter: blur(2px); }
   @keyframes modal-in { from { opacity: 0; transform: translateY(8px) scale(0.98); } }
   @media (prefers-reduced-motion: reduce) { .modal[open] { animation: none; } }
   .modal-head { display: flex; align-items: center; justify-content: space-between; }
@@ -455,17 +462,10 @@
   .entry-status.st-text-degraded { color: var(--rhythm-degraded); }
 
   /* Pause menu: a disclosure with one submit per duration. */
-  .menu { position: relative; }
-  .menu > summary { list-style: none; }
-  .menu > summary::-webkit-details-marker { display: none; }
+  /* The pause menu's panel is a <form>: keep it a flex box despite `.entry-actions form`. */
+  .entry-actions .menu-pop { display: flex; }
   .menu .caret { font-size: 10px; color: var(--ink-4); }
   .menu[open] > summary { background: var(--bay-raised); color: var(--ink); }
-  .entry-actions .menu-pop, .menu-pop { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 180px; display: flex; flex-direction: column; padding: 4px; background: var(--bay-raised); border: 1px solid var(--graticule-strong); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); transform-origin: top right; animation: menu-in 150ms var(--ease-out); }
-  .menu-label { padding: 6px 10px 4px; font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); }
-  .menu-pop button { height: 30px; padding: 0 10px; border: 0; border-radius: 6px; background: none; color: var(--ink); font: 13px var(--font-sans); text-align: left; cursor: pointer; }
-  .menu-pop button:hover, .menu-pop button:focus-visible { background: var(--bay); outline: none; }
-  @keyframes menu-in { from { opacity: 0; transform: scale(0.96); } }
-  @media (prefers-reduced-motion: reduce) { .menu-pop { animation: none; } }
 
   /* Panels: edit and share, collapsed by default. */
   /* Both summaries share one row; an open panel drops below them, full width. */
@@ -487,7 +487,7 @@
   .share-actions { display: flex; gap: 8px; align-items: center; }
   .share-rotate { padding-top: 14px; border-top: 1px solid var(--graticule-soft); }
   .badge-preview { align-self: flex-start; height: 20px; }
-  .danger-zone { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 18px; padding: 12px 14px; border: 1px solid rgba(240, 81, 78, 0.22); border-radius: 8px; }
+  .danger-zone { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 18px; padding: 12px 14px; border: 1px solid var(--down-line); border-radius: 8px; }
   .danger-zone .hint { margin-top: 2px; }
   .danger-title { font-size: 13px; font-weight: 500; color: var(--rhythm-down); }
   @media (max-width: 720px) { .entry-status { margin-left: 0; width: 100%; order: 2; } .entries-filter { width: 100%; } .entries-head { flex-wrap: wrap; } }

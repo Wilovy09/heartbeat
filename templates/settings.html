@@ -140,6 +140,30 @@
     {% endif %}
   </section>
 
+  <!-- Appearance: the custom theme users can pick from the top bar. -->
+  <section class="bay" x-data="themeEditor({{ theme_json }})">
+    <div class="section-head">
+      <h2 class="bay-title" style="margin: 0">{{ t(k="theme.section") }}</h2>
+      <span class="tpl-state" x-text="stateLabel()"></span>
+    </div>
+    <p class="hint section-hint">{{ t(k="theme.hint", kb=theme_max_kb) }}</p>
+    <div class="theme-editor">
+      <textarea class="tpl-input mono theme-css" rows="12" spellcheck="false" x-model="css" aria-label="{{ t(k="theme.section") }}" placeholder=":root {&#10;  --glass: #0d1117;&#10;  --rhythm-up: #2ea043;&#10;}"></textarea>
+      <div class="theme-tools">
+        <button type="button" class="btn ghost" @click="insertTemplate()">{{ t(k="theme.template") }}</button>
+        <label class="btn ghost file-btn">{{ t(k="theme.upload") }}<input type="file" accept=".css,text/css" @change="upload($event)" hidden></label>
+        <button type="button" class="btn ghost" x-show="css.trim()" @click="download()">{{ t(k="theme.download") }}</button>
+      </div>
+    </div>
+    <p class="error-box" x-show="error" x-text="error" style="margin: 12px 0 0"></p>
+    <div class="panel-foot">
+      <span class="result" x-show="savedNote" x-text="savedNote"></span>
+      <button type="button" class="btn ghost" x-show="saved" @click="css = ''; save()">{{ t(k="theme.remove") }}</button>
+      <button type="button" class="btn secondary" @click="previewing ? stopPreview() : preview()" x-text="previewing ? T('theme.stop_preview') : T('theme.preview')"></button>
+      <button type="button" class="btn" :disabled="saving || css === saved" @click="save()">{{ t(k="settings.save") }}</button>
+    </div>
+  </section>
+
   <!-- Current configuration -->
   <section class="bay">
     <h2 class="bay-title">{{ t(k="settings.current") }}</h2>
@@ -229,10 +253,14 @@
   .chat-app { padding: 0 4px; border-radius: 3px; background: var(--bay-raised); font-size: 9px; font-weight: 600; letter-spacing: 0.04em; color: var(--ink-3); }
   .chat-time { font-size: 11px; color: var(--ink-4); }
   .chat-text { font-size: 14px; line-height: 1.55; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
-  .chat-text .mention { padding: 0 3px; border-radius: 3px; background: rgba(231, 233, 236, 0.12); color: var(--ink); font-weight: 500; }
+  .chat-text .mention { padding: 0 3px; border-radius: 3px; background: var(--highlight); color: var(--ink); font-weight: 500; }
   .chat-text .link { color: var(--ink-2); text-decoration: underline; text-decoration-color: var(--ink-4); text-underline-offset: 2px; }
   .chat-empty { color: var(--ink-4); font-style: italic; }
 
+  .theme-editor { display: flex; flex-direction: column; gap: 10px; }
+  .theme-css { min-height: 220px; }
+  .theme-tools { display: flex; gap: 6px; flex-wrap: wrap; }
+  .file-btn { cursor: pointer; }
   .config-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px 32px; }
   .group-title { margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--ink); }
   .config-group .config { grid-template-columns: minmax(120px, 170px) minmax(0, 1fr); }
@@ -240,7 +268,7 @@
   .tpl-state { margin-left: auto; font-size: 11px; color: var(--ink-3); }
   .tpl-label { margin: 0; font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); }
   .tpl-input { width: 100%; min-height: 76px; padding: 8px 10px; resize: vertical; background: var(--well); border: 1px solid var(--graticule-strong); border-radius: 6px; color: var(--ink); font-size: 12px; line-height: 1.6; }
-  .tpl-input:focus-visible { outline: 2px solid rgba(231, 233, 236, 0.35); outline-offset: 2px; }
+  .tpl-input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
   .vars { display: flex; flex-wrap: wrap; gap: 4px; }
   .var { height: 22px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--graticule); background: var(--bay-raised); color: var(--ink-2); font: 11px var(--font-mono); cursor: pointer; transition: color 120ms, border-color 120ms; }
   .var:hover { color: var(--ink); border-color: var(--graticule-strong); }

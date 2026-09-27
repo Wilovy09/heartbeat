@@ -14,8 +14,17 @@ const REFRESH_MS = 30000;
 // changes, not on every auto-refresh tick.
 const LIVE_DETAIL_MAX_HOURS = 24;
 const CHART = { height: 260, left: 48, right: 12, top: 12, bottom: 26 };
-// Mirrors the rhythm/ink tokens in base.html (SVG attributes can't read CSS variables).
-const COLOR = { up: '#3fd68a', degraded: '#f0b43c', down: '#f0514e', ink3: '#6e737c', ink4: '#454a52' };
+// The chart is an SVG string, so it reads the theme's tokens at draw time (and redraws on
+// a theme change, see `themeTick`) instead of hardcoding colors.
+const CHART_TOKENS = {
+  up: '--rhythm-up', degraded: '--rhythm-degraded', down: '--rhythm-down',
+  ink3: '--ink-3', ink4: '--ink-4', bay: '--bay',
+  gridMinor: '--grid-minor', gridMajor: '--grid-major', frame: '--graticule', downBand: '--down-halo',
+};
+function themeColors() {
+  const style = getComputedStyle(document.documentElement);
+  return Object.fromEntries(Object.entries(CHART_TOKENS).map(([key, name]) => [key, style.getPropertyValue(name).trim()]));
+}
 const FONT_MONO = '"IBM Plex Mono", ui-monospace, monospace';
 const LOCALE = document.documentElement.lang === 'en' ? 'en-US' : 'es-MX';
 const RANGES = [
@@ -51,11 +60,13 @@ function uptimeDashboard() {
     chartWidth: 0,
     hover: null,
     showAllEvents: false,
+    themeTick: 0,
     RANGES,
     STRIP_SLOTS,
     CENSUS_KEYS,
 
     async init() {
+      document.addEventListener('hb:theme', () => { this.themeTick++; });
       this.selected = location.hash.slice(1) || null;
       window.addEventListener('hashchange', () => {
         this.selected = location.hash.slice(1) || null;
@@ -305,6 +316,8 @@ function uptimeDashboard() {
     },
 
     chartSvg() {
+      void this.themeTick; // re-render when the theme changes
+      const COLOR = themeColors();
       if (!this.chartWidth) return '';
       const s = this.chartScale();
       const w = this.chartWidth;
@@ -314,14 +327,14 @@ function uptimeDashboard() {
       // plot's top-left corner so it lines up with the axes.
       parts.push(`<defs>
         <pattern id="ecg-minor" width="8" height="8" patternUnits="userSpaceOnUse" x="${CHART.left}" y="${CHART.top}">
-          <path d="M8 0H0V8" fill="none" stroke="rgba(255,255,255,0.028)" stroke-width="1"/>
+          <path d="M8 0H0V8" fill="none" stroke="${COLOR.gridMinor}" stroke-width="1"/>
         </pattern>
         <pattern id="ecg-major" width="40" height="40" patternUnits="userSpaceOnUse" x="${CHART.left}" y="${CHART.top}">
           <rect width="40" height="40" fill="url(#ecg-minor)"/>
-          <path d="M40 0H0V40" fill="none" stroke="rgba(255,255,255,0.055)" stroke-width="1"/>
+          <path d="M40 0H0V40" fill="none" stroke="${COLOR.gridMajor}" stroke-width="1"/>
         </pattern>
       </defs>`);
-      parts.push(`<rect x="${CHART.left}" y="${CHART.top}" width="${s.plotW}" height="${s.plotH}" fill="url(#ecg-major)" stroke="rgba(255,255,255,0.075)"/>`);
+      parts.push(`<rect x="${CHART.left}" y="${CHART.top}" width="${s.plotW}" height="${s.plotH}" fill="url(#ecg-major)" stroke="${COLOR.frame}"/>`);
 
       for (let i = 0; i <= 4; i++) {
         const ms = (s.yMax / 4) * i;
@@ -362,7 +375,7 @@ function uptimeDashboard() {
       [...buckets.keys()].sort((a, b) => a - b).forEach((col, i, keys) => {
         const bucket = buckets.get(col);
         if (bucket.down) {
-          parts.push(`<rect x="${colX(col) - bandW / 2}" y="${CHART.top}" width="${bandW}" height="${s.plotH}" fill="rgba(240,81,78,0.16)"/>`);
+          parts.push(`<rect x="${colX(col) - bandW / 2}" y="${CHART.top}" width="${bandW}" height="${s.plotH}" fill="${COLOR.downBand}"/>`);
           parts.push(`<rect x="${colX(col) - bandW / 2}" y="${CHART.top}" width="${bandW}" height="3" fill="${COLOR.down}"/>`);
         }
         // A gap longer than a few check intervals (or a Down) breaks the line instead of
@@ -398,7 +411,7 @@ function uptimeDashboard() {
       if (this.hover) {
         parts.push(`<line x1="${this.hover.x}" x2="${this.hover.x}" y1="${CHART.top}" y2="${baseY}" stroke="${COLOR.ink3}" stroke-width="1"/>`);
         if (this.hover.dotY != null) {
-          parts.push(`<circle cx="${this.hover.x}" cy="${this.hover.dotY}" r="5" fill="${COLOR[this.hover.beat.status]}" stroke="#111316" stroke-width="2"/>`);
+          parts.push(`<circle cx="${this.hover.x}" cy="${this.hover.dotY}" r="5" fill="${COLOR[this.hover.beat.status]}" stroke="${COLOR.bay}" stroke-width="2"/>`);
         }
       }
       if (this.detail.beats.length === 0) {
