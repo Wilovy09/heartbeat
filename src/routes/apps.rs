@@ -363,9 +363,7 @@ pub async fn delete(
     let slug = path.into_inner();
     match registry.remove(&slug).await {
         Ok(()) => {
-            if let Err(e) = monitor.forget(&slug).await {
-                tracing::error!(app = %slug, error = %e, "uptime: failed to drop history");
-            }
+            monitor.forget(&slug).await;
             back_to_apps()
         }
         Err(e) => render_apps(&tera, &cfg, &registry, Some(&e.localize(&i18n)), None).await,
