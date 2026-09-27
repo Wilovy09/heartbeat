@@ -1,0 +1,51 @@
+# Builds the landing page and docs (site/build.py) and publishes them to GitHub Pages
+# whenever what they're made of changes on main. Requires Settings -> Pages -> Source:
+# "GitHub Actions".
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "README.md"
+      - "README_ES.md"
+      - "static/tokens.css"
+      - "static/icon.svg"
+      - ".github/public/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+        id: pages
+      - uses: astral-sh/setup-uv@v6
+      - run: uv run site/build.py
+        env:
+          SITE_URL: ${{ steps.pages.outputs.base_url }}
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
