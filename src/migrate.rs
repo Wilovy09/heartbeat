@@ -12,9 +12,13 @@
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
+use crate::alert_templates::{self, AlertTemplates, TemplateError, TemplateKind};
+use crate::auth::{self, SessionError};
 use crate::config::Config;
 use crate::db::{Db, DbError};
+use crate::notices::{self, Notice, NoticeError};
 use crate::registry::{self, RegistryError};
+use crate::theme::{self, ThemeError};
 use crate::uptime::{self, Heartbeat};
 
 #[derive(Debug, thiserror::Error)]
@@ -23,6 +27,14 @@ pub enum MigrateError {
     Db(#[from] DbError),
     #[error(transparent)]
     Registry(#[from] RegistryError),
+    #[error(transparent)]
+    Sessions(#[from] SessionError),
+    #[error(transparent)]
+    Notices(#[from] NoticeError),
+    #[error(transparent)]
+    Templates(#[from] TemplateError),
+    #[error(transparent)]
+    Theme(#[from] ThemeError),
     #[error(
         "{0} already has apps: it was migrated before (use a new DATABASE_PATH to import again)"
     )]
@@ -81,13 +93,29 @@ pub struct Report {
     pub skipped_lines: usize,
     /// Checks older than both retentions, or repeating an earlier one's second, left out.
     pub dropped_checks: usize,
+    /// Live sessions (nobody has to log in again).
+    pub sessions: usize,
+    pub notices: usize,
+    /// Alert templates that had been customized.
+    pub templates: usize,
+    /// Whether there was a custom theme.
+    pub theme: bool,
     /// 0.2 files renamed to `*.migrated` (none on a dry run or with `--keep`).
     pub renamed: Vec<PathBuf>,
 }
 
 impl std::fmt::Display for Report {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} apps, {} checks", self.apps, self.checks)?;
+        write!(
+            f,
+            "{} apps, {} checks, {} sessions, {} notices, {} custom alert templates{}",
+            self.apps,
+            self.checks,
+            self.sessions,
+            self.notices,
+            self.templates,
+            if self.theme { ", a custom theme" } else { "" }
+        )?;
         if self.daily_only > 0 {
             write!(f, " (+{} older ones in the daily uptime)", self.daily_only)?;
         }
@@ -112,6 +140,10 @@ impl std::fmt::Display for Report {
 /// The 0.2 data found on disk, read and ready to import.
 struct Legacy {
     apps: Vec<registry::RegisteredApp>,
+    sessions: Vec<(String, auth::Session)>,
+    notices: Vec<Notice>,
+    templates: AlertTemplates,
+    theme: String,
     /// The files it came from, renamed once the import is committed.
     files: Vec<PathBuf>,
 }
@@ -124,11 +156,28 @@ impl Legacy {
         for app in apps.iter_mut().filter(|a| a.embed_token.is_empty()) {
             app.embed_token = registry::new_embed_token()?;
         }
-        let files = [apps_file, PathBuf::from(&cfg.uptime_dir)]
+        let sessions_file = PathBuf::from(&cfg.sessions_file);
+        let notices_file = PathBuf::from(&cfg.notices_file);
+        let templates_file = PathBuf::from(&cfg.alert_templates_file);
+        let theme_file = PathBuf::from(&cfg.theme_file);
+        Ok(Self {
+            apps,
+            sessions: auth::read_legacy_file(&sessions_file)?,
+            notices: notices::read_legacy_file(&notices_file)?,
+            templates: alert_templates::read_legacy_file(&templates_file)?,
+            theme: theme::read_legacy_file(&theme_file)?,
+            files: [
+                apps_file,
+                PathBuf::from(&cfg.uptime_dir),
+                sessions_file,
+                notices_file,
+                templates_file,
+                theme_file,
+            ]
             .into_iter()
             .filter(|p| p.exists())
-            .collect();
-        Ok(Self { apps, files })
+            .collect(),
+        })
     }
 
     fn is_empty(&self) -> bool {
@@ -152,6 +201,13 @@ pub async fn run(cfg: &Config, options: Options) -> Result<Report, MigrateError>
 
     let expected = legacy.apps.len();
     let apps = legacy.apps;
+    let others = Others {
+        sessions: legacy.sessions,
+        notices: legacy.notices,
+        templates: legacy.templates,
+        theme: legacy.theme,
+    };
+    let summary = others.summary();
     let uptime_dir = PathBuf::from(&cfg.uptime_dir);
     let now = uptime::unix_now();
     let cutoffs = Cutoffs {
@@ -171,6 +227,7 @@ pub async fn run(cfg: &Config, options: Options) -> Result<Report, MigrateError>
                     cutoffs,
                 )?;
             }
+            others.import(tx)?;
             let count = |sql: &str| -> Result<usize, DbError> {
                 let n: i64 = tx.query_row(sql, [], |row| row.get(0))?;
                 Ok(usize::try_from(n).unwrap_or(usize::MAX))
@@ -182,6 +239,14 @@ pub async fn run(cfg: &Config, options: Options) -> Result<Report, MigrateError>
                 return Err(DbError::Integrity(format!(
                     "{} checks imported (+{} only per day), {stored_checks} stored, {counted} counted per day",
                     history.checks, history.daily_only
+                )));
+            }
+            let stored_sessions = count("SELECT count(*) FROM sessions")?;
+            let stored_notices = count("SELECT count(*) FROM notices")?;
+            if stored_sessions < summary.sessions || stored_notices < summary.notices {
+                return Err(DbError::Integrity(format!(
+                    "{} sessions and {} notices read, {stored_sessions} and {stored_notices} stored",
+                    summary.sessions, summary.notices
                 )));
             }
             Ok((stored_apps, history))
@@ -199,6 +264,10 @@ pub async fn run(cfg: &Config, options: Options) -> Result<Report, MigrateError>
         daily_only: history.daily_only,
         skipped_lines: history.skipped_lines,
         dropped_checks: history.dropped,
+        sessions: summary.sessions,
+        notices: summary.notices,
+        templates: summary.templates,
+        theme: summary.theme,
         renamed: Vec::new(),
     };
     if !options.dry_run && !options.keep {
@@ -215,6 +284,48 @@ pub async fn run(cfg: &Config, options: Options) -> Result<Report, MigrateError>
 }
 
 const DAY_SECS: u64 = 24 * 3600;
+
+/// Everything besides apps and history: small, imported as is.
+struct Others {
+    sessions: Vec<(String, auth::Session)>,
+    notices: Vec<Notice>,
+    templates: AlertTemplates,
+    theme: String,
+}
+
+/// How much of each `Others` holds, for the report and the checks.
+#[derive(Debug, Clone, Copy)]
+struct OthersSummary {
+    sessions: usize,
+    notices: usize,
+    templates: usize,
+    theme: bool,
+}
+
+impl Others {
+    fn summary(&self) -> OthersSummary {
+        OthersSummary {
+            sessions: self.sessions.len(),
+            notices: self.notices.len(),
+            templates: TemplateKind::ALL
+                .into_iter()
+                .filter(|k| self.templates.get(*k).is_some())
+                .count(),
+            theme: !self.theme.is_empty(),
+        }
+    }
+
+    fn import(&self, tx: &rusqlite::Transaction<'_>) -> Result<(), DbError> {
+        for (id, session) in &self.sessions {
+            auth::save_session(tx, id, session)?;
+        }
+        for notice in &self.notices {
+            notices::save_notice(tx, notice)?;
+        }
+        alert_templates::save_templates(tx, &self.templates)?;
+        theme::save_theme(tx, &self.theme)
+    }
+}
 
 /// What of a 0.2 history is kept: checks since `checks`, daily counts since `days`.
 #[derive(Debug, Clone, Copy)]
@@ -497,6 +608,80 @@ mod tests {
         if (now - 120) / 86_400 == now / 86_400 {
             assert_eq!(uptime_today, (1, 1));
         }
+    }
+
+    #[tokio::test]
+    async fn imports_sessions_notices_templates_and_the_theme() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        write_legacy_apps(dir.path());
+        let live = uptime::unix_now() + 3600;
+        std::fs::write(
+            dir.path().join("sessions.json"),
+            format!(
+                r#"{{"s1":{{"upstream_token":"jwt","expires_at":{live}}},
+                     "gone":{{"upstream_token":"x","expires_at":1}}}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("notices.json"),
+            r#"[{"id":"n1","title":"Slow","body":"","state":"identified",
+                 "created_at":10,"updated_at":20,"apps":["api"]}]"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("alert_templates.json"),
+            r#"{"down":"ALERTA {app}","degraded":"   "}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("theme.css"), ":root { --glass: #101820; }").unwrap();
+
+        let report = run(&cfg, Options::default()).await.unwrap();
+        assert_eq!(
+            (
+                report.sessions,
+                report.notices,
+                report.templates,
+                report.theme
+            ),
+            (1, 1, 1, true)
+        );
+        assert_eq!(
+            report.renamed.len(),
+            5,
+            "apps, sessions, notices, templates, theme"
+        );
+
+        let db = Db::open(&cfg.database_path).await.unwrap();
+        let notices = notices::NoticeStore::load(db.clone())
+            .await
+            .unwrap()
+            .list()
+            .await;
+        assert_eq!(
+            (notices[0].id.as_str(), notices[0].apps.as_slice()),
+            ("n1", &["api".to_string()][..])
+        );
+        let i18n = crate::i18n::I18n::new(crate::i18n::Lang::Es);
+        let templates = alert_templates::TemplateStore::load(db.clone(), &i18n)
+            .await
+            .unwrap();
+        assert_eq!(templates.effective(TemplateKind::Down), "ALERTA {app}");
+        assert!(!templates.is_custom(TemplateKind::Degraded));
+        let theme = theme::ThemeStore::load(db.clone()).await.unwrap();
+        assert!(theme.css().contains("#101820"));
+        let sessions: i64 = db
+            .read(|conn| {
+                Ok(
+                    conn.query_row("SELECT count(*) FROM sessions WHERE id = 's1'", [], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(sessions, 1, "only the live session");
     }
 
     #[test]

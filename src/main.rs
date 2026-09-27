@@ -109,9 +109,8 @@ async fn run() -> Result<(), StartupError> {
     let registry = AppRegistry::load(db.clone()).await?;
     let outbound = Outbound::new(&cfg.allowed_hosts)?;
 
-    let templates = std::sync::Arc::new(
-        alert_templates::TemplateStore::load(&cfg.alert_templates_file, &i18n).await?,
-    );
+    let templates =
+        std::sync::Arc::new(alert_templates::TemplateStore::load(db.clone(), &i18n).await?);
     let alerter = Alerter::new(AlertSettings {
         webhook_urls: cfg.alert_webhook_urls.clone(),
         on_degraded: cfg.alert_on_degraded,
@@ -146,9 +145,9 @@ async fn run() -> Result<(), StartupError> {
     let host = cfg.host.clone();
     let port = cfg.port;
 
-    let sessions = SessionStore::load(&cfg.sessions_file).await?;
-    let notices = notices::NoticeStore::load(&cfg.notices_file).await?;
-    let themes = theme::ThemeStore::load(&cfg.theme_file).await?;
+    let sessions = SessionStore::load(db.clone()).await?;
+    let notices = notices::NoticeStore::load(db.clone()).await?;
+    let themes = theme::ThemeStore::load(db.clone()).await?;
 
     let auth_mode = match &cfg.auth {
         config::AuthMode::Upstream { .. } => "upstream",
