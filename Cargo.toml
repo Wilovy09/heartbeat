@@ -27,6 +27,14 @@ url = "2"
 x509-parser = "0.17"
 argon2 = { version = "0.5", features = ["std"] }
 rust-embed = { version = "8", features = ["mime-guess"] }
+# SQLite compiled into the binary (`bundled`): no system library to install. Without the
+# default wasm backend; `cache` keeps `prepare_cached`.
+rusqlite = { version = "0.40", default-features = false, features = [
+    "bundled",
+    "cache",
+    "backup",
+    "serde_json",
+] }
 
 [features]
 # `just demo` only: synthetic logs for the demo apps (see src/demo.rs).
