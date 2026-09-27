@@ -10,6 +10,7 @@ mod db;
 #[cfg(feature = "demo")]
 mod demo;
 mod i18n;
+mod migrate;
 mod notices;
 mod outbound;
 mod password;
@@ -45,6 +46,10 @@ enum StartupError {
     #[error("could not load templates: {0}")]
     Templates(#[from] tera::Error),
     #[error(transparent)]
+    Db(#[from] db::DbError),
+    #[error(transparent)]
+    Migrate(#[from] migrate::MigrateError),
+    #[error(transparent)]
     Registry(#[from] registry::RegistryError),
     #[error("could not build the HTTP client: {0}")]
     Outbound(#[from] outbound::OutboundError),
@@ -77,6 +82,10 @@ async fn main() -> ExitCode {
     if std::env::args().nth(1).as_deref() == Some("hash-password") {
         return hash_password_command();
     }
+    // `heartbeat migrate [--dry-run] [--keep]`: imports a 0.2 install into the database.
+    if std::env::args().nth(1).as_deref() == Some("migrate") {
+        return migrate_command().await;
+    }
 
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
@@ -95,7 +104,9 @@ async fn run() -> Result<(), StartupError> {
     i18n.register(&mut tera);
     assets::load_templates(&mut tera)?;
 
-    let registry = AppRegistry::load(&cfg.apps_file).await?;
+    let db = db::Db::open(&cfg.database_path).await?;
+    migrate::ensure_nothing_pending(&cfg, &db).await?;
+    let registry = AppRegistry::load(db.clone()).await?;
     let outbound = Outbound::new(&cfg.allowed_hosts)?;
 
     let templates = std::sync::Arc::new(
@@ -112,13 +123,14 @@ async fn run() -> Result<(), StartupError> {
     })?;
 
     let monitor = UptimeMonitor::load(
-        &cfg.uptime_dir,
+        db.clone(),
         CheckPolicy {
             interval: Duration::from_secs(cfg.uptime_interval_secs),
             degraded_after_ms: cfg.uptime_degraded_ms,
             retries: cfg.uptime_retries,
             cert_warn_days: cfg.uptime_cert_warn_days,
             retention: Duration::from_hours(24 * u64::from(cfg.uptime_retention_days)),
+            daily_retention: Duration::from_hours(24 * u64::from(cfg.uptime_daily_retention_days)),
             timeout: Duration::from_secs(u64::from(cfg.uptime_timeout_secs)),
             mass_down_pct: cfg.uptime_mass_down_pct,
             lang: cfg.app_lang,
@@ -190,6 +202,45 @@ async fn run() -> Result<(), StartupError> {
     .run()
     .await?;
     Ok(())
+}
+
+async fn migrate_command() -> ExitCode {
+    let options = match migrate::Options::from_args(std::env::args().skip(2)) {
+        Ok(options) => options,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let cfg = match Config::from_env() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match migrate::run(&cfg, options).await {
+        Ok(report) if options.dry_run => {
+            println!("Dry run: would import {report} into {}", cfg.database_path);
+            ExitCode::SUCCESS
+        }
+        Ok(report) => {
+            println!("Imported {report} into {}", cfg.database_path);
+            for path in &report.renamed {
+                println!("  renamed {}", path.display());
+            }
+            ExitCode::SUCCESS
+        }
+        // The data is in the database by then; only the clean-up of the old files failed.
+        Err(e @ migrate::MigrateError::Rename { .. }) => {
+            eprintln!("Imported, but the 0.2 files were left in place: {e}");
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("Migration failed, nothing was changed: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn hash_password_command() -> ExitCode {
