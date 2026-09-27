@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="{{ lang }}">
+<head>
+{{ head_html }}
+</head>
+<body class="landing">
+{{ nav_html }}
+<main id="main">
+  <section class="hero" aria-labelledby="hero-title">
+    <div class="orb orb-a" aria-hidden="true"></div>
+    <div class="orb orb-b" aria-hidden="true"></div>
+    <div class="hero-inner">
+      <div class="hero-copy">
+        <p class="pill stagger"><span class="vital st-up" aria-hidden="true"></span>{{ hero.pill }}</p>
+        <h1 id="hero-title" class="hero-title shimmer stagger">{{ hero.title }}</h1>
+        <p class="hero-lead stagger">{{ hero.lead }}</p>
+        <div class="hero-actions stagger">
+          <a class="btn btn-primary" href="{{ docs_url }}">{{ hero.cta_docs }}</a>
+          <a class="btn btn-ghost" href="{{ repo }}">{{ hero.cta_github }}</a>
+        </div>
+        <div class="try stagger">
+          <span class="try-label">{{ hero.try }}</span>
+          <div class="code-line">
+            <code>docker run -d --env-file .env -p 8090:8090 -v ./data:/app/data ghcr.io/wilovy09/heartbeat:latest</code>
+            <button type="button" class="copy" data-copy data-label="{{ deploy.copy }}" data-done="{{ deploy.copied }}">{{ deploy.copy }}</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- The signature: the product itself, beating. Four apps, one of which goes down
+           and comes back while you read. -->
+      <div class="monitor glass stagger" role="img" aria-label="{{ demo.aria }}"
+           data-up="{{ demo.up }}" data-degraded="{{ demo.degraded }}" data-down="{{ demo.down }}">
+        <div class="monitor-head">
+          <span class="vital st-up" data-verdict aria-hidden="true"></span>
+          <span>{{ demo.caption }}</span>
+        </div>
+        <div class="monitor-rows">
+          <div class="monitor-row" data-profile="steady"><div class="row-head"><span class="vital st-up"></span><span class="row-name">billing-api</span><span class="row-state">{{ demo.up }}</span><span class="row-lat">142 ms</span></div><div class="beats" aria-hidden="true"></div></div>
+          <div class="monitor-row" data-profile="slow"><div class="row-head"><span class="vital st-up"></span><span class="row-name">checkout</span><span class="row-state">{{ demo.up }}</span><span class="row-lat">388 ms</span></div><div class="beats" aria-hidden="true"></div></div>
+          <div class="monitor-row" data-profile="outage"><div class="row-head"><span class="vital st-up"></span><span class="row-name">search</span><span class="row-state">{{ demo.up }}</span><span class="row-lat">96 ms</span></div><div class="beats" aria-hidden="true"></div></div>
+          <div class="monitor-row" data-profile="steady"><div class="row-head"><span class="vital st-up"></span><span class="row-name">workers</span><span class="row-state">{{ demo.up }}</span><span class="row-lat">61 ms</span></div><div class="beats" aria-hidden="true"></div></div>
+        </div>
+      </div>
+    </div>
+    <svg class="ecg" viewBox="0 0 1200 110" preserveAspectRatio="none" aria-hidden="true">
+      <path class="ecg-line" pathLength="1" d="M0 70 H140 q10 -10 20 0 H190 l6 8 l10 -52 l10 70 l8 -26 H250 q15 -14 30 0 H540 q10 -10 20 0 H590 l6 8 l10 -52 l10 70 l8 -26 H650 q15 -14 30 0 H940 q10 -10 20 0 H990 l6 8 l10 -52 l10 70 l8 -26 H1050 q15 -14 30 0 H1200"/>
+      <path class="ecg-pulse" pathLength="1" d="M0 70 H140 q10 -10 20 0 H190 l6 8 l10 -52 l10 70 l8 -26 H250 q15 -14 30 0 H540 q10 -10 20 0 H590 l6 8 l10 -52 l10 70 l8 -26 H650 q15 -14 30 0 H940 q10 -10 20 0 H990 l6 8 l10 -52 l10 70 l8 -26 H1050 q15 -14 30 0 H1200"/>
+    </svg>
+  </section>
+
+  <div class="ticker" aria-label="{{ ticker.aria }}">{{ ticker_html }}</div>
+
+  <section id="features" class="section features" aria-labelledby="features-title">
+    <header class="section-head">
+      <h2 id="features-title" class="section-title">{{ features.title }}</h2>
+      <p class="section-lead">{{ features.lead }}</p>
+    </header>
+    <div class="feature-grid">
+      <article class="feature glass feature-alerts">
+        <h3>{{ f.alerts.title }}</h3>
+        <p>{{ f.alerts.body }}</p>
+        <div class="chat-stack" aria-hidden="true">
+          <div class="chat"><img src="{{ assets }}/icon.svg" alt=""><div><strong>Heartbeat</strong><p><span class="mention">@here</span> {{ chat.down }}</p></div></div>
+          <div class="chat"><img src="{{ assets }}/icon.svg" alt=""><div><strong>Heartbeat</strong><p><span class="mention">@here</span> {{ chat.still }}</p></div></div>
+          <div class="chat"><img src="{{ assets }}/icon.svg" alt=""><div><strong>Heartbeat</strong><p>{{ chat.up }}</p></div></div>
+        </div>
+      </article>
+      <article class="feature glass feature-checks">
+        <h3>{{ f.checks.title }}</h3>
+        <p>{{ f.checks.body }}</p>
+      </article>
+      <article class="feature glass feature-logs">
+        <h3>{{ f.logs.title }}</h3>
+        <p>{{ f.logs.body }}</p>
+        <pre class="mini-logs" aria-hidden="true"><span class="l-err">ERROR</span> search::http  request failed error=deadline
+<span class="l-warn">WARN </span> search::db    slow query elapsed_ms=2380
+<span class="l-info">INFO </span> search::http  request completed latency_ms=96</pre>
+      </article>
+      <article class="feature glass feature-status">
+        <h3>{{ f.status.title }}</h3>
+        <p>{{ f.status.body }}</p>
+        <div class="badges" aria-hidden="true">
+          <img src="{{ assets }}/badges/{{ lang }}-up.svg" alt="" height="20">
+          <img src="{{ assets }}/badges/{{ lang }}-degraded.svg" alt="" height="20">
+          <img src="{{ assets }}/badges/{{ lang }}-down.svg" alt="" height="20">
+        </div>
+      </article>
+      <article class="feature glass feature-incidents">
+        <h3>{{ f.incidents.title }}</h3>
+        <p>{{ f.incidents.body }}</p>
+      </article>
+      <article class="feature glass feature-binary">
+        <h3>{{ f.binary.title }}</h3>
+        <p>{{ f.binary.body }}</p>
+      </article>
+      <article class="feature glass feature-security">
+        <h3>{{ f.security.title }}</h3>
+        <p>{{ f.security.body }}</p>
+      </article>
+      <article class="feature glass feature-look">
+        <h3>{{ f.look.title }}</h3>
+        <p>{{ f.look.body }}</p>
+        <div class="minis" aria-hidden="true"><figure class="mini mini-dark"><div class="mini-screen"><i class="mini-bar"></i><i class="mini-line"></i><i class="mini-line short"></i><span class="mini-beats"><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b class="w"></b><b></b><b></b><b></b><b></b></span></div><figcaption>{{ theme.dark }}</figcaption></figure><figure class="mini mini-light"><div class="mini-screen"><i class="mini-bar"></i><i class="mini-line"></i><i class="mini-line short"></i><span class="mini-beats"><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b class="w"></b><b></b><b></b><b></b><b></b></span></div><figcaption>{{ theme.light }}</figcaption></figure><figure class="mini mini-custom"><div class="mini-screen"><i class="mini-bar"></i><i class="mini-line"></i><i class="mini-line short"></i><span class="mini-beats"><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b class="w"></b><b></b><b></b><b></b><b></b></span></div><figcaption>{{ theme.custom }}</figcaption></figure></div>
+      </article>
+    </div>
+  </section>
+
+  <section id="screens" class="section screens" aria-labelledby="screens-title">
+    <header class="section-head">
+      <h2 id="screens-title" class="section-title">{{ screens.title }}</h2>
+    </header>
+    <div class="tabs" role="tablist" aria-label="{{ nav.screens }}">
+      <button type="button" role="tab" aria-selected="true" data-src="{{ assets }}/screens/dashboard_demo.png" data-alt="{{ screens.alt.dashboard }}">{{ screens.dashboard }}</button>
+      <button type="button" role="tab" aria-selected="false" data-src="{{ assets }}/screens/app_dashboard_demo.png" data-alt="{{ screens.alt.app }}">{{ screens.app }}</button>
+      <button type="button" role="tab" aria-selected="false" data-src="{{ assets }}/screens/app_logs_demo.png" data-alt="{{ screens.alt.logs }}">{{ screens.logs }}</button>
+      <button type="button" role="tab" aria-selected="false" data-src="{{ assets }}/screens/apps_demo.png" data-alt="{{ screens.alt.apps }}">{{ screens.apps }}</button>
+      <button type="button" role="tab" aria-selected="false" data-src="{{ assets }}/screens/status_app_demo.png" data-alt="{{ screens.alt.status }}">{{ screens.status }}</button>
+      <button type="button" role="tab" aria-selected="false" data-src="{{ assets }}/screens/settings_demo.png" data-alt="{{ screens.alt.settings }}">{{ screens.settings }}</button>
+    </div>
+    <figure class="screen glass" role="tabpanel">
+      <img src="{{ assets }}/screens/dashboard_demo.png" alt="{{ screens.alt.dashboard }}" width="2880" height="1800" loading="lazy">
+    </figure>
+  </section>
+
+  <section id="deploy" class="section deploy" aria-labelledby="deploy-title">
+    <header class="section-head">
+      <h2 id="deploy-title" class="section-title">{{ deploy.title }}</h2>
+    </header>
+    <ol class="steps">
+      <li class="step">
+        <h3>{{ deploy.step1.title }}</h3>
+        <p>{{ deploy.step1.body }}</p>
+        <div class="code-line"><code>curl -fsSL https://raw.githubusercontent.com/Wilovy09/heartbeat/main/.env.example -o .env</code><button type="button" class="copy" data-copy data-label="{{ deploy.copy }}" data-done="{{ deploy.copied }}">{{ deploy.copy }}</button></div>
+      </li>
+      <li class="step">
+        <h3>{{ deploy.step2.title }}</h3>
+        <p>{{ deploy.step2.body }}</p>
+        <div class="code-line"><code>docker run -d --name heartbeat --env-file .env -p 8090:8090 -v ./data:/app/data ghcr.io/wilovy09/heartbeat:latest</code><button type="button" class="copy" data-copy data-label="{{ deploy.copy }}" data-done="{{ deploy.copied }}">{{ deploy.copy }}</button></div>
+      </li>
+      <li class="step">
+        <h3>{{ deploy.step3.title }}</h3>
+        <p>{{ deploy.step3.body }}</p>
+        <div class="code-line"><code>open http://localhost:8090</code><button type="button" class="copy" data-copy data-label="{{ deploy.copy }}" data-done="{{ deploy.copied }}">{{ deploy.copy }}</button></div>
+      </li>
+    </ol>
+    <p class="deploy-more"><a href="{{ docs_url }}">{{ deploy.more }}</a></p>
+  </section>
+</main>
+{{ footer_html }}
+</body>
+</html>

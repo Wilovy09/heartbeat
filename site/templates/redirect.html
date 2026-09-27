@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+{{ head_html }}
+<script>
+  // Send visitors to their language; the links below stay for everyone else.
+  (function () {
+    var langs = navigator.languages || [navigator.language || 'en'];
+    var es = langs.some(function (l) { return /^es\b/i.test(l); });
+    location.replace(es ? '{{ es_url }}' : '{{ en_url }}');
+  })();
+</script>
+</head>
+<body class="redirect">
+  <main id="main" class="redirect-main">
+    <img src="{{ assets }}/icon.svg" alt="" width="40" height="40">
+    <h1>Heartbeat</h1>
+    <p><a href="{{ en_url }}">English</a><a href="{{ es_url }}">Español</a></p>
+  </main>
+</body>
+</html>

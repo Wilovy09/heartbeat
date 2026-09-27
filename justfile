@@ -50,3 +50,8 @@ e2e:
     trap 'kill $pid; rm -rf "$dir"' EXIT
     for _ in $(seq 50); do curl -fsS localhost:8199/healthz >/dev/null 2>&1 && break; sleep 0.2; done
     cd tests/e2e && npm install --silent && node smoke.mjs
+
+# The landing page and docs (site/), built from README.md / README_ES.md and served on
+# http://localhost:8200. Deployed to GitHub Pages by .github/workflows/pages.yml.
+site:
+    uv run site/build.py --serve

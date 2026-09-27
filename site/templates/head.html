@@ -1,0 +1,28 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ page_title }}</title>
+<meta name="description" content="{{ meta.description }}">
+<link rel="canonical" href="{{ canonical }}">
+<link rel="alternate" hreflang="en" href="{{ alt_en }}">
+<link rel="alternate" hreflang="es" href="{{ alt_es }}">
+<meta property="og:title" content="{{ page_title }}">
+<meta property="og:description" content="{{ meta.description }}">
+<meta property="og:image" content="{{ assets }}/screens/dashboard_demo.png">
+<link rel="icon" type="image/svg+xml" href="{{ assets }}/icon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@300;400;600&display=swap">
+<link rel="stylesheet" href="{{ assets }}/tokens.css">
+<link rel="stylesheet" href="{{ assets }}/site.css">
+<script>
+  // Before the first paint: system (default), light or dark, same tokens as the app.
+  (function () {
+    var choice;
+    try { choice = localStorage.getItem('hb-site-theme'); } catch (e) {}
+    if (choice !== 'light' && choice !== 'dark') choice = 'system';
+    var light = choice === 'light' || (choice === 'system' && matchMedia('(prefers-color-scheme: light)').matches);
+    if (light) document.documentElement.dataset.theme = 'light';
+    document.documentElement.dataset.themeChoice = choice;
+  })();
+</script>
+<script src="{{ assets }}/site.js" defer></script>
