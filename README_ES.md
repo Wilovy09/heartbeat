@@ -11,7 +11,8 @@ con una URL de health y una de logs, y desde un solo lugar:
 - publicas su estado en su propia página pública (`/status/{slug}`) o en cualquier web con un
   componente embebible.
 
-Un solo binario de Rust, sin base de datos: todo se guarda en archivos bajo `data/`.
+Un solo binario de Rust con SQLite integrado: todo se guarda en un archivo,
+`data/heartbeat.db`, sin un servidor de base de datos que mantener.
 
 ## Capturas
 
@@ -110,7 +111,7 @@ Un solo binario de Rust, sin base de datos: todo se guarda en archivos bajo `dat
   recuperación) con vista previa en vivo y las variables `{app}`, `{message}`,
   `{latency}`, `{link}`, `{mentions}` y `{duration}`, envía una prueba de cada una y consulta la configuración actual (los
   secretos solo aparecen como configurados o no). Los textos editados se guardan en
-  `ALERT_TEMPLATES_FILE` y aplican sin reiniciar; los de por defecto siguen `APP_LANG`.
+  la base de datos y aplican sin reiniciar; los de por defecto siguen `APP_LANG`.
 - **Frontends y SPAs**: la URL de logs es opcional, así que una app puede ser solo de
   monitoreo. Para SPAs (Vue, React…), "Verificar bundles JS/CSS" lee las referencias
   `<script>`/`<link rel="stylesheet">` de la página y confirma que cada una cargue como
@@ -124,7 +125,7 @@ Un solo binario de Rust, sin base de datos: todo se guarda en archivos bajo `dat
 - **Incidentes**: cada racha de chequeos caídos es un incidente con inicio, duración y
   causa; el detalle de cada app muestra los de la ventana, el MTTR y el tiempo total caído.
 - **Página de estado pública por app** (`/status/{slug}`): solo para las apps que
-  publiques, sin URLs ni mensajes de error. Muestra el estado actual, 30 días de uptime
+  publiques, sin URLs ni mensajes de error. Muestra el estado actual, 90 días de uptime
   diario y los **avisos** que publiques desde `/notices` (investigando, identificado,
   monitoreando, resuelto) para esa app; un aviso sin apps elegidas aparece en todas. Los
   resueltos quedan 7 días como incidentes recientes. Cualquier otro slug responde el
@@ -142,7 +143,7 @@ Un solo binario de Rust, sin base de datos: todo se guarda en archivos bajo `dat
   barra superior; «Sistema» (el de por defecto) sigue el modo claro u oscuro del sistema
   operativo.
   El personalizado es CSS que un admin guarda en `/settings` (normalmente solo cambia
-  las variables de color de `static/tokens.css`), en `THEME_FILE`.
+  las variables de color de `static/tokens.css`), y se guarda en la base de datos.
 
 ## Autenticación
 
@@ -163,7 +164,8 @@ avisos ni configuración, y no puede cambiar nada. En modo `password` se define 
 entrar como viewers a los usuarios sin `is_admin`.
 
 En los dos modos, la cookie solo lleva un ID de sesión aleatorio; el token queda en el
-servidor (`SESSIONS_FILE`, permisos 600), así que las sesiones sobreviven a un reinicio.
+servidor (en la base de datos, cuyo archivo tiene permisos 600), así que las sesiones
+sobreviven a un reinicio.
 
 ## Embed
 
@@ -288,6 +290,10 @@ Solo dos son obligatorias:
 - `LOGIN_URL` en modo `upstream`, o `ADMIN_EMAIL` + `ADMIN_PASSWORD_HASH` en modo
   `password`.
 
+Todo se guarda en `DATABASE_PATH` (`./data/heartbeat.db`). Cada chequeo se conserva
+`UPTIME_RETENTION_DAYS` (30) para las gráficas, los incidentes y las exportaciones; el
+uptime diario, `UPTIME_DAILY_RETENTION_DAYS` (400).
+
 ## Ejecutar localmente
 
 ```bash
@@ -299,7 +305,8 @@ Abre `http://localhost:8090`.
 
 Con [`just`](https://github.com/casey/just):
 
-- `just demo` (español) o `just demo en` (inglés): inicia con datos de ejemplo (una app en cada estado) y un admin local;
+- `just demo` (español) o `just demo en` (inglés): inicia con 90 días de datos de ejemplo (una app en cada estado),
+  importados con `heartbeat migrate` como si vinieran de 0.2, y un admin local;
   entra a `http://localhost:8090` con `demo@example.com` / `demo` (admin) o
   `viewer@example.com` / `demo` (solo lectura). Los logs de cada app se generan en vivo
   (feature `demo`, nunca en un release) según su estado: la caída tiene errores y panics,
@@ -353,8 +360,9 @@ sudo certbot --nginx -d status.example.com
 
 Actualizar sin compilar en el servidor: cada tag `v*` publica un release para Linux
 x86_64 y aarch64 (`.github/workflows/release.yml`), y `deploy/update.sh` instala el de la
-arquitectura del servidor. Templates, estáticos y librerías van dentro del binario. No toca `.env` ni
-`data/`, verifica el checksum, guarda el binario anterior y comprueba `/healthz`:
+arquitectura del servidor. Templates, estáticos y librerías van dentro del binario. No
+toca `.env`, verifica el checksum, respalda antes la base de datos (guarda los últimos 5
+en `data/backups/`), conserva el binario anterior y comprueba `/healthz`:
 
 ```bash
 HEARTBEAT_REPO=owner/heartbeat deploy/update.sh          # último release
@@ -362,12 +370,46 @@ HEARTBEAT_REPO=owner/heartbeat deploy/update.sh v1.2.0   # uno específico
 deploy/update.sh --rollback                               # volver al binario anterior
 ```
 
+### Respaldos
+
+`heartbeat backup <archivo>` escribe una copia consistente de la base de datos mientras
+Heartbeat sigue funcionando (el backup en línea de SQLite), la verifica y nunca
+sobrescribe un archivo existente:
+
+```bash
+./target/release/heartbeat backup data/backups/heartbeat-$(date +%F).db
+docker exec heartbeat heartbeat backup /app/data/backups/heartbeat.db   # con Docker
+```
+
+Para restaurar una, detén Heartbeat, reemplaza `data/heartbeat.db` por la copia, borra
+`data/heartbeat.db-wal` y `data/heartbeat.db-shm`, y vuelve a iniciarlo.
+
+### Actualizar desde 0.2
+
+La 0.2 guardaba sus datos en archivos JSON bajo `data/`; la 0.3 los guarda en SQLite y no
+inicia hasta que se importen. `deploy/update.sh` hace todo esto por su cuenta; a mano:
+
+```bash
+cp -r data data.bak                       # por si acaso
+heartbeat migrate --dry-run               # qué se importaría
+heartbeat migrate                         # importa y renombra los archivos a *.migrated
+```
+
+La importación corre en una sola transacción y verifica los conteos antes de confirmar:
+o pasa todo o no cambia nada. Trae las apps, las sesiones (nadie tiene que volver a
+entrar), los avisos, las plantillas de alerta, el tema y el historial: los chequeos de
+los últimos 30 días, y los anteriores (hasta 400 días) como uptime diario. Los archivos
+viejos solo se renombran (`--keep` los deja como están), así que volver a la 0.2 es
+renombrarlos de vuelta; `deploy/update.sh --rollback` también lo hace.
+
 ## Límites
 
-Todo el historial vive en memoria y en un archivo JSONL por app, compactado cada hora.
-Con un chequeo por minuto y 30 días de retención son unos 43 000 registros por app: va
-bien hasta unas 100 apps. Más allá conviene subir el intervalo, bajar la retención o
-pasar el almacenamiento a SQLite.
+El historial vive en SQLite; en memoria solo queda lo que consulta el dashboard (los
+últimos chequeos, los cambios de estado y las cifras de 24 h y 30 días). Medido con 100
+apps revisadas cada minuto durante 30 días (4,3 millones de chequeos): una base de
+110–190 MB (según los mensajes de los chequeos), unos 30 MB de RAM, arranque en menos de
+medio segundo (cerca de 1,3 s con el caché del disco frío), la API del dashboard en 5 ms
+y la gráfica de 30 días de una app en 15 ms.
 
 Todos los chequeos salen de una sola máquina: la detección de caída masiva evita la
 tormenta de alertas cuando falla su red, pero no reemplaza sondas desde varias regiones.
@@ -385,6 +427,7 @@ aprobada por la OSI.
 - `actix-web` (servidor HTTP) y `tera` (templates del lado del servidor), con templates,
   estáticos y librerías embebidos en el binario (`rust-embed`; en debug se leen del
   disco).
+- SQLite con `rusqlite`, compilado dentro del binario; el esquema está en `migrations/`.
 - Alpine.js vendorizado en `libs/alpinejs/`: interactividad sin build step.
 - IBM Plex servida localmente (`static/fonts`, licencia OFL).
 - Textos en `locales/<lang>.json` (servidor) y `static/i18n/<lang>.js` (cliente).
