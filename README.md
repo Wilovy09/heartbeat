@@ -11,7 +11,8 @@ health URL and a logs URL, and from a single place:
 - publish its status on its own public page (`/status/{slug}`) or on any website with an embeddable
   component.
 
-A single Rust binary, no database: everything is stored in files under `data/`.
+A single Rust binary with SQLite built in: everything is stored in one file,
+`data/heartbeat.db`, with no database server to run.
 
 ## Screenshots
 
@@ -109,7 +110,7 @@ A single Rust binary, no database: everything is stored in files under `data/`.
   preview and the variables `{app}`, `{message}`, `{latency}`, `{link}`, `{mentions}` and
   `{duration}`, send a test of
   each, and review the current configuration (secrets shown only as set / not set). Edited
-  texts are stored in `ALERT_TEMPLATES_FILE` and apply without a restart; the defaults
+  texts are stored in the database and apply without a restart; the defaults
   follow `APP_LANG`.
 - **Frontends and single-page apps**: the logs URL is optional, so an app can be
   monitor-only. For SPAs (Vue, React…), "Verify JS/CSS bundles" reads the page's
@@ -124,7 +125,7 @@ A single Rust binary, no database: everything is stored in files under `data/`.
 - **Incidents**: each run of failed checks is an incident with its start, duration and
   cause; each app's detail lists the ones in the window, the MTTR and total downtime.
 - **Public status page per app** (`/status/{slug}`): only for the apps you publish, with
-  no URLs or error messages. It shows the current state, 30 days of daily uptime and the
+  no URLs or error messages. It shows the current state, 90 days of daily uptime and the
   **notices** you publish from `/notices` (investigating, identified, monitoring,
   resolved) for that app; a notice naming no app shows on all of them. Resolved ones stay
   7 days as recent incidents. Any other slug answers the same 404.
@@ -140,7 +141,7 @@ A single Rust binary, no database: everything is stored in files under `data/`.
 - **System, dark, light or custom theme**, chosen per browser from the top bar; System
   (the default) follows the OS light/dark setting. The custom theme
   is CSS an admin saves in `/settings` (usually just overriding the color variables in
-  `static/tokens.css`), stored in `THEME_FILE`.
+  `static/tokens.css`), stored in the database.
 
 ## Authentication
 
@@ -162,7 +163,7 @@ or settings, and can't change anything. In `password` mode it's `VIEWER_EMAIL` +
 `is_admin` in as viewers.
 
 In both modes the cookie only holds a random session ID; the token stays on the server
-(`SESSIONS_FILE`, mode 600), so sessions survive a restart.
+(in the database, whose file is mode 600), so sessions survive a restart.
 
 ## Embed
 
@@ -284,6 +285,10 @@ required:
 - `LOGIN_URL` in `upstream` mode, or `ADMIN_EMAIL` + `ADMIN_PASSWORD_HASH` in `password`
   mode.
 
+Everything is stored in `DATABASE_PATH` (`./data/heartbeat.db`). Every check is kept
+`UPTIME_RETENTION_DAYS` (30) for the charts, incidents and exports; the daily uptime,
+`UPTIME_DAILY_RETENTION_DAYS` (400).
+
 ## Running locally
 
 ```bash
@@ -295,7 +300,8 @@ Open `http://localhost:8090`.
 
 With [`just`](https://github.com/casey/just):
 
-- `just demo` (Spanish) or `just demo en` (English): starts with sample data (one app in each state) and a local admin; sign in
+- `just demo` (Spanish) or `just demo en` (English): starts with 90 days of sample data (one app in each state), imported
+  with `heartbeat migrate` as if it came from 0.2, and a local admin; sign in
   at `http://localhost:8090` as `demo@example.com` / `demo` (admin) or
   `viewer@example.com` / `demo` (read-only). Each app's logs are generated live (the
   `demo` feature, never in a release) to match its state: the down one has errors and
@@ -349,8 +355,9 @@ sudo certbot --nginx -d status.example.com
 
 Updating without building on the server: every `v*` tag publishes Linux x86_64 and
 aarch64 releases (`.github/workflows/release.yml`), and `deploy/update.sh` installs the
-one for the server's architecture. Templates, static files and libs are inside the binary. It never touches
-`.env` or `data/`, verifies the checksum, keeps the previous binary and checks `/healthz`:
+one for the server's architecture. Templates, static files and libs are inside the binary.
+It never touches `.env`, verifies the checksum, backs up the database first (the latest 5
+in `data/backups/`), keeps the previous binary and checks `/healthz`:
 
 ```bash
 HEARTBEAT_REPO=owner/heartbeat deploy/update.sh          # latest release
@@ -358,12 +365,44 @@ HEARTBEAT_REPO=owner/heartbeat deploy/update.sh v1.2.0   # a specific one
 deploy/update.sh --rollback                               # back to the previous binary
 ```
 
+### Backups
+
+`heartbeat backup <file>` writes a consistent copy of the database while Heartbeat keeps
+running (SQLite's online backup), checks it, and never overwrites an existing file:
+
+```bash
+./target/release/heartbeat backup data/backups/heartbeat-$(date +%F).db
+docker exec heartbeat heartbeat backup /app/data/backups/heartbeat.db   # with Docker
+```
+
+To restore one, stop Heartbeat, replace `data/heartbeat.db` with the copy, delete
+`data/heartbeat.db-wal` and `data/heartbeat.db-shm`, and start it again.
+
+### Upgrading from 0.2
+
+0.2 kept its data in JSON files under `data/`; 0.3 keeps it in SQLite and won't start
+until they're imported. `deploy/update.sh` does all of this by itself; by hand:
+
+```bash
+cp -r data data.bak                       # just in case
+heartbeat migrate --dry-run               # what would be imported
+heartbeat migrate                         # import, then rename the files to *.migrated
+```
+
+The import runs in a single transaction and checks the counts before committing: either
+everything comes over or nothing changes. It brings apps, sessions (nobody has to sign in
+again), notices, alert templates, the theme and the history: checks from the last 30
+days, and older ones (up to 400 days) as daily uptime. The old files are only renamed
+(`--keep` leaves them as they are), so going back to 0.2 is renaming them back;
+`deploy/update.sh --rollback` does that too.
+
 ## Limits
 
-The whole history lives in memory and in one JSONL file per app, compacted hourly. At one
-check a minute and 30 days of retention that's about 43,000 records per app: fine up to
-roughly 100 apps. Beyond that, raise the interval, lower the retention, or move storage
-to SQLite.
+The history lives in SQLite; only what the dashboard polls (latest checks, status
+changes, 24 h and 30-day figures) is kept in memory. Measured with 100 apps checked every
+minute for 30 days (4.3 million checks): a 110–190 MB database (depending on the check
+messages), about 30 MB of RAM, startup in under half a second (about 1.3 s with a cold
+disk cache), the dashboard API in 5 ms and an app's 30-day chart in 15 ms.
 
 Every check runs from a single machine: mass-outage detection prevents an alert storm
 when its network fails, but it's no substitute for probes from several regions.
@@ -379,6 +418,7 @@ It's source-available, not an OSI open-source license.
 
 - `actix-web` (HTTP server) and `tera` (server-side templates), with templates, static
   files and libs embedded in the binary (`rust-embed`; debug builds read them from disk).
+- SQLite through `rusqlite`, compiled into the binary; the schema is in `migrations/`.
 - Alpine.js vendored in `libs/alpinejs/`: interactivity without a build step.
 - IBM Plex served locally (`static/fonts`, OFL license).
 - UI strings in `locales/<lang>.json` (server) and `static/i18n/<lang>.js` (client).

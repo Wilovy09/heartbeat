@@ -5,11 +5,53 @@ before 0.2.0 were reconstructed from the git history.
 
 ## [Unreleased]
 
+### Upgrading from 0.2.x
+- Everything moves to a SQLite database (`DATABASE_PATH`, `./data/heartbeat.db`), and
+  the server won't start while 0.2's files sit next to an empty one. `deploy/update.sh`
+  imports them by itself; by hand: back up `data/`, update, run `heartbeat migrate`
+  (`--dry-run` first to see what it brings), then start. The old files are renamed to
+  `*.migrated`, so going back is renaming them back (`deploy/update.sh --rollback` does
+  it).
+- `APPS_FILE`, `UPTIME_DIR`, `SESSIONS_FILE`, `NOTICES_FILE`, `ALERT_TEMPLATES_FILE` and
+  `THEME_FILE` are now only read by `heartbeat migrate`.
+- The 30-day uptime is counted over the last 30 calendar days (UTC, today included), from
+  the daily counts, instead of the last 720 hours: figures can differ slightly.
+
+### Storage
+- SQLite, compiled into the binary (`rusqlite`), for apps, checks, sessions, notices,
+  alert templates and the theme; the schema is in `migrations/` and applied on start. A
+  database from a newer Heartbeat is refused instead of misread.
+- Every check is kept `UPTIME_RETENTION_DAYS` (30); per-day counts, updated in the same
+  transaction as each check, `UPTIME_DAILY_RETENTION_DAYS` (400). Old rows are deleted
+  hourly; the JSONL files and their hourly rewrite are gone.
+- Only what the dashboard polls stays in memory, rebuilt from the database on start. With
+  100 apps and 30 days of checks (4.3 million): ~30 MB of RAM, start in under half a
+  second, the dashboard API in ~5 ms.
+- A round of checks is written in one transaction; if the write fails, the round still
+  counts in memory (dashboard and alerts keep working) and the error is logged.
+- `heartbeat migrate [--dry-run] [--keep]` imports a 0.2 install in one transaction,
+  checking the counts before committing: live sessions, notices, templates, the theme,
+  checks from the retention window and older ones (up to 400 days) as daily uptime. It
+  streams the history instead of loading it, and never overwrites an earlier
+  `*.migrated` copy.
+- `heartbeat backup <file>`: a consistent copy of the running database (SQLite's online
+  backup), checked before it's reported done, never overwriting a file.
+
+### Status page
+- 90 days of daily uptime instead of 30 (phones show the latest 30).
+
+### Deployment
+- `deploy/update.sh` backs the database up before installing (the latest 5 in
+  `data/backups/`); coming from 0.2 it archives the files there, stops the app and runs
+  `heartbeat migrate`. `--rollback` to a 0.2 binary puts the files back.
+- CI builds the Docker image and checks that it starts; the image now includes
+  `migrations/`.
+
 ### Themes
 - System (the default: follows the OS light/dark setting, live), dark, light and custom
   themes, picked per browser from the top bar (also on the public status pages; the login
   page follows the choice) and applied before the first paint.
-- Custom theme: CSS saved from Settings (`THEME_FILE`) and served at `/theme/custom.css`,
+- Custom theme: CSS saved from Settings and served at `/theme/custom.css`,
   applied on top of the dark tokens. The editor loads the current tokens as a template,
   loads or downloads a `.css` file and previews on the page before saving; `@import`,
   `url()` and anything over 32 KB are refused.
