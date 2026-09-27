@@ -13,15 +13,20 @@ demo lang="es":
     python3 scripts/demo_data.py
     cargo build -q --features demo
     hash="$(echo demo | ./target/debug/heartbeat hash-password 2>/dev/null)"
-    echo "Heartbeat demo: http://localhost:8090  (demo@example.com / demo, viewer@example.com / demo)"
-    AUTH_MODE=password ADMIN_EMAIL=demo@example.com ADMIN_PASSWORD_HASH="$hash" \
+    export AUTH_MODE=password ADMIN_EMAIL=demo@example.com ADMIN_PASSWORD_HASH="$hash" \
       VIEWER_EMAIL=viewer@example.com VIEWER_PASSWORD_HASH="$hash" ALERT_REMIND_MINS=2 \
       ALLOWED_HOSTS="httpbin.org,*.invalid" COOKIE_SECURE=false \
+      DATABASE_PATH=./data/demo/heartbeat.db \
       APPS_FILE=./data/demo/apps.json UPTIME_DIR=./data/demo/uptime \
       SESSIONS_FILE=./data/demo/sessions.json ALERT_TEMPLATES_FILE=./data/demo/alert_templates.json \
       NOTICES_FILE=./data/demo/notices.json THEME_FILE=./data/demo/theme.css METRICS_TOKEN=demo \
       ALERT_WEBHOOK_URLS=https://httpbin.org/post ALERT_MENTIONS="here,U0123DEMO" \
-      PUBLIC_URL=http://localhost:8090 ./target/debug/heartbeat
+      PUBLIC_URL=http://localhost:8090
+    # The demo data is written as a 0.2 install, so every demo run exercises the importer.
+    rm -rf ./data/demo/heartbeat.db ./data/demo/heartbeat.db-wal ./data/demo/heartbeat.db-shm ./data/demo/*.migrated*
+    ./target/debug/heartbeat migrate
+    echo "Heartbeat demo: http://localhost:8090  (demo@example.com / demo, viewer@example.com / demo)"
+    ./target/debug/heartbeat
 
 run:
     cargo run
@@ -43,7 +48,7 @@ e2e:
     hash="$(echo smoke-test-password | ./target/debug/heartbeat hash-password 2>/dev/null)"
     PORT=8199 COOKIE_SECURE=false AUTH_MODE=password ADMIN_EMAIL=admin@example.com \
       ADMIN_PASSWORD_HASH="$hash" ALLOWED_HOSTS="*.example.com" \
-      APPS_FILE="$dir/apps.json" UPTIME_DIR="$dir/uptime" SESSIONS_FILE="$dir/sessions.json" \
+      DATABASE_PATH="$dir/heartbeat.db" APPS_FILE="$dir/apps.json" UPTIME_DIR="$dir/uptime" SESSIONS_FILE="$dir/sessions.json" \
       NOTICES_FILE="$dir/notices.json" ALERT_TEMPLATES_FILE="$dir/alert_templates.json" THEME_FILE="$dir/theme.css" \
       ./target/debug/heartbeat > "$dir/server.log" 2>&1 &
     pid=$!

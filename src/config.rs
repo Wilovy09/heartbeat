@@ -95,11 +95,12 @@ pub struct Config {
     pub auth: AuthMode,
     /// UI language (`APP_LANG`: `es` or `en`).
     pub app_lang: crate::i18n::Lang,
-    /// Where the registered-apps list (name + logs endpoint URL) is persisted. A plain
-    /// JSON file, not a database -- a handful of rows that change rarely don't earn a DB
-    /// dependency.
+    /// The SQLite database every store lives in (`DATABASE_PATH`).
+    pub database_path: String,
+    /// Heartbeat 0.2's apps list; only `heartbeat migrate` reads it.
     pub apps_file: String,
-    /// Directory holding one `<slug>.jsonl` heartbeat history per app (see `uptime`).
+    /// Heartbeat 0.2's history (one `<slug>.jsonl` per app); only `heartbeat migrate`
+    /// reads it.
     pub uptime_dir: String,
     /// Seconds between health checks of every registered app.
     pub uptime_interval_secs: u64,
@@ -109,8 +110,10 @@ pub struct Config {
     pub uptime_retries: u32,
     /// Certificate expiring within this many days marks the app degraded.
     pub uptime_cert_warn_days: u32,
-    /// Days of heartbeat history kept.
+    /// Days every check is kept.
     pub uptime_retention_days: u32,
+    /// Days the per-day uptime counts are kept (status page, 30-day uptime).
+    pub uptime_daily_retention_days: u32,
     /// Seconds before a check gives up (each app can override it).
     pub uptime_timeout_secs: u32,
     /// Share (%) of monitored apps down at once treated as a mass outage; 0 = off.
@@ -184,6 +187,8 @@ impl Config {
             port: parsed("PORT", 8090)?,
             auth: AuthMode::from_env()?,
             app_lang: parsed("APP_LANG", crate::i18n::Lang::Es)?,
+            database_path: optional("DATABASE_PATH")
+                .unwrap_or_else(|| "./data/heartbeat.db".to_string()),
             apps_file: optional("APPS_FILE").unwrap_or_else(|| "./data/apps.json".to_string()),
             uptime_dir: optional("UPTIME_DIR").unwrap_or_else(|| "./data/uptime".to_string()),
             uptime_interval_secs,
@@ -191,6 +196,7 @@ impl Config {
             uptime_retries: parsed("UPTIME_RETRIES", 2)?,
             uptime_cert_warn_days: parsed("UPTIME_CERT_WARN_DAYS", 14)?,
             uptime_retention_days: parsed("UPTIME_RETENTION_DAYS", 30)?.max(1),
+            uptime_daily_retention_days: parsed("UPTIME_DAILY_RETENTION_DAYS", 400)?.max(30),
             uptime_timeout_secs,
             uptime_mass_down_pct,
             alert_remind_mins: parsed("ALERT_REMIND_MINS", 60)?,

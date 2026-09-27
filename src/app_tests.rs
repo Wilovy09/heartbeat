@@ -39,10 +39,9 @@ struct TestState {
     themes: web::Data<crate::theme::ThemeStore>,
 }
 
-async fn state() -> TestState {
-    let dir = tempfile::tempdir().unwrap();
-    let path = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
-    let cfg = Config {
+/// The configuration every route test runs with, files under `path(name)`.
+pub(crate) fn test_config(path: &dyn Fn(&str) -> String) -> Config {
+    Config {
         host: "127.0.0.1".into(),
         port: 0,
         auth: AuthMode::Password {
@@ -56,6 +55,7 @@ async fn state() -> TestState {
             }),
         },
         app_lang: Lang::Es,
+        database_path: path("heartbeat.db"),
         apps_file: path("apps.json"),
         uptime_dir: path("uptime"),
         uptime_interval_secs: 60,
@@ -63,6 +63,7 @@ async fn state() -> TestState {
         uptime_retries: 0,
         uptime_cert_warn_days: 14,
         uptime_retention_days: 30,
+        uptime_daily_retention_days: 400,
         uptime_timeout_secs: 10,
         uptime_mass_down_pct: 50,
         alert_remind_mins: 60,
@@ -79,7 +80,13 @@ async fn state() -> TestState {
         allowed_hosts: "*.example.com".into(),
         cookie_secure: false,
         admin_logs_key: None,
-    };
+    }
+}
+
+async fn state() -> TestState {
+    let dir = tempfile::tempdir().unwrap();
+    let path = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
+    let cfg = test_config(&path);
     let i18n = I18n::new(cfg.app_lang);
     let mut tera = Tera::new();
     i18n.register(&mut tera);
@@ -91,20 +98,17 @@ async fn state() -> TestState {
         retries: 0,
         cert_warn_days: 14,
         retention: Duration::from_hours(720),
+        daily_retention: Duration::from_hours(400 * 24),
         timeout: Duration::from_secs(10),
         mass_down_pct: 50,
         lang: Lang::Es,
     };
-    let monitor = UptimeMonitor::load(
-        &cfg.uptime_dir,
-        policy,
-        outbound.clone(),
-        Notifiers::default(),
-    )
-    .await
-    .unwrap();
+    let db = crate::db::Db::open_in_memory();
+    let monitor = UptimeMonitor::load(db.clone(), policy, outbound.clone(), Notifiers::default())
+        .await
+        .unwrap();
     TestState {
-        registry: web::Data::new(AppRegistry::load(&cfg.apps_file).await.unwrap()),
+        registry: web::Data::new(AppRegistry::load(db).await.unwrap()),
         sessions: web::Data::new(SessionStore::load(&cfg.sessions_file).await.unwrap()),
         limiter: web::Data::new(LoginLimiter::default()),
         outbound: web::Data::new(outbound),

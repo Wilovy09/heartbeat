@@ -1,12 +1,14 @@
 //! The list of registered apps (name + their /admin/logs-shaped endpoint URL + a health
-//! check URL for uptime monitoring), persisted
-//! to a JSON file. In-memory copy guarded by a lock so concurrent requests never see a
-//! half-written file; every mutation rewrites the whole file (a handful of rows, no need
-//! for anything more granular).
+//! check URL for uptime monitoring), stored in the `apps` table. Nearly every request
+//! reads it, so a copy stays in memory; each change is written to the database first and
+//! only then applied to the copy, so the two never disagree.
 
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
+
+use crate::db::{Db, DbError};
 
 /// Every way a registry operation can fail. `Display` is for logs; the /apps form shows
 /// the localized text (`Localize`).
@@ -50,6 +52,8 @@ pub enum RegistryError {
         #[source]
         source: serde_json::Error,
     },
+    #[error(transparent)]
+    Db(#[from] DbError),
 }
 
 impl RegistryError {
@@ -134,7 +138,7 @@ impl crate::i18n::Localize for RegistryError {
             Self::TooMany(field) => i18n.text("err.too_many", &[("field", field)]),
             Self::SlugTaken => i18n.text("err.slug_taken", &[]),
             Self::NotFound(slug) => i18n.text("err.not_found", &[("slug", slug)]),
-            Self::Token(_) | Self::Io { .. } | Self::Json { .. } => {
+            Self::Token(_) | Self::Io { .. } | Self::Json { .. } | Self::Db(_) => {
                 i18n.text("err.internal", &[("error", &self.to_string())])
             }
         }
@@ -364,13 +368,134 @@ impl RegisteredApp {
 }
 
 /// 24 random bytes, hex-encoded (48 chars).
-fn new_embed_token() -> Result<String> {
+pub(crate) fn new_embed_token() -> Result<String> {
     Ok(crate::token::random_hex(24)?)
 }
 
 pub struct AppRegistry {
-    path: PathBuf,
+    db: Db,
+    /// Every app, in registration order.
     apps: RwLock<Vec<RegisteredApp>>,
+}
+
+/// The `settings` JSON column: everything about an app that's only read together with it.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct StoredSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    degraded_after_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expect_body: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    check_assets: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    interval_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    timeout_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    expect_status: Vec<u16>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    headers: Vec<CheckHeader>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    alert_webhooks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    alert_mentions: Vec<String>,
+}
+
+impl From<&RegisteredApp> for StoredSettings {
+    fn from(app: &RegisteredApp) -> Self {
+        Self {
+            degraded_after_ms: app.degraded_after_ms,
+            expect_body: app.expect_body.clone(),
+            check_assets: app.check_assets,
+            interval_secs: app.interval_secs,
+            timeout_secs: app.timeout_secs,
+            expect_status: app.expect_status.clone(),
+            headers: app.headers.clone(),
+            alert_webhooks: app.alert_webhooks.clone(),
+            alert_mentions: app.alert_mentions.clone(),
+        }
+    }
+}
+
+const SELECT_APPS: &str = "SELECT slug, name, health_url, logs_url, embed_token, public, paused, \
+     paused_at, paused_until, settings FROM apps";
+
+fn app_from_row(row: &rusqlite::Row<'_>) -> std::result::Result<RegisteredApp, DbError> {
+    let settings: StoredSettings = serde_json::from_str(&row.get::<_, String>("settings")?)?;
+    let time = |col: &str| -> rusqlite::Result<Option<u64>> {
+        let value: Option<i64> = row.get(col)?;
+        Ok(value.and_then(|v| u64::try_from(v).ok()))
+    };
+    Ok(RegisteredApp {
+        slug: row.get("slug")?,
+        name: row.get("name")?,
+        logs_url: row.get("logs_url")?,
+        health_url: row.get("health_url")?,
+        embed_token: row.get("embed_token")?,
+        paused: row.get("paused")?,
+        public: row.get("public")?,
+        paused_at: time("paused_at")?,
+        paused_until: time("paused_until")?,
+        degraded_after_ms: settings.degraded_after_ms,
+        expect_body: settings.expect_body,
+        check_assets: settings.check_assets,
+        interval_secs: settings.interval_secs,
+        timeout_secs: settings.timeout_secs,
+        expect_status: settings.expect_status,
+        headers: settings.headers,
+        alert_webhooks: settings.alert_webhooks,
+        alert_mentions: settings.alert_mentions,
+    })
+}
+
+/// Unix seconds as SQLite stores them.
+fn sql_time(at: Option<u64>) -> Option<i64> {
+    at.map(|t| i64::try_from(t).unwrap_or(i64::MAX))
+}
+
+/// Inserts `app` at the end of the list, or updates it in place (its position never
+/// changes once it's registered).
+pub(crate) fn save_app(
+    tx: &rusqlite::Transaction<'_>,
+    app: &RegisteredApp,
+) -> std::result::Result<(), DbError> {
+    let settings = serde_json::to_string(&StoredSettings::from(app))?;
+    tx.prepare_cached(
+        "INSERT INTO apps (slug, position, name, health_url, logs_url, embed_token, public, \
+             paused, paused_at, paused_until, settings) \
+         VALUES (?1, (SELECT coalesce(max(position), -1) + 1 FROM apps), ?2, ?3, ?4, ?5, ?6, \
+             ?7, ?8, ?9, ?10) \
+         ON CONFLICT (slug) DO UPDATE SET name = excluded.name, \
+             health_url = excluded.health_url, logs_url = excluded.logs_url, \
+             embed_token = excluded.embed_token, public = excluded.public, \
+             paused = excluded.paused, paused_at = excluded.paused_at, \
+             paused_until = excluded.paused_until, settings = excluded.settings",
+    )?
+    .execute(params![
+        app.slug,
+        app.name,
+        app.health_url,
+        app.logs_url,
+        app.embed_token,
+        app.public,
+        app.paused,
+        sql_time(app.paused_at),
+        sql_time(app.paused_until),
+        settings,
+    ])?;
+    Ok(())
+}
+
+/// Reads a 0.2 `apps.json` (for `heartbeat migrate`). A missing file is an empty list.
+pub fn read_legacy_file(path: &Path) -> Result<Vec<RegisteredApp>> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => serde_json::from_str(&raw).map_err(|source| RegistryError::Json {
+            path: path.to_path_buf(),
+            source,
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(RegistryError::io(path)(e)),
+    }
 }
 
 /// Lowercase, spaces/anything-not-alphanumeric collapsed to a single hyphen, trimmed --
@@ -402,49 +527,34 @@ fn validate_url(url: &str, label: &'static str, schemes: &[&str]) -> Result<()> 
 }
 
 impl AppRegistry {
-    pub async fn load(path: impl Into<PathBuf>) -> Result<Self> {
-        let path = path.into();
-        let mut apps: Vec<RegisteredApp> = match tokio::fs::read_to_string(&path).await {
-            Ok(raw) => serde_json::from_str(&raw).map_err(|source| RegistryError::Json {
-                path: path.clone(),
-                source,
-            })?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => return Err(RegistryError::io(&path)(e)),
-        };
-        let mut backfilled = false;
-        for app in apps.iter_mut().filter(|a| a.embed_token.is_empty()) {
-            app.embed_token = new_embed_token()?;
-            backfilled = true;
-        }
-        let registry = Self {
-            path,
+    pub async fn load(db: Db) -> Result<Self> {
+        let apps = db
+            .read(|conn| {
+                let mut stmt = conn.prepare(&format!("{SELECT_APPS} ORDER BY position"))?;
+                let mut rows = stmt.query([])?;
+                let mut apps = Vec::new();
+                while let Some(row) = rows.next()? {
+                    apps.push(app_from_row(row)?);
+                }
+                Ok(apps)
+            })
+            .await?;
+        Ok(Self {
+            db,
             apps: RwLock::new(apps),
-        };
-        if backfilled {
-            registry.persist(&registry.apps.read().await).await?;
-        }
-        Ok(registry)
+        })
     }
 
-    /// Temp file + rename, so a crash mid-write never leaves a truncated registry.
-    async fn persist(&self, apps: &[RegisteredApp]) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(RegistryError::io(parent))?;
-        }
-        let raw = serde_json::to_string_pretty(apps).map_err(|source| RegistryError::Json {
-            path: self.path.clone(),
-            source,
-        })?;
-        let tmp = self.path.with_extension("json.tmp");
-        tokio::fs::write(&tmp, raw)
-            .await
-            .map_err(RegistryError::io(&tmp))?;
-        tokio::fs::rename(&tmp, &self.path)
-            .await
-            .map_err(RegistryError::io(&self.path))
+    /// Writes `app` to the database; the caller updates the in-memory copy after.
+    async fn save(&self, app: RegisteredApp) -> Result<RegisteredApp> {
+        let saved = self
+            .db
+            .write(move |tx| {
+                save_app(tx, &app)?;
+                Ok(app)
+            })
+            .await?;
+        Ok(saved)
     }
 
     pub async fn list(&self) -> Vec<RegisteredApp> {
@@ -470,6 +580,7 @@ impl AppRegistry {
             return Err(RegistryError::NameWithoutAlphanumerics);
         }
 
+        // Held until the database write is done: two registrations can't race to a slug.
         let mut apps = self.apps.write().await;
         if apps.iter().any(|a| a.slug == slug) {
             return Err(RegistryError::SlugTaken);
@@ -495,12 +606,12 @@ impl AppRegistry {
             alert_mentions: Vec::new(),
         };
         app.apply(settings);
-        apps.push(app);
-        self.persist(&apps).await?;
+        apps.push(self.save(app).await?);
         Ok(slug)
     }
 
-    /// Applies `change` to one app and persists, or reports it missing.
+    /// Applies `change` to a copy of one app, saves it, then swaps it in; or reports the
+    /// app missing.
     async fn modify(
         &self,
         slug: &str,
@@ -511,8 +622,10 @@ impl AppRegistry {
             .iter_mut()
             .find(|a| a.slug == slug)
             .ok_or_else(|| RegistryError::NotFound(slug.to_string()))?;
-        change(app)?;
-        self.persist(&apps).await
+        let mut changed = app.clone();
+        change(&mut changed)?;
+        *app = self.save(changed).await?;
+        Ok(())
     }
 
     /// Replaces an app's settings. Its slug, embed token and history stay the same.
@@ -545,20 +658,35 @@ impl AppRegistry {
     /// Ends every scheduled pause whose time has come; returns the slugs it resumed.
     pub async fn resume_expired(&self, now: u64) -> Result<Vec<String>> {
         let mut apps = self.apps.write().await;
-        let mut resumed = Vec::new();
-        for app in apps
-            .iter_mut()
+        let resumed: Vec<RegisteredApp> = apps
+            .iter()
             .filter(|a| a.paused && a.paused_until.is_some_and(|until| until <= now))
-        {
-            app.paused = false;
-            app.paused_at = None;
-            app.paused_until = None;
-            resumed.push(app.slug.clone());
+            .map(|a| RegisteredApp {
+                paused: false,
+                paused_at: None,
+                paused_until: None,
+                ..a.clone()
+            })
+            .collect();
+        if resumed.is_empty() {
+            return Ok(Vec::new());
         }
-        if !resumed.is_empty() {
-            self.persist(&apps).await?;
+        let resumed = self
+            .db
+            .write(move |tx| {
+                for app in &resumed {
+                    save_app(tx, app)?;
+                }
+                Ok(resumed)
+            })
+            .await?;
+        let slugs = resumed.iter().map(|a| a.slug.clone()).collect();
+        for app in resumed {
+            if let Some(slot) = apps.iter_mut().find(|a| a.slug == app.slug) {
+                *slot = app;
+            }
         }
-        Ok(resumed)
+        Ok(slugs)
     }
 
     pub async fn set_public(&self, slug: &str, public: bool) -> Result<()> {
@@ -578,20 +706,45 @@ impl AppRegistry {
         .await
     }
 
+    /// Unregisters an app; its history goes with it (`ON DELETE CASCADE`).
     pub async fn remove(&self, slug: &str) -> Result<()> {
         let mut apps = self.apps.write().await;
-        let before = apps.len();
-        apps.retain(|a| a.slug != slug);
-        if apps.len() == before {
+        if !apps.iter().any(|a| a.slug == slug) {
             return Err(RegistryError::NotFound(slug.to_string()));
         }
-        self.persist(&apps).await
+        let owned = slug.to_string();
+        self.db
+            .write(move |tx| {
+                tx.execute("DELETE FROM apps WHERE slug = ?1", [owned])?;
+                Ok(())
+            })
+            .await?;
+        apps.retain(|a| a.slug != slug);
+        Ok(())
+    }
+
+    /// One app straight from the database, bypassing the in-memory copy (tests).
+    #[cfg(test)]
+    async fn stored(&self, slug: &str) -> Option<RegisteredApp> {
+        let slug = slug.to_string();
+        self.db
+            .read(move |conn| {
+                let mut stmt = conn.prepare(&format!("{SELECT_APPS} WHERE slug = ?1"))?;
+                let mut rows = stmt.query([slug])?;
+                rows.next()?.map(app_from_row).transpose()
+            })
+            .await
+            .unwrap()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn registry() -> AppRegistry {
+        AppRegistry::load(Db::open_in_memory()).await.unwrap()
+    }
 
     fn settings(name: &str, logs_url: &str, health_url: &str) -> AppSettings {
         AppSettings {
@@ -604,9 +757,8 @@ mod tests {
 
     #[tokio::test]
     async fn update_keeps_slug_and_token_and_pause_persists() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("apps.json");
-        let registry = AppRegistry::load(&file).await.unwrap();
+        let db = Db::open_in_memory();
+        let registry = AppRegistry::load(db.clone()).await.unwrap();
         let slug = registry
             .add(settings(
                 "Billing API",
@@ -624,7 +776,7 @@ mod tests {
         registry.set_paused(&slug, true, None).await.unwrap();
         registry.set_public(&slug, true).await.unwrap();
 
-        let app = AppRegistry::load(&file)
+        let app = AppRegistry::load(db)
             .await
             .unwrap()
             .find(&slug)
@@ -653,10 +805,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_then_find_round_trips() {
-        let dir = tempfile::tempdir().unwrap();
-        let registry = AppRegistry::load(dir.path().join("apps.json"))
-            .await
-            .unwrap();
+        let registry = registry().await;
         let slug = registry
             .add(settings(
                 "Billing API",
@@ -674,10 +823,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_rejects_a_slug_collision() {
-        let dir = tempfile::tempdir().unwrap();
-        let registry = AppRegistry::load(dir.path().join("apps.json"))
-            .await
-            .unwrap();
+        let registry = registry().await;
         registry
             .add(settings(
                 "Billing API",
@@ -698,10 +844,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_rejects_a_url_without_a_scheme() {
-        let dir = tempfile::tempdir().unwrap();
-        let registry = AppRegistry::load(dir.path().join("apps.json"))
-            .await
-            .unwrap();
+        let registry = registry().await;
         let err = registry
             .add(settings("Bad", "not-a-url", "https://x/health"))
             .await;
@@ -710,34 +853,33 @@ mod tests {
 
     #[tokio::test]
     async fn add_rejects_a_health_url_without_a_scheme() {
-        let dir = tempfile::tempdir().unwrap();
-        let registry = AppRegistry::load(dir.path().join("apps.json"))
-            .await
-            .unwrap();
+        let registry = registry().await;
         let err = registry.add(settings("Bad", "https://x/logs", "")).await;
         assert!(err.is_err());
     }
 
-    #[tokio::test]
-    async fn loads_entries_saved_before_health_url_existed() {
+    #[test]
+    fn legacy_files_load_entries_saved_before_health_url_existed() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("apps.json");
-        tokio::fs::write(
+        std::fs::write(
             &file,
             r#"[{"slug":"old","name":"Old","logs_url":"https://x/logs"}]"#,
         )
-        .await
         .unwrap();
-        let registry = AppRegistry::load(&file).await.unwrap();
-        assert_eq!(registry.find("old").await.unwrap().health_url, None);
+        let apps = read_legacy_file(&file).unwrap();
+        assert_eq!(apps[0].health_url, None);
+        assert!(apps[0].embed_token.is_empty(), "the importer fills it in");
+        assert!(
+            read_legacy_file(&dir.path().join("missing.json"))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
     async fn add_generates_an_embed_token_and_rotate_replaces_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let registry = AppRegistry::load(dir.path().join("apps.json"))
-            .await
-            .unwrap();
+        let registry = registry().await;
         let slug = registry
             .add(settings(
                 "Billing API",
@@ -759,51 +901,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_backfills_missing_embed_tokens_and_persists_them() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("apps.json");
-        tokio::fs::write(
-            &file,
-            r#"[{"slug":"old","name":"Old","logs_url":"https://x/logs"}]"#,
-        )
-        .await
-        .unwrap();
-        let token = AppRegistry::load(&file)
-            .await
-            .unwrap()
-            .find("old")
-            .await
-            .unwrap()
-            .embed_token;
-        assert_eq!(token.len(), 48);
-        let reloaded = AppRegistry::load(&file).await.unwrap();
-        assert_eq!(reloaded.find("old").await.unwrap().embed_token, token);
-    }
-
-    #[tokio::test]
-    async fn persists_across_a_reload() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("apps.json");
-        {
-            let registry = AppRegistry::load(&file).await.unwrap();
+    async fn persists_across_a_reload_in_registration_order() {
+        let db = Db::open_in_memory();
+        let registry = AppRegistry::load(db.clone()).await.unwrap();
+        for name in ["Zeta", "Alpha", "Mid"] {
             registry
-                .add(settings(
-                    "Billing API",
-                    "https://x/logs",
-                    "https://x/health",
-                ))
+                .add(settings(name, "", "https://x/health"))
                 .await
                 .unwrap();
         }
-        let reloaded = AppRegistry::load(&file).await.unwrap();
-        assert_eq!(reloaded.list().await.len(), 1);
+        let names: Vec<String> = AppRegistry::load(db)
+            .await
+            .unwrap()
+            .list()
+            .await
+            .into_iter()
+            .map(|a| a.name)
+            .collect();
+        assert_eq!(names, ["Zeta", "Alpha", "Mid"]);
     }
 
     #[tokio::test]
     async fn remove_then_reload_reflects_the_removal() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("apps.json");
-        let registry = AppRegistry::load(&file).await.unwrap();
+        let db = Db::open_in_memory();
+        let registry = AppRegistry::load(db.clone()).await.unwrap();
         let slug = registry
             .add(settings(
                 "Billing API",
@@ -814,28 +935,47 @@ mod tests {
             .unwrap();
         registry.remove(&slug).await.unwrap();
         assert!(registry.list().await.is_empty());
-        let reloaded = AppRegistry::load(&file).await.unwrap();
-        assert!(reloaded.list().await.is_empty());
+        assert!(AppRegistry::load(db).await.unwrap().list().await.is_empty());
+        assert!(matches!(
+            registry.remove(&slug).await,
+            Err(RegistryError::NotFound(_))
+        ));
     }
 
     #[tokio::test]
     async fn monitor_only_apps_have_no_logs_url() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("apps.json");
-        let registry = AppRegistry::load(&file).await.unwrap();
+        let registry = registry().await;
         let mut frontend = settings("Frontend", "   ", "https://x/");
         frontend.check_assets = true;
         let slug = registry.add(frontend).await.unwrap();
-        let app = AppRegistry::load(&file)
-            .await
-            .unwrap()
-            .find(&slug)
-            .await
-            .unwrap();
+        let app = registry.stored(&slug).await.unwrap();
         assert_eq!(app.logs_url, None);
         assert!(app.check_assets);
-        // The field is left out of the file entirely.
-        assert!(!std::fs::read_to_string(&file).unwrap().contains("logs_url"));
+    }
+
+    #[tokio::test]
+    async fn every_setting_survives_the_database() {
+        let registry = registry().await;
+        let mut full = settings("Full", "https://x/logs", "https://x/health");
+        full.degraded_after_ms = Some(900);
+        full.expect_body = Some("ok".into());
+        full.check_assets = true;
+        full.interval_secs = Some(30);
+        full.timeout_secs = Some(5);
+        full.expect_status = vec![200, 401];
+        full.headers = vec![CheckHeader::parse_line("X-Token: abc").unwrap()];
+        full.alert_webhooks = vec!["https://hooks.slack.com/services/T/B/x".into()];
+        full.alert_mentions = vec!["here".into()];
+        let slug = registry.add(full).await.unwrap();
+        registry.set_paused(&slug, true, Some(5000)).await.unwrap();
+        let memory = registry.find(&slug).await.unwrap();
+        let stored = registry.stored(&slug).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&memory).unwrap(),
+            serde_json::to_value(&stored).unwrap()
+        );
+        assert_eq!(stored.paused_until, Some(5000));
+        assert_eq!(stored.headers[0].value, "abc");
     }
 
     /// Breaks one field, then checks the error it produces.
@@ -843,10 +983,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_options_are_validated_and_normalized() {
-        let dir = tempfile::tempdir().unwrap();
-        let registry = AppRegistry::load(dir.path().join("apps.json"))
-            .await
-            .unwrap();
+        let registry = registry().await;
         let mut good = settings("Db", "", "tcp://db.example.com:5432");
         good.interval_secs = Some(30);
         good.expect_status = vec![401, 200, 401];
@@ -914,10 +1051,7 @@ mod tests {
 
     #[tokio::test]
     async fn scheduled_pauses_end_by_themselves() {
-        let dir = tempfile::tempdir().unwrap();
-        let registry = AppRegistry::load(dir.path().join("apps.json"))
-            .await
-            .unwrap();
+        let registry = registry().await;
         let a = registry
             .add(settings("A", "", "https://x/health"))
             .await
