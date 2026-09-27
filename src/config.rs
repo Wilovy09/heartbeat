@@ -126,17 +126,17 @@ pub struct Config {
     pub alert_on_degraded: bool,
     /// Who to ping when an app goes down (`ALERT_MENTIONS`, see `alerts::Mention`).
     pub alert_mentions: Vec<String>,
-    /// Where alert message templates edited from /settings are stored.
+    /// Heartbeat 0.2's alert templates file; only `heartbeat migrate` reads it.
     pub alert_templates_file: String,
     /// Pinged after every round of checks (dead man's switch for the monitor itself).
     pub heartbeat_ping_url: Option<String>,
     /// Public base URL of this deployment, used for links in alerts.
     pub public_url: Option<String>,
-    /// Where sessions are persisted so restarts don't log everyone out.
+    /// Heartbeat 0.2's sessions file; only `heartbeat migrate` reads it.
     pub sessions_file: String,
-    /// Where the /status incident notices are stored.
+    /// Heartbeat 0.2's notices file; only `heartbeat migrate` reads it.
     pub notices_file: String,
-    /// Where the custom theme CSS (edited in /settings) is stored.
+    /// Heartbeat 0.2's custom theme file; only `heartbeat migrate` reads it.
     pub theme_file: String,
     /// Bearer token for `GET /metrics`; `None` = the endpoint is off.
     pub metrics_token: Option<String>,

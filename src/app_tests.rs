@@ -108,18 +108,14 @@ async fn state() -> TestState {
         .await
         .unwrap();
     TestState {
-        registry: web::Data::new(AppRegistry::load(db).await.unwrap()),
-        sessions: web::Data::new(SessionStore::load(&cfg.sessions_file).await.unwrap()),
+        registry: web::Data::new(AppRegistry::load(db.clone()).await.unwrap()),
+        sessions: web::Data::new(SessionStore::load(db.clone()).await.unwrap()),
         limiter: web::Data::new(LoginLimiter::default()),
         outbound: web::Data::new(outbound),
         monitor: web::Data::new(monitor),
         alerter: web::Data::new(Alerter::new(AlertSettings::default()).unwrap()),
-        notices: web::Data::new(NoticeStore::load(path("notices.json")).await.unwrap()),
-        themes: web::Data::new(
-            crate::theme::ThemeStore::load(path("theme.css"))
-                .await
-                .unwrap(),
-        ),
+        notices: web::Data::new(NoticeStore::load(db.clone()).await.unwrap()),
+        themes: web::Data::new(crate::theme::ThemeStore::load(db).await.unwrap()),
         tera: web::Data::new(tera),
         i18n: web::Data::new(i18n),
         cfg: web::Data::new(cfg),
