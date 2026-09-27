@@ -5,20 +5,23 @@
 //! logging out really ends the session. In `AuthMode::Upstream` the session also holds the
 //! login server's JWT, forwarded as a Bearer token to registered apps' logs endpoints.
 //!
-//! Sessions are mirrored to `SESSIONS_FILE` (mode 600) so a restart or deploy doesn't log
-//! everyone out.
+//! Sessions are stored in the database (the `sessions` table; the file is mode 600) so a
+//! restart or deploy doesn't log everyone out, with a copy in memory for the lookup every
+//! request does.
 //!
 //! A session is either an admin's or a viewer's (`Role`). Viewers see the dashboard and
 //! the uptime API, read-only; every other page and every change needs `require_admin`.
 
 use actix_web::cookie::{Cookie, SameSite, time::Duration as CookieDuration};
 use actix_web::{HttpRequest, HttpResponse, web};
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{PoisonError, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::db::{Db, DbError};
 use crate::token;
 
 pub const SESSION_COOKIE: &str = "heartbeat_session";
@@ -43,6 +46,8 @@ pub enum SessionError {
         #[source]
         source: serde_json::Error,
     },
+    #[error(transparent)]
+    Db(#[from] DbError),
 }
 
 impl SessionError {
@@ -71,8 +76,18 @@ pub enum Role {
     Viewer,
 }
 
+impl Role {
+    /// How the `sessions.role` column spells it.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Admin => "admin",
+            Self::Viewer => "viewer",
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
-struct Session {
+pub(crate) struct Session {
     /// The login server's JWT (`AuthMode::Upstream`); empty in `AuthMode::Password`.
     upstream_token: String,
     /// Unix seconds.
@@ -97,62 +112,81 @@ impl SessionInfo {
 }
 
 pub struct SessionStore {
-    path: PathBuf,
+    db: Db,
     // std RwLock: every critical section is a short map operation, never held across .await.
     sessions: RwLock<HashMap<String, Session>>,
-    /// Serializes file writes so two concurrent logins can't persist out of order.
-    write_lock: tokio::sync::Mutex<()>,
+}
+
+/// Stores one session (a new one, or one imported by `heartbeat migrate`).
+pub(crate) fn save_session(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+    session: &Session,
+) -> Result<(), DbError> {
+    tx.prepare_cached(
+        "INSERT INTO sessions (id, upstream_token, role, expires_at) VALUES (?1, ?2, ?3, ?4) \
+         ON CONFLICT (id) DO NOTHING",
+    )?
+    .execute(params![
+        id,
+        session.upstream_token,
+        session.role.as_str(),
+        i64::try_from(session.expires_at).unwrap_or(i64::MAX),
+    ])?;
+    Ok(())
+}
+
+/// Reads a 0.2 `sessions.json` (for `heartbeat migrate`), live sessions only. A missing
+/// file is an empty list.
+pub(crate) fn read_legacy_file(path: &Path) -> Result<Vec<(String, Session)>, SessionError> {
+    let sessions: HashMap<String, Session> = match std::fs::read_to_string(path) {
+        Ok(raw) => serde_json::from_str(&raw).map_err(|source| SessionError::Json {
+            path: path.to_path_buf(),
+            source,
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+        Err(e) => return Err(SessionError::io(path)(e)),
+    };
+    let now = unix_now();
+    Ok(sessions
+        .into_iter()
+        .filter(|(_, s)| s.expires_at > now)
+        .collect())
 }
 
 impl SessionStore {
-    /// Loads the persisted sessions (dropping expired ones); a missing file is an empty store.
-    pub async fn load(path: impl Into<PathBuf>) -> Result<Self, SessionError> {
-        let path = path.into();
-        let mut sessions: HashMap<String, Session> = match tokio::fs::read_to_string(&path).await {
-            Ok(raw) => serde_json::from_str(&raw).map_err(|source| SessionError::Json {
-                path: path.clone(),
-                source,
-            })?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
-            Err(e) => return Err(SessionError::io(&path)(e)),
-        };
-        let now = unix_now();
-        sessions.retain(|_, s| s.expires_at > now);
+    /// Loads the live sessions; expired ones are deleted on the way.
+    pub async fn load(db: Db) -> Result<Self, SessionError> {
+        let now = i64::try_from(unix_now()).unwrap_or(i64::MAX);
+        let sessions = db
+            .write(move |tx| {
+                tx.execute("DELETE FROM sessions WHERE expires_at <= ?1", [now])?;
+                let mut stmt =
+                    tx.prepare("SELECT id, upstream_token, role, expires_at FROM sessions")?;
+                let sessions = stmt
+                    .query_map([], |row| {
+                        let role: String = row.get(2)?;
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            Session {
+                                upstream_token: row.get(1)?,
+                                expires_at: u64::try_from(row.get::<_, i64>(3)?).unwrap_or(0),
+                                role: if role == "viewer" {
+                                    Role::Viewer
+                                } else {
+                                    Role::Admin
+                                },
+                            },
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<HashMap<_, _>>>()?;
+                Ok(sessions)
+            })
+            .await?;
         Ok(Self {
-            path,
+            db,
             sessions: RwLock::new(sessions),
-            write_lock: tokio::sync::Mutex::new(()),
         })
-    }
-
-    /// Writes the current sessions to disk: temp file (mode 600) + rename, so a crash never
-    /// leaves a half-written file and the tokens are never world-readable.
-    async fn persist(&self) -> Result<(), SessionError> {
-        let _guard = self.write_lock.lock().await;
-        let raw = {
-            let sessions = self.sessions.read().unwrap_or_else(PoisonError::into_inner);
-            serde_json::to_vec(&*sessions).map_err(|source| SessionError::Json {
-                path: self.path.clone(),
-                source,
-            })?
-        };
-        if let Some(parent) = self.path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(SessionError::io(parent))?;
-        }
-        let tmp = self.path.with_extension("json.tmp");
-        let mut options = tokio::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        let mut file = options.open(&tmp).await.map_err(SessionError::io(&tmp))?;
-        tokio::io::AsyncWriteExt::write_all(&mut file, &raw)
-            .await
-            .map_err(SessionError::io(&tmp))?;
-        tokio::fs::rename(&tmp, &self.path)
-            .await
-            .map_err(SessionError::io(&self.path))
     }
 
     /// Starts a session for an already verified user; returns its ID. `upstream_token` is
@@ -160,22 +194,27 @@ impl SessionStore {
     pub async fn create(&self, upstream_token: String, role: Role) -> Result<String, SessionError> {
         let id = token::random_hex(SESSION_ID_BYTES)?;
         let now = unix_now();
-        {
-            let mut sessions = self
-                .sessions
-                .write()
-                .unwrap_or_else(PoisonError::into_inner);
-            sessions.retain(|_, s| s.expires_at > now);
-            sessions.insert(
-                id.clone(),
-                Session {
-                    upstream_token,
-                    expires_at: now + SESSION_HOURS * 3600,
-                    role,
-                },
-            );
-        }
-        self.persist().await?;
+        let session = Session {
+            upstream_token,
+            expires_at: now + SESSION_HOURS * 3600,
+            role,
+        };
+        let (stored_id, stored) = (id.clone(), session.clone());
+        self.db
+            .write(move |tx| {
+                tx.execute(
+                    "DELETE FROM sessions WHERE expires_at <= ?1",
+                    [i64::try_from(now).unwrap_or(i64::MAX)],
+                )?;
+                save_session(tx, &stored_id, &stored)
+            })
+            .await?;
+        let mut sessions = self
+            .sessions
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        sessions.retain(|_, s| s.expires_at > now);
+        sessions.insert(id.clone(), session);
         Ok(id)
     }
 
@@ -191,6 +230,8 @@ impl SessionStore {
             })
     }
 
+    /// Ends a session. Gone from memory first, so it stops working even if the database
+    /// write then fails.
     pub async fn remove(&self, id: &str) -> Result<(), SessionError> {
         let removed = self
             .sessions
@@ -199,7 +240,13 @@ impl SessionStore {
             .remove(id)
             .is_some();
         if removed {
-            self.persist().await?;
+            let id = id.to_string();
+            self.db
+                .write(move |tx| {
+                    tx.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
+                    Ok(())
+                })
+                .await?;
         }
         Ok(())
     }
@@ -294,27 +341,15 @@ mod tests {
 
     #[tokio::test]
     async fn only_issued_live_sessions_resolve_and_survive_a_reload() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("sessions.json");
-        let store = SessionStore::load(&file).await.unwrap();
+        let db = Db::open_in_memory();
+        let store = SessionStore::load(db.clone()).await.unwrap();
         let id = store.create("jwt".to_string(), Role::Admin).await.unwrap();
         assert_eq!(id.len(), 64);
         assert_eq!(store.get(&id).map(|s| s.token).as_deref(), Some("jwt"));
         assert_eq!(store.get("cualquier-cosa").map(|s| s.token), None);
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
-            assert_eq!(
-                mode & 0o777,
-                0o600,
-                "session file must not be world-readable"
-            );
-        }
-
         let viewer = store.create(String::new(), Role::Viewer).await.unwrap();
-        let reloaded = SessionStore::load(&file).await.unwrap();
+        let reloaded = SessionStore::load(db.clone()).await.unwrap();
         assert_eq!(reloaded.get(&viewer).map(|s| s.role), Some(Role::Viewer));
         assert_eq!(
             reloaded.get(&id).map(|s| s.role),
@@ -325,16 +360,50 @@ mod tests {
 
         reloaded.remove(&id).await.unwrap();
         assert_eq!(reloaded.get(&id).map(|s| s.token), None);
-        let after_logout = SessionStore::load(&file).await.unwrap();
+        let after_logout = SessionStore::load(db).await.unwrap();
         assert_eq!(after_logout.get(&id).map(|s| s.token), None);
     }
 
     #[tokio::test]
-    async fn expired_sessions_do_not_resolve_nor_load() {
+    async fn expired_sessions_do_not_resolve_and_are_deleted_on_load() {
+        let db = Db::open_in_memory();
+        db.write(|tx| {
+            save_session(
+                tx,
+                "old",
+                &Session {
+                    upstream_token: "jwt".into(),
+                    expires_at: 1,
+                    role: Role::Admin,
+                },
+            )
+        })
+        .await
+        .unwrap();
+        let store = SessionStore::load(db.clone()).await.unwrap();
+        assert_eq!(store.get("old").map(|s| s.token), None);
+        let left: i64 = db
+            .read(|conn| Ok(conn.query_row("SELECT count(*) FROM sessions", [], |r| r.get(0))?))
+            .await
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn legacy_files_keep_only_live_sessions() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("sessions.json");
-        std::fs::write(&file, r#"{"old":{"upstream_token":"jwt","expires_at":1}}"#).unwrap();
-        let store = SessionStore::load(&file).await.unwrap();
-        assert_eq!(store.get("old").map(|s| s.token), None);
+        let live = unix_now() + 3600;
+        std::fs::write(
+            &file,
+            format!(
+                r#"{{"old":{{"upstream_token":"a","expires_at":1}},"live":{{"upstream_token":"b","expires_at":{live},"role":"viewer"}}}}"#
+            ),
+        )
+        .unwrap();
+        let sessions = read_legacy_file(&file).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].0, "live");
+        assert_eq!(sessions[0].1.role, Role::Viewer);
     }
 }

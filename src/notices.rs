@@ -1,13 +1,15 @@
 //! Incident notices for the apps' public status pages (`/status/{slug}`): what admins tell
 //! visitors about an outage ("investigating", "identified"...), next to the automatic
 //! traffic lights. Each notice names the apps it affects; none named = every app.
-//! Persisted to one JSON file (`NOTICES_FILE`); a handful of entries, rewritten whole on
-//! every change like the app registry.
+//! Stored in the `notices` and `notice_apps` tables, with a copy in memory (a handful of
+//! rows that every status page reads); a change is written first, then applied to the copy.
 
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 
+use crate::db::{Db, DbError};
 use crate::uptime::unix_now;
 
 /// Longest title and body accepted from the form.
@@ -38,6 +40,8 @@ pub enum NoticeError {
         #[source]
         source: serde_json::Error,
     },
+    #[error(transparent)]
+    Db(#[from] DbError),
 }
 
 impl NoticeError {
@@ -60,7 +64,7 @@ impl crate::i18n::Localize for NoticeError {
                     ("body", &MAX_BODY_CHARS.to_string()),
                 ],
             ),
-            Self::NotFound(_) | Self::Id(_) | Self::Io { .. } | Self::Json { .. } => {
+            Self::NotFound(_) | Self::Id(_) | Self::Io { .. } | Self::Json { .. } | Self::Db(_) => {
                 i18n.text("err.internal", &[("error", &self.to_string())])
             }
         }
@@ -75,6 +79,27 @@ pub enum NoticeState {
     Identified,
     Monitoring,
     Resolved,
+}
+
+impl NoticeState {
+    /// How the `notices.state` column spells it (the same as the JSON).
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Investigating => "investigating",
+            Self::Identified => "identified",
+            Self::Monitoring => "monitoring",
+            Self::Resolved => "resolved",
+        }
+    }
+
+    fn parse(value: &str) -> Self {
+        match value {
+            "identified" => Self::Identified,
+            "monitoring" => Self::Monitoring,
+            "resolved" => Self::Resolved,
+            _ => Self::Investigating,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,45 +170,101 @@ pub struct PublicNotices {
 }
 
 pub struct NoticeStore {
-    path: PathBuf,
+    db: Db,
     notices: RwLock<Vec<Notice>>,
 }
 
+fn sql_time(at: u64) -> i64 {
+    i64::try_from(at).unwrap_or(i64::MAX)
+}
+
+/// Inserts or replaces one notice and the apps it names.
+pub(crate) fn save_notice(tx: &rusqlite::Transaction<'_>, notice: &Notice) -> Result<(), DbError> {
+    tx.prepare_cached(
+        "INSERT INTO notices (id, title, body, state, created_at, updated_at, resolved_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+         ON CONFLICT (id) DO UPDATE SET title = excluded.title, body = excluded.body, \
+             state = excluded.state, updated_at = excluded.updated_at, \
+             resolved_at = excluded.resolved_at",
+    )?
+    .execute(params![
+        notice.id,
+        notice.title,
+        notice.body,
+        notice.state.as_str(),
+        sql_time(notice.created_at),
+        sql_time(notice.updated_at),
+        notice.resolved_at.map(sql_time),
+    ])?;
+    tx.prepare_cached("DELETE FROM notice_apps WHERE notice_id = ?1")?
+        .execute([&notice.id])?;
+    let mut add = tx.prepare_cached("INSERT INTO notice_apps (notice_id, slug) VALUES (?1, ?2)")?;
+    for slug in &notice.apps {
+        add.execute([&notice.id, slug])?;
+    }
+    Ok(())
+}
+
+/// Reads a 0.2 `notices.json` (for `heartbeat migrate`). A missing file is an empty list.
+pub(crate) fn read_legacy_file(path: &Path) -> Result<Vec<Notice>, NoticeError> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => serde_json::from_str(&raw).map_err(|source| NoticeError::Json {
+            path: path.to_path_buf(),
+            source,
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(NoticeError::io(path)(e)),
+    }
+}
+
 impl NoticeStore {
-    /// Loads `path`; a missing file is an empty store.
-    pub async fn load(path: impl Into<PathBuf>) -> Result<Self, NoticeError> {
-        let path = path.into();
-        let notices = match tokio::fs::read_to_string(&path).await {
-            Ok(raw) => serde_json::from_str(&raw).map_err(|source| NoticeError::Json {
-                path: path.clone(),
-                source,
-            })?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => return Err(NoticeError::io(&path)(e)),
-        };
+    pub async fn load(db: Db) -> Result<Self, NoticeError> {
+        let notices = db
+            .read(|conn| {
+                let time = |v: i64| u64::try_from(v).unwrap_or(0);
+                let mut stmt = conn.prepare(
+                    "SELECT id, title, body, state, created_at, updated_at, resolved_at \
+                     FROM notices ORDER BY created_at",
+                )?;
+                let mut notices = stmt
+                    .query_map([], |row| {
+                        Ok(Notice {
+                            id: row.get(0)?,
+                            title: row.get(1)?,
+                            body: row.get(2)?,
+                            state: NoticeState::parse(&row.get::<_, String>(3)?),
+                            created_at: time(row.get(4)?),
+                            updated_at: time(row.get(5)?),
+                            resolved_at: row.get::<_, Option<i64>>(6)?.map(time),
+                            apps: Vec::new(),
+                        })
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let mut apps = conn
+                    .prepare("SELECT slug FROM notice_apps WHERE notice_id = ?1 ORDER BY slug")?;
+                for notice in &mut notices {
+                    notice.apps = apps
+                        .query_map([&notice.id], |row| row.get(0))?
+                        .collect::<rusqlite::Result<_>>()?;
+                }
+                Ok(notices)
+            })
+            .await?;
         Ok(Self {
-            path,
+            db,
             notices: RwLock::new(notices),
         })
     }
 
-    async fn persist(&self, notices: &[Notice]) -> Result<(), NoticeError> {
-        if let Some(parent) = self.path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(NoticeError::io(parent))?;
-        }
-        let raw = serde_json::to_string_pretty(notices).map_err(|source| NoticeError::Json {
-            path: self.path.clone(),
-            source,
-        })?;
-        let tmp = self.path.with_extension("json.tmp");
-        tokio::fs::write(&tmp, raw)
-            .await
-            .map_err(NoticeError::io(&tmp))?;
-        tokio::fs::rename(&tmp, &self.path)
-            .await
-            .map_err(NoticeError::io(&self.path))
+    /// Writes `notice`; the caller updates the in-memory copy after.
+    async fn save(&self, notice: Notice) -> Result<Notice, NoticeError> {
+        Ok(self
+            .db
+            .write(move |tx| {
+                save_notice(tx, &notice)?;
+                Ok(notice)
+            })
+            .await?)
     }
 
     /// Newest first.
@@ -213,17 +294,19 @@ impl NoticeStore {
         let now = unix_now();
         let id = crate::token::random_hex(8)?;
         let mut notices = self.notices.write().await;
-        notices.push(Notice {
-            id: id.clone(),
-            title: draft.title,
-            body: draft.body,
-            state: draft.state,
-            created_at: now,
-            updated_at: now,
-            resolved_at: (draft.state == NoticeState::Resolved).then_some(now),
-            apps: draft.apps,
-        });
-        self.persist(&notices).await?;
+        let notice = self
+            .save(Notice {
+                id: id.clone(),
+                title: draft.title,
+                body: draft.body,
+                state: draft.state,
+                created_at: now,
+                updated_at: now,
+                resolved_at: (draft.state == NoticeState::Resolved).then_some(now),
+                apps: draft.apps,
+            })
+            .await?;
+        notices.push(notice);
         Ok(id)
     }
 
@@ -231,30 +314,42 @@ impl NoticeStore {
         let draft = draft.validated()?;
         let now = unix_now();
         let mut notices = self.notices.write().await;
-        let notice = notices
+        let slot = notices
             .iter_mut()
             .find(|n| n.id == id)
             .ok_or_else(|| NoticeError::NotFound(id.to_string()))?;
-        notice.resolved_at = match draft.state {
-            NoticeState::Resolved => notice.resolved_at.or(Some(now)),
-            NoticeState::Investigating | NoticeState::Identified | NoticeState::Monitoring => None,
+        let changed = Notice {
+            resolved_at: match draft.state {
+                NoticeState::Resolved => slot.resolved_at.or(Some(now)),
+                NoticeState::Investigating | NoticeState::Identified | NoticeState::Monitoring => {
+                    None
+                }
+            },
+            title: draft.title,
+            body: draft.body,
+            state: draft.state,
+            apps: draft.apps,
+            updated_at: now,
+            ..slot.clone()
         };
-        notice.title = draft.title;
-        notice.body = draft.body;
-        notice.state = draft.state;
-        notice.apps = draft.apps;
-        notice.updated_at = now;
-        self.persist(&notices).await
+        *slot = self.save(changed).await?;
+        Ok(())
     }
 
     pub async fn remove(&self, id: &str) -> Result<(), NoticeError> {
         let mut notices = self.notices.write().await;
-        let before = notices.len();
-        notices.retain(|n| n.id != id);
-        if notices.len() == before {
+        if !notices.iter().any(|n| n.id == id) {
             return Err(NoticeError::NotFound(id.to_string()));
         }
-        self.persist(&notices).await
+        let owned = id.to_string();
+        self.db
+            .write(move |tx| {
+                tx.execute("DELETE FROM notices WHERE id = ?1", [owned])?;
+                Ok(())
+            })
+            .await?;
+        notices.retain(|n| n.id != id);
+        Ok(())
     }
 }
 
@@ -273,9 +368,8 @@ mod tests {
 
     #[tokio::test]
     async fn notices_persist_and_resolving_moves_them_to_recent() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("notices.json");
-        let store = NoticeStore::load(&file).await.unwrap();
+        let db = Db::open_in_memory();
+        let store = NoticeStore::load(db.clone()).await.unwrap();
         let id = store
             .create(draft(" Slow checkout ", NoticeState::Investigating))
             .await
@@ -289,7 +383,7 @@ mod tests {
             .update(&id, draft("Slow checkout", NoticeState::Resolved))
             .await
             .unwrap();
-        let reloaded = NoticeStore::load(&file).await.unwrap();
+        let reloaded = NoticeStore::load(db.clone()).await.unwrap();
         let public = reloaded.public_for("any", unix_now()).await;
         assert!(public.open.is_empty());
         assert_eq!(public.recent.len(), 1);
@@ -303,12 +397,13 @@ mod tests {
 
         reloaded.remove(&id).await.unwrap();
         assert!(reloaded.list().await.is_empty());
+        assert!(NoticeStore::load(db).await.unwrap().list().await.is_empty());
     }
 
     #[tokio::test]
     async fn notices_show_only_on_the_apps_they_name() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = NoticeStore::load(dir.path().join("n.json")).await.unwrap();
+        let db = Db::open_in_memory();
+        let store = NoticeStore::load(db.clone()).await.unwrap();
         let mut billing = draft("Billing down", NoticeState::Investigating);
         billing.apps = vec![" billing ".into(), "billing".into()];
         store.create(billing).await.unwrap();
@@ -328,12 +423,17 @@ mod tests {
             .filter(|n| !n.apps.is_empty())
             .collect();
         assert_eq!(named[0].apps, ["billing"], "trimmed and deduplicated");
+        let reloaded = NoticeStore::load(db).await.unwrap();
+        assert_eq!(
+            reloaded.public_for("search", now).await.open.len(),
+            1,
+            "apps survive a reload"
+        );
     }
 
     #[tokio::test]
     async fn drafts_are_validated() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = NoticeStore::load(dir.path().join("n.json")).await.unwrap();
+        let store = NoticeStore::load(Db::open_in_memory()).await.unwrap();
         assert!(matches!(
             store.create(draft("   ", NoticeState::Identified)).await,
             Err(NoticeError::EmptyTitle)
