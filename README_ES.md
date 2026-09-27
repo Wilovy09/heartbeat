@@ -138,6 +138,11 @@ Un solo binario de Rust, sin base de datos: todo se guarda en archivos bajo `dat
   cada ronda, para que un servicio externo te avise si Heartbeat mismo se detiene.
   `GET /healthz` responde `ok` para balanceadores.
 - **Interfaz en español o inglés** (`APP_LANG`).
+- **Tema del sistema, oscuro, claro o personalizado**, que cada navegador elige en la
+  barra superior; «Sistema» (el de por defecto) sigue el modo claro u oscuro del sistema
+  operativo.
+  El personalizado es CSS que un admin guarda en `/settings` (normalmente solo cambia
+  las variables de color de `static/tokens.css`), en `THEME_FILE`.
 
 ## Autenticación
 

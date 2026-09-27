@@ -3,6 +3,20 @@
 All notable changes to Heartbeat. Versions follow [SemVer](https://semver.org/); entries
 before 0.2.0 were reconstructed from the git history.
 
+## [Unreleased]
+
+### Themes
+- System (the default: follows the OS light/dark setting, live), dark, light and custom
+  themes, picked per browser from the top bar (also on the public status pages; the login
+  page follows the choice) and applied before the first paint.
+- Custom theme: CSS saved from Settings (`THEME_FILE`) and served at `/theme/custom.css`,
+  applied on top of the dark tokens. The editor loads the current tokens as a template,
+  loads or downloads a `.css` file and previews on the page before saving; `@import`,
+  `url()` and anything over 32 KB are refused.
+- Every color now comes from design tokens in `static/tokens.css`, shared by all pages;
+  the latency chart reads them at draw time and redraws on a theme change, and the embed
+  previews in Apps follow the page theme.
+
 ## [0.2.0] - 2026-09-26
 
 ### Upgrading from 0.1.x

@@ -137,6 +137,10 @@ A single Rust binary, no database: everything is stored in files under `data/`.
   of checks, so an external service warns you if Heartbeat itself stops. `GET /healthz`
   answers `ok` for load balancers.
 - **Spanish or English UI** (`APP_LANG`).
+- **System, dark, light or custom theme**, chosen per browser from the top bar; System
+  (the default) follows the OS light/dark setting. The custom theme
+  is CSS an admin saves in `/settings` (usually just overriding the color variables in
+  `static/tokens.css`), stored in `THEME_FILE`.
 
 ## Authentication
 
