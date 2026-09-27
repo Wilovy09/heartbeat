@@ -13,8 +13,9 @@ use crate::{
     uptime::{DayUptime, MonitorSummary, Status, UptimeMonitor, unix_now},
 };
 
-/// Days of history drawn per app. Phones hide the oldest ones in CSS.
-const HISTORY_DAYS: u64 = 30;
+/// Days of history drawn per app, from the daily counts (kept `UPTIME_DAILY_RETENTION_DAYS`).
+/// Phones show the latest 30 (CSS).
+const HISTORY_DAYS: u64 = 90;
 
 /// `100%`, or two decimals below it (`99.95%`).
 fn pct(value: f64) -> String {
