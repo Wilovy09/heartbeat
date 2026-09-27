@@ -137,30 +137,45 @@ pub fn down_since(conn: &Connection, slug: &str) -> Result<Option<u64>, DbError>
 }
 
 /// Checks where the status flipped (the oldest one counts), newest first, at most `max`.
-/// Reads the history backwards and stops as soon as it has them.
+///
+/// Jumps from run to run instead of reading every check: for the run the newest check
+/// belongs to, SQLite finds the last earlier check with another status (the scan stays
+/// inside SQLite), and the check right after it is where the run began -- an event.
+/// A steady app costs two queries, not a pass over its whole history in Rust.
 pub fn events(conn: &Connection, slug: &str, max: usize) -> Result<Vec<Heartbeat>, DbError> {
-    let mut stmt = conn.prepare_cached(&format!(
-        "SELECT {COLUMNS} FROM heartbeats WHERE slug = ?1 ORDER BY at DESC"
+    let mut latest = conn.prepare_cached(&format!(
+        "SELECT {COLUMNS} FROM heartbeats WHERE slug = ?1 ORDER BY at DESC LIMIT 1"
     ))?;
-    let mut rows = stmt.query([slug])?;
+    let mut boundary = conn.prepare_cached(
+        "SELECT max(at) FROM heartbeats WHERE slug = ?1 AND at < ?2 AND status != ?3",
+    )?;
+    let mut first_after = conn.prepare_cached(&format!(
+        "SELECT {COLUMNS} FROM heartbeats WHERE slug = ?1 AND at > ?2 ORDER BY at LIMIT 1"
+    ))?;
+    let mut at = conn.prepare_cached(&format!(
+        "SELECT {COLUMNS} FROM heartbeats WHERE slug = ?1 AND at = ?2"
+    ))?;
+
     let mut events = Vec::new();
-    let Some(first) = rows.next()? else {
+    let Some(mut current) = latest
+        .query_map([slug], beat_from_row)?
+        .next()
+        .transpose()?
+    else {
         return Ok(events);
     };
-    let mut newer = beat_from_row(first)?;
-    while let Some(row) = rows.next()? {
-        let older = beat_from_row(row)?;
-        if older.status != newer.status {
-            events.push(newer);
-            if events.len() == max {
-                return Ok(events);
-            }
-        }
-        newer = older;
+    while events.len() < max {
+        let before: Option<i64> = boundary.query_row(
+            params![slug, sql_int(current.at), status_code(current.status)],
+            |row| row.get(0),
+        )?;
+        let start = first_after.query_row(params![slug, before.unwrap_or(-1)], beat_from_row)?;
+        events.push(start);
+        let Some(before) = before else {
+            break; // that run is the oldest retained one
+        };
+        current = at.query_row(params![slug, before], beat_from_row)?;
     }
-    // The oldest retained check counts as the first event.
-    events.push(newer);
-    events.truncate(max);
     Ok(events)
 }
 
