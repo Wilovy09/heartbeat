@@ -9,11 +9,9 @@
 <meta property="og:description" content="{{ meta.description }}">
 <meta property="og:image" content="{{ assets }}/screens/dashboard_demo.png">
 <link rel="icon" type="image/svg+xml" href="{{ assets }}/icon.svg">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@300;400;600&display=swap">
-<link rel="stylesheet" href="{{ assets }}/tokens.css">
-<link rel="stylesheet" href="{{ assets }}/site.css">
+<link rel="preload" href="{{ assets }}/fonts/instrument-serif-latin-400.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="{{ assets }}/fonts/inter-latin-variable.woff2" as="font" type="font/woff2" crossorigin>
+<style>{{ css_inline }}</style>
 <script>
   // Before the first paint: system (default), light or dark, same tokens as the app.
   (function () {

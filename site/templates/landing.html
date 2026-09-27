@@ -12,7 +12,7 @@
     <div class="hero-inner">
       <div class="hero-copy">
         <p class="pill stagger"><span class="vital st-up" aria-hidden="true"></span>{{ hero.pill }}</p>
-        <h1 id="hero-title" class="hero-title shimmer stagger">{{ hero.title }}</h1>
+        <h1 id="hero-title" class="hero-title shimmer">{{ hero.title }}</h1>
         <p class="hero-lead stagger">{{ hero.lead }}</p>
         <div class="hero-actions stagger">
           <a class="btn btn-primary" href="{{ docs_url }}">{{ hero.cta_docs }}</a>
@@ -102,6 +102,7 @@
         <h3>{{ f.look.title }}</h3>
         <p>{{ f.look.body }}</p>
         <div class="minis" aria-hidden="true"><figure class="mini mini-dark"><div class="mini-screen"><i class="mini-bar"></i><i class="mini-line"></i><i class="mini-line short"></i><span class="mini-beats"><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b class="w"></b><b></b><b></b><b></b><b></b></span></div><figcaption>{{ theme.dark }}</figcaption></figure><figure class="mini mini-light"><div class="mini-screen"><i class="mini-bar"></i><i class="mini-line"></i><i class="mini-line short"></i><span class="mini-beats"><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b class="w"></b><b></b><b></b><b></b><b></b></span></div><figcaption>{{ theme.light }}</figcaption></figure><figure class="mini mini-custom"><div class="mini-screen"><i class="mini-bar"></i><i class="mini-line"></i><i class="mini-line short"></i><span class="mini-beats"><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b class="w"></b><b></b><b></b><b></b><b></b></span></div><figcaption>{{ theme.custom }}</figcaption></figure></div>
+        <p class="feature-link"><a href="{{ theme_url }}">{{ f.look.cta }}</a></p>
       </article>
     </div>
   </section>

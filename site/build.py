@@ -34,6 +34,7 @@ LANGS = {"en": "README.md", "es": "README_ES.md"}
 # README sections the site shows its own way (the landing has a screenshot gallery).
 SKIPPED_SECTIONS = {"Screenshots", "Capturas"}
 PLACEHOLDER = re.compile(r"\{\{\s*([\w.]+)\s*\}\}")
+BADGE_IMG = re.compile(r'<img src="([^"]*badges/([\w-]+)\.svg)"([^>]*)>')
 
 
 def load_catalogs() -> dict[str, dict[str, str]]:
@@ -74,6 +75,7 @@ def context(catalog: dict[str, str], lang: str, prefix: str, page: str) -> dict[
             "assets": f"{prefix}assets",
             "home": f"{prefix}{lang}/",
             "docs_url": f"{prefix}{lang}/docs/",
+            "theme_url": f"{prefix}{lang}/theme/",
             "other_lang_url": f"{prefix}{other}/{page}",
             "canonical": f"{SITE_URL}/{lang}/{page}",
             "alt_en": f"{SITE_URL}/en/{page}",
@@ -84,12 +86,66 @@ def context(catalog: dict[str, str], lang: str, prefix: str, page: str) -> dict[
     return ctx
 
 
+def inline_css(prefix: str) -> str:
+    """tokens.css + site.css, inlined in every page's <head> so nothing blocks the first
+    paint. Font URLs are made relative to the page; comments and indentation go."""
+    css = (ROOT / "static" / "tokens.css").read_text() + (SITE / "assets" / "site.css").read_text()
+    css = css.replace('url("fonts/', f'url("{prefix}assets/fonts/')
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    css = re.sub(r"\s*\n\s*", "\n", css).strip()
+    return css.replace("</", "<\\/")
+
+
+def size_badges(page: str) -> str:
+    """Gives every badge <img> its SVG's width, so the layout doesn't shift as they load."""
+    badges = ROOT / ".github" / "public" / "badges"
+
+    def fix(match: re.Match) -> str:
+        src, name, attrs = match.groups()
+        if "width=" in attrs:
+            return match.group(0)
+        svg = (badges / f"{name}.svg").read_text()
+        width = re.search(r'<svg[^>]*\swidth="([\d.]+)"', svg)
+        if not width:
+            return match.group(0)
+        height = "" if "height=" in attrs else ' height="20"'
+        return f'<img src="{src}" width="{width.group(1)}"{height}{attrs}>'
+
+    return BADGE_IMG.sub(fix, page)
+
+
 def ticker(catalog: dict[str, str]) -> str:
     items = "".join(
         f"<li>{html.escape(item)}</li>" for item in catalog["ticker.items"].split("|")
     )
     # Two copies side by side make the loop seamless; the second is hidden from readers.
     return f'<ul class="ticker-track">{items}</ul><ul class="ticker-track" aria-hidden="true">{items}</ul>'
+
+
+# The theme builder's controls: the tokens a custom theme sets, by group. The rest of the
+# tokens (borders, tints, overlays) are derived from these by assets/theme-builder.js.
+THEME_GROUPS = {
+    "surfaces": ["glass", "bay", "bay-raised", "well"],
+    "text": ["ink", "ink-2", "ink-3", "ink-4"],
+    "states": ["rhythm-up", "rhythm-degraded", "rhythm-down", "rhythm-flat"],
+    "accents": ["info", "pulse"],
+}
+
+
+def theme_controls(ctx: dict[str, str]) -> str:
+    groups = []
+    for group, tokens in THEME_GROUPS.items():
+        rows = "".join(
+            f'<label class="tb-token"><input type="color" data-token="{t}" aria-label="{ctx[f"tb.t.{t}"]}">'
+            f'<span class="tb-name">{ctx[f"tb.t.{t}"]}</span>'
+            f'<input type="text" class="tb-hex" data-hex="{t}" spellcheck="false" maxlength="7" '
+            f'aria-label="{ctx[f"tb.t.{t}"]} (hex)"></label>'
+            for t in tokens
+        )
+        groups.append(
+            f'<fieldset class="tb-group"><legend>{ctx[f"tb.group.{group}"]}</legend>{rows}</fieldset>'
+        )
+    return "".join(groups)
 
 
 def readme_sections(lang: str) -> str:
@@ -158,8 +214,8 @@ def copy_assets() -> None:
     shutil.copytree(SITE / "assets", assets)
     shutil.copy(ROOT / "static" / "tokens.css", assets / "tokens.css")
     shutil.copy(ROOT / "static" / "icon.svg", assets / "icon.svg")
-    fonts = assets / "fonts"
-    fonts.mkdir()
+    fonts = assets / "fonts"  # the site's own fonts are already there
+    fonts.mkdir(exist_ok=True)
     for font in (ROOT / "static" / "fonts").glob("ibm-plex-mono-*.woff2"):
         shutil.copy(font, fonts / font.name)
     screens = assets / "screens"
@@ -173,7 +229,7 @@ def build() -> None:
     catalogs = load_catalogs()
     templates = {
         name: (SITE / "templates" / f"{name}.html").read_text()
-        for name in ("head", "nav", "footer", "landing", "docs", "redirect")
+        for name in ("head", "nav", "footer", "landing", "docs", "theme", "redirect")
     }
     if OUT.exists():
         shutil.rmtree(OUT)
@@ -181,24 +237,30 @@ def build() -> None:
     copy_assets()
 
     for lang, catalog in catalogs.items():
-        for page, prefix, template in (("", "../", "landing"), ("docs/", "../../", "docs")):
+        pages = (("", "../", "landing"), ("docs/", "../../", "docs"), ("theme/", "../../", "theme"))
+        for page, prefix, template in pages:
             ctx = context(catalog, lang, prefix, page)
             ctx["ticker_html"] = ticker(catalog)
+            ctx["css_inline"] = inline_css(prefix)
             if template == "docs":
                 ctx["docs_html"], ctx["toc_html"] = build_docs(lang)
                 ctx["page_title"] = ctx["docs.meta.title"]
                 ctx["edit_url"] = f"{REPO}/blob/main/{LANGS[lang]}"
+            elif template == "theme":
+                ctx["page_title"] = ctx["tb.meta.title"]
+                ctx["controls_html"] = theme_controls(ctx)
             else:
                 ctx["page_title"] = ctx["meta.title"]
             for part in ("head", "nav", "footer"):
                 ctx[f"{part}_html"] = render(templates[part], ctx)
             target = OUT / lang / page / "index.html"
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(render(templates[template], ctx))
+            target.write_text(size_badges(render(templates[template], ctx)))
 
     ctx = context(catalogs["en"], "en", "", "")
     ctx["es_url"], ctx["en_url"] = "es/", "en/"
     ctx["page_title"] = ctx["redirect.title"]
+    ctx["css_inline"] = inline_css("")
     ctx["head_html"] = render(templates["head"], ctx)
     (OUT / "index.html").write_text(render(templates["redirect"], ctx))
     (OUT / ".nojekyll").write_text("")
