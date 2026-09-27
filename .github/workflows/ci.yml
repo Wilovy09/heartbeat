@@ -46,3 +46,27 @@ jobs:
         run: npm install --silent && npx playwright install --with-deps chromium
       - name: Smoke test
         run: just e2e
+
+  # The image the release publishes still builds (amd64 only here; the release adds arm64)
+  # and starts: catches a Dockerfile that misses something the binary embeds.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: heartbeat:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Starts and answers /healthz
+        run: |
+          docker run -d --name hb -p 8090:8090 \
+            -e ALLOWED_HOSTS='*.example.com' -e AUTH_MODE=password \
+            -e ADMIN_EMAIL=ci@example.com -e ADMIN_PASSWORD_HASH='$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$aGFzaGhhc2hoYXNoaGFzaA' \
+            heartbeat:ci
+          for _ in $(seq 30); do curl -fsS localhost:8090/healthz && exit 0; sleep 1; done
+          docker logs hb; exit 1
