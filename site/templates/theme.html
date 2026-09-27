@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="{{ lang }}">
+<head>
+{{ head_html }}
+<script src="{{ assets }}/theme-builder.js" defer></script>
+</head>
+<body class="theme-page">
+{{ nav_html }}
+<main id="main" class="tb">
+  <header class="tb-head">
+    <h1 class="tb-title">{{ tb.title }}</h1>
+    <p class="section-lead">{{ tb.lead }}</p>
+  </header>
+
+  <div class="tb-layout">
+    <section class="tb-controls" aria-label="{{ tb.output }}">
+      <div class="tb-presets" role="group" aria-label="{{ tb.presets }}">
+        <span class="tb-label">{{ tb.presets }}</span>
+        <div class="tb-preset-list">
+          <button type="button" data-preset="dark">{{ tb.preset.dark }}</button>
+          <button type="button" data-preset="light">{{ tb.preset.light }}</button>
+          <button type="button" data-preset="midnight">{{ tb.preset.midnight }}</button>
+          <button type="button" data-preset="forest">{{ tb.preset.forest }}</button>
+          <button type="button" data-preset="contrast">{{ tb.preset.contrast }}</button>
+        </div>
+      </div>
+      {{ controls_html }}
+      <div class="tb-contrast" aria-live="polite">
+        <span class="tb-label">{{ tb.contrast }}</span>
+        <div class="tb-ratio" data-ratio="ink" data-min="4.5" data-ok="{{ tb.contrast.ok }}" data-low="{{ tb.contrast.low }}"><span>{{ tb.contrast.main }}</span><strong></strong><em></em></div>
+        <div class="tb-ratio" data-ratio="ink-3" data-min="3" data-ok="{{ tb.contrast.ok }}" data-low="{{ tb.contrast.low }}"><span>{{ tb.contrast.muted }}</span><strong></strong><em></em></div>
+      </div>
+    </section>
+
+    <div class="tb-side">
+      <!-- A small copy of the dashboard, drawn only with the theme's tokens. -->
+      <div class="pv" id="preview" role="img" aria-label="{{ tb.preview }}">
+        <div class="pv-top">
+          <span class="pv-brand"><img src="{{ assets }}/icon.svg" alt="" width="18" height="18">Heartbeat</span>
+          <span class="pv-tab on">{{ tb.pv.dashboard }}</span>
+          <span class="pv-tab">{{ tb.pv.logs }}</span>
+          <span class="pv-tab">{{ tb.pv.apps }}</span>
+        </div>
+        <div class="pv-body">
+          <aside class="pv-list">
+            <span class="pv-search">{{ tb.pv.search }}</span>
+            <div class="pv-app"><span class="pv-dot down"></span><span>search</span><em>—</em></div>
+            <div class="pv-app"><span class="pv-dot deg"></span><span>checkout</span><em>1210 ms</em></div>
+            <div class="pv-app"><span class="pv-dot up"></span><span>billing-api</span><em>142 ms</em></div>
+            <div class="pv-app"><span class="pv-dot up"></span><span>workers</span><em>61 ms</em></div>
+            <div class="pv-app"><span class="pv-dot flat"></span><span>staging</span><em>—</em></div>
+          </aside>
+          <div class="pv-main">
+            <div class="pv-census"><i class="down" style="flex:1"></i><i class="deg" style="flex:1"></i><i class="up" style="flex:2"></i><i class="flat" style="flex:1"></i></div>
+            <div class="pv-card pv-alert">
+              <span class="pv-dot down"></span>
+              <div><strong>search</strong><span>{{ demo.down }}: DNS lookup failed</span></div>
+              <span class="pv-chip">{{ tb.pv.attention }}</span>
+            </div>
+            <div class="pv-card">
+              <div class="pv-card-head"><strong>{{ tb.pv.latency }}</strong><em>142 ms</em></div>
+              <svg class="pv-chart" viewBox="0 0 300 70" preserveAspectRatio="none" aria-hidden="true">
+                <path class="pv-grid" d="M0 17.5H300M0 35H300M0 52.5H300M60 0V70M120 0V70M180 0V70M240 0V70"/>
+                <path class="pv-line" d="M0 48 L20 45 L40 47 L60 40 L80 44 L100 42 L120 30 L140 12 L160 38 L180 43 L200 41 L220 46 L240 39 L260 42 L280 40 L300 43"/>
+              </svg>
+              <div class="pv-beats"><b></b><b></b><b></b><b></b><b></b><b></b><b class="deg"></b><b class="deg"></b><b></b><b></b><b></b><b class="down"></b><b class="down"></b><b class="down"></b><b></b><b></b><b></b><b></b><b></b><b></b></div>
+            </div>
+            <pre class="pv-logs"><span class="e">ERROR</span> search::http request failed
+<span class="w">WARN </span> search::db slow query 2380 ms
+<span class="i">INFO </span> search::http request completed</pre>
+            <div class="pv-actions">
+              <a class="pv-link">{{ tb.pv.link }}</a>
+              <span class="pv-btn ghost">{{ tb.pv.cancel }}</span>
+              <span class="pv-btn">{{ tb.pv.save }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <section class="tb-output" aria-labelledby="tb-output-title">
+        <div class="tb-output-head">
+          <h2 id="tb-output-title">{{ tb.output }}</h2>
+          <div class="tb-output-tools">
+            <label class="btn btn-ghost tb-small">{{ tb.import }}<input type="file" accept=".css,text/css" data-import hidden></label>
+            <button type="button" class="btn btn-ghost tb-small" data-reset>{{ tb.reset }}</button>
+            <button type="button" class="btn btn-ghost tb-small" data-download>{{ tb.download }}</button>
+            <button type="button" class="btn btn-primary tb-small" data-copy-css data-label="{{ tb.copy }}" data-done="{{ deploy.copied }}">{{ tb.copy }}</button>
+          </div>
+        </div>
+        <pre class="tb-css"><code id="css-out"></code></pre>
+      </section>
+    </div>
+  </div>
+
+  <section class="section tb-apply" aria-labelledby="tb-apply-title">
+    <h2 id="tb-apply-title" class="section-title">{{ tb.apply.title }}</h2>
+    <ol class="steps">
+      <li class="step"><p>{{ tb.apply.step1 }}</p></li>
+      <li class="step"><p>{{ tb.apply.step2 }}</p></li>
+      <li class="step"><p>{{ tb.apply.step3 }}</p></li>
+    </ol>
+    <p class="tb-note">{{ tb.apply.note }}</p>
+  </section>
+</main>
+{{ footer_html }}
+</body>
+</html>
