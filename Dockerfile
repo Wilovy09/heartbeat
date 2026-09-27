@@ -3,7 +3,9 @@ FROM rust:1-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-# UI strings, templates, static files and vendored libs are embedded in the binary.
+# UI strings, templates, static files, vendored libs and the database schema are
+# embedded in the binary.
+COPY migrations ./migrations
 COPY locales ./locales
 COPY templates ./templates
 COPY static ./static

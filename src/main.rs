@@ -6,6 +6,7 @@ mod assets;
 mod auth;
 mod bundles;
 mod config;
+mod db;
 #[cfg(feature = "demo")]
 mod demo;
 mod i18n;
