@@ -14,7 +14,10 @@ falla.
   gráfica de latencia va sobre cuadrícula de papel de ECG. Las listas se ordenan por
   triage: caídas, degradadas, arriba, sin datos.
 
-## Tokens (`templates/base.html`, `:root`)
+## Tokens (`static/tokens.css`)
+
+Oscuro en `:root` (la opción «Sistema», que es la de por defecto, elige claro u oscuro según el sistema operativo); claro en `:root[data-theme="light"]` con los mismos roles y los colores de estado más profundos para mantener contraste sobre blanco; personalizado = CSS del admin (`/theme/custom.css`) sobre el oscuro. Ningún color va escrito fuera de este archivo: overlays, foco, sombras, tintes de estado y la cuadrícula de la gráfica también son tokens (`--overlay`, `--focus-ring`, `--shadow`, `--down-tint`, `--grid-major`…).
+
 
 Un solo tono; las superficies solo cambian en luminosidad.
 
@@ -39,9 +42,9 @@ Reglas de color:
 - Las acciones son neutras: el botón primario es `--ink` sobre `--glass`.
 - Un número se colorea solo si importa. En el conteo por estado, degradado y caído van en
   color solo cuando son mayores que cero.
-- `static/uptime.js` (constante `COLOR`) y `static/embed.js` repiten los valores de
-  estado, porque el SVG y el Shadow DOM no leen estas variables. Si se cambia un color,
-  hay que cambiarlo en los tres lugares.
+- La gráfica (`static/uptime.js`) lee los tokens al dibujar y se redibuja con el evento
+  `hb:theme`. `static/embed.js` (Shadow DOM en webs ajenas) tiene sus propios temas
+  oscuro/claro; si cambia un color de estado, hay que actualizarlo ahí también.
 - Los nombres viejos (`--bg`, `--panel`, `--border`, `--text`, `--muted`, `--accent`,
   etc.) siguen como alias porque los usa `log_viewer.html`. No se deben usar en código
   nuevo.
