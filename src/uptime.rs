@@ -596,6 +596,8 @@ pub struct Notifiers {
     /// Pinged after every round of checks, so an external dead man's switch notices when
     /// this monitor itself stops (e.g. a healthchecks.io URL).
     pub ping_url: Option<String>,
+    /// Where the end of a scheduled pause is recorded.
+    pub audit: Option<crate::audit::AuditLog>,
 }
 
 pub struct UptimeMonitor {
@@ -661,6 +663,12 @@ impl UptimeMonitor {
                 Ok(resumed) => {
                     for slug in resumed {
                         tracing::info!(app = %slug, "uptime: maintenance over, checks resumed");
+                        if let Some(audit) = &self.notifiers.audit {
+                            let event = crate::audit::Event::system("app.resume")
+                                .target(&slug)
+                                .detail(serde_json::json!({ "reason": "scheduled" }));
+                            audit.record(event).await;
+                        }
                     }
                 }
                 Err(e) => tracing::error!(error = %e, "uptime: could not resume apps"),
@@ -1486,7 +1494,7 @@ mod tests {
         .unwrap();
         let notifiers = Notifiers {
             alerter: Some(alerter),
-            ping_url: None,
+            ..Notifiers::default()
         };
         let monitor = UptimeMonitor::load(db_with(&["api"]).await, policy(), outbound(), notifiers)
             .await

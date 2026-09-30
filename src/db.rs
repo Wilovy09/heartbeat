@@ -21,7 +21,10 @@ use std::time::Duration;
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 
 /// Every schema migration, in order; the database's `user_version` is how many ran.
-const MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_init.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/0001_init.sql"),
+    include_str!("../migrations/0002_audit.sql"),
+];
 
 /// Read connections next to the writer, for a file database.
 const READERS: usize = 2;
@@ -363,6 +366,7 @@ mod tests {
             "sessions",
             "notices",
             "kv",
+            "audit_log",
         ] {
             assert!(
                 names.iter().any(|n| n == table),

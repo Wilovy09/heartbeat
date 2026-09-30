@@ -78,7 +78,7 @@ pub enum Role {
 
 impl Role {
     /// How the `sessions.role` column spells it.
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Admin => "admin",
             Self::Viewer => "viewer",
@@ -94,6 +94,9 @@ pub(crate) struct Session {
     expires_at: u64,
     #[serde(default)]
     role: Role,
+    /// Who logged in (lowercased); empty for sessions from before it was kept.
+    #[serde(default)]
+    email: String,
 }
 
 /// A live session, as handlers see it.
@@ -102,6 +105,8 @@ pub struct SessionInfo {
     /// The upstream JWT; empty when there is none.
     pub token: String,
     pub role: Role,
+    /// Who logged in; empty for a session started before Heartbeat kept it.
+    pub email: String,
 }
 
 impl SessionInfo {
@@ -124,14 +129,15 @@ pub(crate) fn save_session(
     session: &Session,
 ) -> Result<(), DbError> {
     tx.prepare_cached(
-        "INSERT INTO sessions (id, upstream_token, role, expires_at) VALUES (?1, ?2, ?3, ?4) \
-         ON CONFLICT (id) DO NOTHING",
+        "INSERT INTO sessions (id, upstream_token, role, expires_at, email) \
+         VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (id) DO NOTHING",
     )?
     .execute(params![
         id,
         session.upstream_token,
         session.role.as_str(),
         i64::try_from(session.expires_at).unwrap_or(i64::MAX),
+        session.email,
     ])?;
     Ok(())
 }
@@ -162,7 +168,7 @@ impl SessionStore {
             .write(move |tx| {
                 tx.execute("DELETE FROM sessions WHERE expires_at <= ?1", [now])?;
                 let mut stmt =
-                    tx.prepare("SELECT id, upstream_token, role, expires_at FROM sessions")?;
+                    tx.prepare("SELECT id, upstream_token, role, expires_at, email FROM sessions")?;
                 let sessions = stmt
                     .query_map([], |row| {
                         let role: String = row.get(2)?;
@@ -176,6 +182,7 @@ impl SessionStore {
                                 } else {
                                     Role::Admin
                                 },
+                                email: row.get(4)?,
                             },
                         ))
                     })?
@@ -191,13 +198,19 @@ impl SessionStore {
 
     /// Starts a session for an already verified user; returns its ID. `upstream_token` is
     /// the login server's JWT, or empty when there is none (`AuthMode::Password`).
-    pub async fn create(&self, upstream_token: String, role: Role) -> Result<String, SessionError> {
+    pub async fn create(
+        &self,
+        email: &str,
+        upstream_token: String,
+        role: Role,
+    ) -> Result<String, SessionError> {
         let id = token::random_hex(SESSION_ID_BYTES)?;
         let now = unix_now();
         let session = Session {
             upstream_token,
             expires_at: now + SESSION_HOURS * 3600,
             role,
+            email: email.trim().to_lowercase(),
         };
         let (stored_id, stored) = (id.clone(), session.clone());
         self.db
@@ -227,6 +240,7 @@ impl SessionStore {
             .map(|s| SessionInfo {
                 token: s.upstream_token.clone(),
                 role: s.role,
+                email: s.email.clone(),
             })
     }
 
@@ -343,12 +357,22 @@ mod tests {
     async fn only_issued_live_sessions_resolve_and_survive_a_reload() {
         let db = Db::open_in_memory();
         let store = SessionStore::load(db.clone()).await.unwrap();
-        let id = store.create("jwt".to_string(), Role::Admin).await.unwrap();
+        let id = store
+            .create(" Admin@Example.com", "jwt".to_string(), Role::Admin)
+            .await
+            .unwrap();
         assert_eq!(id.len(), 64);
         assert_eq!(store.get(&id).map(|s| s.token).as_deref(), Some("jwt"));
+        assert_eq!(
+            store.get(&id).map(|s| s.email).as_deref(),
+            Some("admin@example.com")
+        );
         assert_eq!(store.get("cualquier-cosa").map(|s| s.token), None);
 
-        let viewer = store.create(String::new(), Role::Viewer).await.unwrap();
+        let viewer = store
+            .create("viewer@example.com", String::new(), Role::Viewer)
+            .await
+            .unwrap();
         let reloaded = SessionStore::load(db.clone()).await.unwrap();
         assert_eq!(reloaded.get(&viewer).map(|s| s.role), Some(Role::Viewer));
         assert_eq!(
@@ -357,6 +381,11 @@ mod tests {
             "roles survive a reload"
         );
         assert_eq!(reloaded.get(&id).map(|s| s.token).as_deref(), Some("jwt"));
+        assert_eq!(
+            reloaded.get(&viewer).map(|s| s.email).as_deref(),
+            Some("viewer@example.com"),
+            "emails survive a reload"
+        );
 
         reloaded.remove(&id).await.unwrap();
         assert_eq!(reloaded.get(&id).map(|s| s.token), None);
@@ -375,6 +404,7 @@ mod tests {
                     upstream_token: "jwt".into(),
                     expires_at: 1,
                     role: Role::Admin,
+                    email: String::new(),
                 },
             )
         })

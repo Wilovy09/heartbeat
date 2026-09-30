@@ -9,6 +9,7 @@ use tera::{Context, Tera};
 use crate::{
     alert_templates::{AlertTemplates, MAX_TEMPLATE_CHARS},
     alerts::{Alerter, TestKind},
+    audit::{self, Event},
     auth,
     config::{AuthMode, Config},
     i18n::{I18n, Localize},
@@ -65,6 +66,44 @@ impl From<&Config> for ConfigView {
     }
 }
 
+/// Slash commands as the page shows them: what's on, and what to paste into Slack and
+/// Discord to turn the rest on.
+#[derive(Serialize)]
+struct ChatView {
+    command: String,
+    admins: Vec<String>,
+    /// `PUBLIC_URL`, or the address this page was opened at.
+    base_url: String,
+    public_url_set: bool,
+    slack: bool,
+    slack_manifest: String,
+    discord: bool,
+    discord_invite: Option<String>,
+}
+
+impl ChatView {
+    fn new(cfg: &Config, req: &HttpRequest, i18n: &I18n) -> Self {
+        let base_url = cfg.public_url.as_deref().map_or_else(
+            || {
+                let info = req.connection_info();
+                format!("{}://{}", info.scheme(), info.host())
+            },
+            |url| url.trim_end_matches('/').to_string(),
+        );
+        let manifest = crate::chat::slack::manifest(&base_url, &cfg.chat_command, i18n);
+        Self {
+            command: cfg.chat_command.clone(),
+            admins: cfg.chat_admins.clone(),
+            public_url_set: cfg.public_url.is_some(),
+            slack: cfg.slack_signing_secret.is_some(),
+            slack_manifest: serde_json::to_string_pretty(&manifest).unwrap_or_default(),
+            discord: cfg.discord.is_some(),
+            discord_invite: cfg.discord.as_ref().map(crate::chat::discord::invite_url),
+            base_url,
+        }
+    }
+}
+
 /// GET /settings
 pub async fn show(
     req: HttpRequest,
@@ -72,11 +111,13 @@ pub async fn show(
     cfg: web::Data<Config>,
     alerter: web::Data<Alerter>,
     themes: web::Data<ThemeStore>,
+    i18n: web::Data<I18n>,
 ) -> HttpResponse {
     if let Err(resp) = auth::require_admin(&req) {
         return resp;
     }
     let mut ctx = Context::new();
+    ctx.insert("chat", &ChatView::new(&cfg, &req, &i18n));
     ctx.insert("active", "settings");
     ctx.insert("is_admin", &true);
     let overview = alerter.overview();
@@ -120,6 +161,9 @@ pub async fn test_alert(
         return HttpResponse::Conflict().json(serde_json::json!({ "error": "no webhooks" }));
     }
     let outcomes = alerter.test(body.target, body.kind).await;
+    let event = Event::web(&req, "settings.test_alerts")
+        .detail(serde_json::json!({ "kind": body.kind, "webhook": body.target }));
+    audit::record(&req, event).await;
     HttpResponse::Ok().json(serde_json::json!({ "outcomes": outcomes }))
 }
 
@@ -140,7 +184,13 @@ pub async fn save_templates(
             "kind": kind,
         }));
     }
-    if let Err(e) = alerter.templates().save(templates).await {
+    let detail = serde_json::to_value(&templates).unwrap_or_default();
+    let result = alerter.templates().save(templates).await;
+    let event = Event::web(&req, "templates.save")
+        .result(&result)
+        .detail(detail);
+    audit::record(&req, event).await;
+    if let Err(e) = result {
         tracing::error!(error = %e, "settings: could not save alert templates");
         return HttpResponse::InternalServerError()
             .json(serde_json::json!({ "error": e.to_string() }));
@@ -168,7 +218,12 @@ pub async fn save_theme(
     if let Err(resp) = auth::require_admin_json(&req) {
         return resp;
     }
-    match themes.save(&body.css).await {
+    let result = themes.save(&body.css).await;
+    let event = Event::web(&req, "theme.save")
+        .result(&result)
+        .detail(serde_json::json!({ "css": body.css }));
+    audit::record(&req, event).await;
+    match result {
         Ok(()) => {
             tracing::info!("settings: custom theme updated");
             HttpResponse::Ok().json(serde_json::json!({ "ok": true }))

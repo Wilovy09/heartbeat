@@ -35,6 +35,10 @@ rusqlite = { version = "0.40", default-features = false, features = [
     "backup",
     "serde_json",
 ] }
+# Chat commands: Slack signs requests with HMAC-SHA256, Discord with Ed25519.
+hmac = "0.13"
+sha2 = "0.11"
+ed25519-dalek = "3"
 
 [features]
 # `just demo` only: synthetic logs for the demo apps (see src/demo.rs).

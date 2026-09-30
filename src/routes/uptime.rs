@@ -1,11 +1,17 @@
 //! JSON endpoints backing the uptime dashboard (static/uptime.js).
 
 use actix_web::{HttpRequest, HttpResponse, http::header, web};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use crate::{auth, i18n::I18n, registry::AppRegistry, uptime::UptimeMonitor};
+use crate::{
+    audit::{self, Event},
+    auth,
+    i18n::I18n,
+    registry::AppRegistry,
+    uptime::UptimeMonitor,
+};
 
 /// Longest chart window the detail endpoint serves -- matches the monitor's retention.
 const MAX_WINDOW_HOURS: u64 = 30 * 24;
@@ -59,7 +65,7 @@ pub async fn detail(
     )
 }
 
-#[derive(Deserialize, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Default, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ExportFormat {
     #[default]
@@ -100,6 +106,10 @@ pub async fn export(
         return HttpResponse::NotFound().json(serde_json::json!({ "error": "not found" }));
     }
     let hours = query.hours.unwrap_or(24).clamp(1, MAX_WINDOW_HOURS);
+    let event = Event::web(&req, "uptime.export")
+        .target(&slug)
+        .detail(serde_json::json!({ "hours": hours, "format": query.format }));
+    audit::record(&req, event).await;
     let beats = monitor
         .export(&slug, Duration::from_secs(hours * 3600))
         .await;

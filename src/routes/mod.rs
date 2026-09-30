@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod apps;
+pub mod audit;
 pub mod dashboard;
 pub mod embed;
 pub mod health;
@@ -64,5 +65,15 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/notices", web::get().to(notices::show))
         .route("/notices", web::post().to(notices::create))
         .route("/notices/{id}", web::post().to(notices::update))
-        .route("/notices/{id}/delete", web::post().to(notices::delete));
+        .route("/notices/{id}/delete", web::post().to(notices::delete))
+        .route("/audit", web::get().to(audit::show))
+        .route("/audit/export", web::get().to(audit::export))
+        .route(
+            "/slack/commands",
+            web::post().to(crate::chat::slack::commands),
+        )
+        .route(
+            "/discord/interactions",
+            web::post().to(crate::chat::discord::interactions),
+        );
 }

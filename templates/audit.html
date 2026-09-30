@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}{{ t(k="audit.title") }} — Heartbeat{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1 class="page-title">{{ t(k="audit.title") }}</h1>
+    <p class="page-sub">{{ t(k="audit.sub") }}</p>
+  </div>
+  <a class="btn secondary" href="/audit/export{% if export_query %}?{{ export_query }}{% endif %}">{{ t(k="audit.export") }}</a>
+</header>
+
+<form class="bay audit-filters" method="get" action="/audit">
+  <div class="field">
+    <label for="actor">{{ t(k="audit.f_actor") }}</label>
+    <input id="actor" name="actor" value="{{ query.actor }}" placeholder="ana@example.com, U0123…">
+  </div>
+  <div class="field">
+    <label for="action">{{ t(k="audit.f_action") }}</label>
+    <select id="action" name="action">
+      <option value="">{{ t(k="audit.any") }}</option>
+      {% for g in groups %}
+      <option value="{{ g.prefix }}" {% if query.action == g.prefix %}selected{% endif %}>{{ g.label }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="field">
+    <label for="app">{{ t(k="audit.f_app") }}</label>
+    <input id="app" name="app" value="{{ query.app }}" placeholder="billing-api">
+  </div>
+  <div class="field">
+    <label for="source">{{ t(k="audit.f_source") }}</label>
+    <select id="source" name="source">
+      <option value="">{{ t(k="audit.any") }}</option>
+      {% for s in ["web", "slack", "discord", "system"] %}
+      <option value="{{ s }}" {% if query.source == s %}selected{% endif %}>{{ t(k="audit.source_" ~ s) }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="field">
+    <label for="outcome">{{ t(k="audit.f_outcome") }}</label>
+    <select id="outcome" name="outcome">
+      <option value="">{{ t(k="audit.any") }}</option>
+      {% for o in ["ok", "denied", "error"] %}
+      <option value="{{ o }}" {% if query.outcome == o %}selected{% endif %}>{{ t(k="audit.outcome_" ~ o) }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="field">
+    <label for="from">{{ t(k="audit.f_from") }}</label>
+    <input id="from" name="from" type="date" value="{{ query.from }}">
+  </div>
+  <div class="field">
+    <label for="to">{{ t(k="audit.f_to") }}</label>
+    <input id="to" name="to" type="date" value="{{ query.to }}">
+  </div>
+  <div class="filter-actions">
+    <button class="btn" type="submit">{{ t(k="audit.filter") }}</button>
+    <a class="btn secondary" href="/audit">{{ t(k="audit.clear") }}</a>
+  </div>
+</form>
+
+<section class="bay audit-list">
+  {% if rows | length == 0 %}
+  <p class="empty">{{ t(k="audit.none") }}</p>
+  {% else %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>{{ t(k="audit.c_when") }}</th>
+          <th>{{ t(k="audit.c_who") }}</th>
+          <th>{{ t(k="audit.c_action") }}</th>
+          <th>{{ t(k="audit.c_target") }}</th>
+          <th>{{ t(k="audit.c_outcome") }}</th>
+          <th>{{ t(k="audit.c_detail") }}</th>
+          <th>IP</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr>
+          <td class="nowrap"><time class="mono" data-at="{{ r.at }}"></time></td>
+          <td><span class="chip">{{ t(k="audit.source_" ~ r.source) }}</span> <span class="mono">{% if r.actor %}{{ r.actor }}{% else %}<span class="muted">{{ t(k="audit.unknown_actor") }}</span>{% endif %}</span></td>
+          <td class="mono">{{ r.action }}</td>
+          <td class="mono">{% if r.target %}<a href="/audit?app={{ r.target }}">{{ r.target }}</a>{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td><span class="chip outcome-{{ r.outcome }}">{{ t(k="audit.outcome_" ~ r.outcome) }}</span></td>
+          <td>{% if r.detail_json %}<details><summary>{{ t(k="audit.show") }}</summary><pre class="mono">{{ r.detail_json }}</pre></details>{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td class="mono muted">{% if r.ip %}{{ r.ip }}{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+  <nav class="pager">
+    {% if paged %}<a class="btn secondary" href="/audit{% if export_query %}?{{ export_query }}{% endif %}">{{ t(k="audit.newest") }}</a>{% endif %}
+    {% if older %}<a class="btn secondary" href="/audit?{{ older }}">{{ t(k="audit.older") }}</a>{% endif %}
+  </nav>
+</section>
+<script>
+  document.addEventListener("DOMContentLoaded", () => {
+    for (const el of document.querySelectorAll("time[data-at]")) el.textContent = new Date(el.dataset.at * 1000).toLocaleString(document.documentElement.lang || undefined, { dateStyle: "medium", timeStyle: "medium" });
+  });
+</script>
+{% endblock %}
+{% block head %}
+<style>
+  .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .audit-filters { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px 16px; align-items: end; margin-bottom: 16px; }
+  .audit-filters .field input, .audit-filters .field select { width: 100%; }
+  .filter-actions { display: flex; gap: 8px; }
+  .table-wrap { overflow-x: auto; }
+  .audit-list td { vertical-align: top; }
+  .nowrap { white-space: nowrap; }
+  .muted { color: var(--ink-4); }
+  .mono a { color: var(--ink-2); }
+  .chip { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: 4px; border: 1px solid var(--graticule); font-size: 11px; font-weight: 500; color: var(--ink-2); white-space: nowrap; }
+  .outcome-ok { color: var(--rhythm-up); }
+  .outcome-denied { color: var(--rhythm-degraded); }
+  .outcome-error { color: var(--rhythm-down); }
+  details summary { font-size: 12px; color: var(--ink-3); cursor: pointer; }
+  details pre { margin: 6px 0 0; padding: 8px; max-width: 420px; max-height: 260px; overflow: auto; background: var(--well); border: 1px solid var(--graticule); border-radius: 6px; font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .pager { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+  .pager:empty { display: none; }
+</style>
+{% endblock %}

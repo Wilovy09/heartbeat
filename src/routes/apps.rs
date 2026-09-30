@@ -6,6 +6,7 @@ use tera::{Context, Tera};
 
 use crate::{
     alerts::{Alerter, TestKind},
+    audit::{self, Event},
     auth,
     config::Config,
     i18n::{I18n, Localize},
@@ -15,7 +16,7 @@ use crate::{
 };
 
 /// Longest scheduled maintenance, in hours (30 days).
-const MAX_PAUSE_HOURS: u64 = 720;
+pub const MAX_PAUSE_HOURS: u64 = 720;
 /// An indefinite pause older than this is flagged as probably forgotten.
 pub const STALE_PAUSE_SECS: u64 = 24 * 3600;
 
@@ -224,15 +225,25 @@ pub async fn add(
         .check_urls(&outbound, &i18n)
         .and_then(|()| form.settings(&i18n))
     {
-        Ok(settings) => registry
-            .add(settings)
-            .await
-            .map(|_| ())
-            .map_err(|e| e.localize(&i18n)),
+        Ok(settings) => registry.add(settings).await.map_err(|e| e.localize(&i18n)),
         Err(msg) => Err(msg),
     };
+    let event = match &result {
+        Ok(slug) => {
+            let added = registry.find(slug).await;
+            Event::web(&req, "app.add").target(slug).detail(
+                added
+                    .as_ref()
+                    .map_or(serde_json::Value::Null, audit::app_detail),
+            )
+        }
+        Err(msg) => Event::web(&req, "app.add")
+            .result(&result)
+            .detail(serde_json::json!({ "name": form.name, "error": msg })),
+    };
+    audit::record(&req, event).await;
     match result {
-        Ok(()) => back_to_apps(),
+        Ok(_) => back_to_apps(),
         Err(msg) => {
             let echo = FormEcho {
                 slug: None,
@@ -260,6 +271,7 @@ pub async fn update(
         return resp;
     }
     let slug = path.into_inner();
+    let before = registry.find(&slug).await;
     let result = match form
         .check_urls(&outbound, &i18n)
         .and_then(|()| form.settings(&i18n))
@@ -270,6 +282,16 @@ pub async fn update(
             .map_err(|e| e.localize(&i18n)),
         Err(msg) => Err(msg),
     };
+    let detail = match (&result, &before, registry.find(&slug).await) {
+        (Ok(()), Some(before), Some(after)) => audit::app_changes(before, &after),
+        (Err(msg), ..) => serde_json::json!({ "error": msg }),
+        _ => serde_json::Value::Null,
+    };
+    let event = Event::web(&req, "app.update")
+        .target(&slug)
+        .result(&result)
+        .detail(detail);
+    audit::record(&req, event).await;
     match result {
         Ok(()) => back_to_apps(),
         Err(msg) => {
@@ -320,10 +342,19 @@ pub async fn pause(
             }
         },
     };
-    match registry
-        .set_paused(&path.into_inner(), form.value, until)
-        .await
-    {
+    let slug = path.into_inner();
+    let result = registry.set_paused(&slug, form.value, until).await;
+    let action = if form.value {
+        "app.pause"
+    } else {
+        "app.resume"
+    };
+    let event = Event::web(&req, action)
+        .target(&slug)
+        .result(&result)
+        .detail(serde_json::json!({ "until": until }));
+    audit::record(&req, event).await;
+    match result {
         Ok(()) => back_to_apps(),
         Err(e) => render_apps(&tera, &cfg, &registry, Some(&e.localize(&i18n)), None).await,
     }
@@ -342,7 +373,14 @@ pub async fn public(
     if let Err(resp) = auth::require_admin(&req) {
         return resp;
     }
-    match registry.set_public(&path.into_inner(), form.value).await {
+    let slug = path.into_inner();
+    let result = registry.set_public(&slug, form.value).await;
+    let event = Event::web(&req, "app.public")
+        .target(&slug)
+        .result(&result)
+        .detail(serde_json::json!({ "public": form.value }));
+    audit::record(&req, event).await;
+    match result {
         Ok(()) => back_to_apps(),
         Err(e) => render_apps(&tera, &cfg, &registry, Some(&e.localize(&i18n)), None).await,
     }
@@ -361,7 +399,18 @@ pub async fn delete(
         return resp;
     }
     let slug = path.into_inner();
-    match registry.remove(&slug).await {
+    let before = registry.find(&slug).await;
+    let result = registry.remove(&slug).await;
+    let event = Event::web(&req, "app.delete")
+        .target(&slug)
+        .result(&result)
+        .detail(
+            before
+                .as_ref()
+                .map_or(serde_json::Value::Null, audit::app_detail),
+        );
+    audit::record(&req, event).await;
+    match result {
         Ok(()) => {
             monitor.forget(&slug).await;
             back_to_apps()
@@ -382,7 +431,13 @@ pub async fn rotate_token(
     if let Err(resp) = auth::require_admin(&req) {
         return resp;
     }
-    match registry.rotate_embed_token(&path.into_inner()).await {
+    let slug = path.into_inner();
+    let result = registry.rotate_embed_token(&slug).await;
+    let event = Event::web(&req, "app.rotate_token")
+        .target(&slug)
+        .result(&result);
+    audit::record(&req, event).await;
+    match result {
         Ok(()) => back_to_apps(),
         Err(e) => render_apps(&tera, &cfg, &registry, Some(&e.localize(&i18n)), None).await,
     }
@@ -409,5 +464,9 @@ pub async fn test_alerts(
         return HttpResponse::NotFound().json(serde_json::json!({ "error": "not found" }));
     };
     let outcomes = alerter.test_app(&app.alert_route(), body.kind).await;
+    let event = Event::web(&req, "app.test_alerts")
+        .target(&app.slug)
+        .detail(serde_json::json!({ "kind": body.kind }));
+    audit::record(&req, event).await;
     HttpResponse::Ok().json(serde_json::json!({ "outcomes": outcomes }))
 }
