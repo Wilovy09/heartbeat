@@ -3,6 +3,30 @@
 All notable changes to Heartbeat. Versions follow [SemVer](https://semver.org/); entries
 before 0.2.0 were reconstructed from the git history.
 
+## [0.3.1] - 2026-09-30
+
+### Audit log
+- `/audit` (admins only) lists logins, logouts, every change to apps, notices, alert
+  templates and the theme, alert tests, uptime exports, log views (once per person and app
+  every 15 minutes) and every chat command, allowed or refused, with who, when, from where
+  and what changed. Filters by who, action, app, source, outcome and date; CSV export.
+- Stored in the new `audit_log` table (migration `0002_audit.sql`) and kept
+  `AUDIT_RETENTION_DAYS` (365; 0 = forever). No passwords or tokens; header values and
+  webhook secrets are left out.
+- Sessions now keep the email they logged in with. Sessions from 0.3.0 have none, so their
+  actions are logged without it until the next login.
+
+### Chat commands
+- `/pulse status [app]`, `pause <app> [30m|2h|1d]`, `resume <app>` and `help` from Slack
+  (`SLACK_SIGNING_SECRET`) and Discord (`DISCORD_APPLICATION_ID`, `DISCORD_PUBLIC_KEY`,
+  `DISCORD_BOT_TOKEN`), answered over HTTP at `/slack/commands` and
+  `/discord/interactions`. Each deployment uses its own Slack and Discord apps; `/settings`
+  shows the Slack manifest, the Discord endpoint and the invite link.
+- Every request must be signed (HMAC-SHA256 for Slack, Ed25519 for Discord) within the
+  last 5 minutes. Pausing and resuming is limited to `CHAT_ADMINS` (Slack users, Discord
+  users and roles); the command's name is `CHAT_COMMAND` (`pulse`).
+- Discord registers the command on every start and autocompletes app names.
+
 ## [0.3.0] - 2026-09-29
 
 ### Upgrading from 0.2.x
