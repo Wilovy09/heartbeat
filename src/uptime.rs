@@ -172,7 +172,7 @@ async fn read_body_prefix(mut resp: reqwest::Response) -> String {
     String::from_utf8_lossy(&body).into_owned()
 }
 
-fn error_chain(e: &reqwest::Error) -> String {
+pub(crate) fn error_chain(e: &reqwest::Error) -> String {
     // reqwest's top-level message is just "error sending request" -- the useful part
     // (connection refused, dns, timeout) lives down the source chain.
     let mut message = e.to_string();
