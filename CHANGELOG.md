@@ -3,7 +3,7 @@
 All notable changes to Heartbeat. Versions follow [SemVer](https://semver.org/); entries
 before 0.2.0 were reconstructed from the git history.
 
-## [Unreleased]
+## [0.3.0] - 2026-09-29
 
 ### Upgrading from 0.2.x
 - Everything moves to a SQLite database (`DATABASE_PATH`, `./data/heartbeat.db`), and
@@ -39,6 +39,11 @@ before 0.2.0 were reconstructed from the git history.
 
 ### Status page
 - 90 days of daily uptime instead of 30 (phones show the latest 30).
+
+### Fixed
+- Login (`upstream` mode): the log now says why the login server couldn't be reached
+  (DNS, refused, TLS, timeout), and a login server that doesn't answer fails after 10 s
+  instead of leaving the page loading.
 
 ### Deployment
 - `deploy/update.sh` backs the database up before installing (the latest 5 in
