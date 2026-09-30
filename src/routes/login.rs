@@ -10,6 +10,9 @@ use actix_web::{HttpRequest, HttpResponse, web};
 use serde::Deserialize;
 use tera::{Context, Tera};
 
+/// How long the login server gets to answer before the attempt fails.
+const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 use crate::{
     auth::{self, Role, SessionStore},
     config::{AuthMode, Config, LocalAccount},
@@ -114,19 +117,31 @@ async fn authenticate_upstream(
 ) -> Result<(String, Role), LoginFailure> {
     let resp = reqwest::Client::new()
         .post(login_url)
+        .timeout(LOGIN_TIMEOUT)
         .json(&serde_json::json!({ "email": form.email, "password": form.password }))
         .send()
         .await
         .map_err(|e| {
-            tracing::warn!(error = %e, "login: could not reach the login endpoint");
+            // The whole cause chain (DNS, refused, TLS, timeout): reqwest's own message
+            // alone doesn't say which.
+            tracing::warn!(
+                url = %login_url,
+                error = %crate::uptime::error_chain(&e),
+                "login: could not reach the login endpoint"
+            );
             LoginFailure::Unavailable("login.unreachable")
         })?;
 
     let status = resp.status();
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|_| LoginFailure::Unavailable("login.bad_response"))?;
+    let body: serde_json::Value = resp.json().await.map_err(|e| {
+        tracing::warn!(
+            url = %login_url,
+            %status,
+            error = %crate::uptime::error_chain(&e),
+            "login: the login endpoint's answer isn't JSON"
+        );
+        LoginFailure::Unavailable("login.bad_response")
+    })?;
 
     if !status.is_success() {
         return Err(LoginFailure::Rejected {
