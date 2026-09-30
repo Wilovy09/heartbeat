@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["markdown>=3.5"]
+# dependencies = ["markdown>=3.5", "mdx_truly_sane_lists>=1.3"]
 # ///
 """Builds the Heartbeat site into site/dist: a landing page and the documentation, in
 English (/en/) and Spanish (/es/), plus a root page that picks the visitor's language.
@@ -198,8 +198,13 @@ def toc_html(tokens: list[dict]) -> str:
 
 def build_docs(lang: str) -> tuple[str, str]:
     md = markdown.Markdown(
-        extensions=["fenced_code", "tables", "toc"],
-        extension_configs={"toc": {"toc_depth": "2-3", "permalink": False}},
+        # The READMEs nest lists with 2 spaces, as GitHub does; Python-Markdown alone
+        # needs 4 and flattens them otherwise.
+        extensions=["fenced_code", "tables", "toc", "mdx_truly_sane_lists"],
+        extension_configs={
+            "toc": {"toc_depth": "2-3", "permalink": False},
+            "mdx_truly_sane_lists": {"nested_indent": 2, "truly_sane": True},
+        },
     )
     body = rewrite_links(md.convert(readme_sections(lang)), lang)
     # Wide tables scroll inside their own box instead of widening the page.
