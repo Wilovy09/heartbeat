@@ -90,6 +90,9 @@ A single Rust binary with SQLite built in: everything is stored in one file,
 
   A failure is retried `UPTIME_RETRIES` times (5 s apart) before it's recorded, so a
   dropped packet doesn't paint the app red or send an alert.
+
+- **Chat commands**: `/pulse status`, `pause` and `resume` from Slack and Discord; see
+  [Chat commands](#chat-commands).
 - **Alerts** (`ALERT_WEBHOOK_URLS`): only on confirmed status changes (down and recovery;
   degraded is optional with `ALERT_ON_DEGRADED`), naming the app and linking to it. Slack
   and Discord get their native format; any other URL gets a JSON event. `ALERT_MENTIONS`
@@ -134,6 +137,8 @@ A single Rust binary with SQLite built in: everything is stored in one file,
 - **Integrations**: `GET /metrics` in the Prometheus format (with `METRICS_TOKEN`) and
   each app's history exported to CSV or JSON from the dashboard.
 - **Log viewer** with filters by level, module and text.
+- **Audit log** (`/audit`): logins, every change, log views and chat commands, with who
+  and when; see [Audit log](#audit-log).
 - **Dead man's switch** (`HEARTBEAT_PING_URL`): Heartbeat pings that URL after every round
   of checks, so an external service warns you if Heartbeat itself stops. `GET /healthz`
   answers `ok` for load balancers.
@@ -175,6 +180,7 @@ Each app has an `embed_token`. `/apps` shows a preview and a "Copy code" button:
 ```
 
 Optional attributes:
+
 - `label="My API"`: text shown instead of the app's name.
 - `theme="light"`: dark by default.
 - `lang="en"`: `es` or `en`; defaults to the server's `APP_LANG`.
@@ -205,6 +211,7 @@ The state picks the text and color; the text follows `APP_LANG`:
 | Not checked yet, or no health URL | <img src=".github/public/badges/en-unknown.svg" alt="API: No data"/> |
 
 Parameters:
+
 - `token` (required): the app's embed token. A wrong one answers the same 404 as an
   unknown slug.
 - `label` (optional): left-hand text instead of the app's name, up to 40 characters.
@@ -226,6 +233,62 @@ scrape_configs:
     authorization: { credentials: METRICS_TOKEN }
     static_configs: [{ targets: ["HEARTBEAT_HOST"] }]
 ```
+
+## Chat commands
+
+`/pulse` answers from Slack and Discord, in the channel it's typed in:
+
+| Command | What it does | Who |
+|---|---|---|
+| `/pulse status` | Every app, worst first, with latency and 24 h uptime | Anyone |
+| `/pulse status <app>` | One app: status, error, latency, uptime, pause, certificate | Anyone |
+| `/pulse pause <app> [30m\|2h\|1d]` | Pauses its checks (no duration: until resumed) | `CHAT_ADMINS` |
+| `/pulse resume <app>` | Resumes its checks | `CHAT_ADMINS` |
+| `/pulse help` | Usage, only to you | Anyone |
+
+`<app>` is the slug, the name, or part of either; Discord autocompletes it. Each
+deployment creates its own Slack and Discord apps, so no request goes through a third
+party. Both services must reach `PUBLIC_URL` over https.
+
+**Slack**
+
+1. `/settings` → *Chat commands* shows a manifest pointing at your `PUBLIC_URL`.
+2. [api.slack.com/apps](https://api.slack.com/apps) → *Create New App* → *From a
+   manifest* → paste it → *Install to Workspace*.
+3. Copy *Basic Information* → *Signing Secret* to `SLACK_SIGNING_SECRET` and restart.
+
+**Discord**
+
+1. [discord.com/developers](https://discord.com/developers/applications) → *New
+   Application*. Copy the *Application ID* and *Public Key* to `DISCORD_APPLICATION_ID`
+   and `DISCORD_PUBLIC_KEY`, and *Bot* → *Reset Token* to `DISCORD_BOT_TOKEN`.
+2. Restart Heartbeat: it registers the command on every start.
+3. Paste `https://<PUBLIC_URL>/discord/interactions` as the *Interactions Endpoint URL*
+   (Discord checks it right away, so Heartbeat must be running).
+4. Open the invite link from `/settings` and pick the server.
+
+`CHAT_ADMINS` lists who may pause and resume: Slack user IDs (`U…`), Discord user IDs and
+Discord roles (`&…`), as in `ALERT_MENTIONS`. The command's name is `CHAT_COMMAND`.
+
+## Audit log
+
+`/audit` (admins only) lists who did what, newest first, and exports it as CSV:
+
+- **Sessions**: logins (successful, failed, throttled) and logouts, with the email and IP.
+- **Apps**: adding (its settings), editing (only the fields that changed, before and
+  after), deleting, pausing and resuming, publishing, rotating the embed token, alert
+  tests.
+- **Chat**: every Slack and Discord command, including the ones refused for not being in
+  `CHAT_ADMINS`, with the channel and what was typed.
+- **Reading**: an app's logs (once per person and app every 15 minutes, since the viewer
+  polls) and uptime exports.
+- **Settings**: the theme (with its CSS), alert templates, alert tests and notices.
+- **Heartbeat itself**: a scheduled pause ending.
+
+It's stored in the `audit_log` table, filtered by who, action, app, source, outcome and
+date, and kept `AUDIT_RETENTION_DAYS` (365; 0 = forever). Passwords and tokens are never
+recorded, check headers appear by name only and webhook URLs are masked. Sessions started
+before 0.3.1 have no email: their actions show as such until the next login.
 
 ## Endpoint contract
 
@@ -262,7 +325,9 @@ with the shared key in the `X-Admin-Logs-Key` header (compared in constant time)
 
 - **Server-side sessions** with 256-bit IDs; a forged cookie grants nothing and "Log out"
   (a POST) truly ends the session.
-- **CSRF**: every POST requires an `Origin` (or `Referer`) from the same host.
+- **CSRF**: every POST requires an `Origin` (or `Referer`) from the same host, except
+  `/slack/commands` and `/discord/interactions`, which read no session and only accept
+  requests signed by Slack (HMAC-SHA256) or Discord (Ed25519) within the last 5 minutes.
 - **Headers**: CSP (same-origin resources only), `frame-ancestors 'none'` and
   `X-Frame-Options: DENY` (no clickjacking), `nosniff`, `Referrer-Policy`.
 - **Login throttling**: 5 failures within 15 minutes lock out that IP and that email.
