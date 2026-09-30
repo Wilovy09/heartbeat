@@ -37,6 +37,7 @@ struct TestState {
     alerter: web::Data<Alerter>,
     notices: web::Data<NoticeStore>,
     themes: web::Data<crate::theme::ThemeStore>,
+    audit: web::Data<crate::audit::AuditLog>,
 }
 
 /// The configuration every route test runs with, files under `path(name)`.
@@ -80,13 +81,24 @@ pub(crate) fn test_config(path: &dyn Fn(&str) -> String) -> Config {
         allowed_hosts: "*.example.com".into(),
         cookie_secure: false,
         admin_logs_key: None,
+        slack_signing_secret: None,
+        discord: None,
+        chat_command: "pulse".into(),
+        chat_admins: Vec::new(),
+        audit_retention_days: 365,
     }
 }
 
 async fn state() -> TestState {
+    state_with(|_| {}).await
+}
+
+/// `state()` with the configuration adjusted first.
+async fn state_with(adjust: impl FnOnce(&mut Config)) -> TestState {
     let dir = tempfile::tempdir().unwrap();
     let path = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
-    let cfg = test_config(&path);
+    let mut cfg = test_config(&path);
+    adjust(&mut cfg);
     let i18n = I18n::new(cfg.app_lang);
     let mut tera = Tera::new();
     i18n.register(&mut tera);
@@ -115,7 +127,8 @@ async fn state() -> TestState {
         monitor: web::Data::new(monitor),
         alerter: web::Data::new(Alerter::new(AlertSettings::default()).unwrap()),
         notices: web::Data::new(NoticeStore::load(db.clone()).await.unwrap()),
-        themes: web::Data::new(crate::theme::ThemeStore::load(db).await.unwrap()),
+        themes: web::Data::new(crate::theme::ThemeStore::load(db.clone()).await.unwrap()),
+        audit: web::Data::new(crate::audit::AuditLog::new(db, 365)),
         tera: web::Data::new(tera),
         i18n: web::Data::new(i18n),
         cfg: web::Data::new(cfg),
@@ -140,6 +153,7 @@ macro_rules! app {
                 .app_data($s.alerter.clone())
                 .app_data($s.notices.clone())
                 .app_data($s.themes.clone())
+                .app_data($s.audit.clone())
                 .configure(routes::configure),
         )
         .await
@@ -475,6 +489,8 @@ async fn viewers_see_the_dashboard_but_nothing_else() {
         "/apps",
         "/settings",
         "/notices",
+        "/audit",
+        "/audit/export",
         "/logs",
         &format!("/logs/{slug}"),
         &format!("/api/apps/{slug}/logs"),
@@ -701,4 +717,347 @@ async fn the_custom_theme_is_public_to_read_and_admin_only_to_write() {
     );
     let body = String::from_utf8(test::read_body(css).await.to_vec()).unwrap();
     assert_eq!(body, ":root { --glass: #101820; }");
+}
+
+const SLACK_SECRET: &str = "slack-signing-secret";
+const SLACK_ADMIN: &str = "U0ADMIN1";
+
+async fn chat_state() -> TestState {
+    let s = state_with(|cfg| {
+        cfg.slack_signing_secret = Some(SLACK_SECRET.into());
+        cfg.discord = Some(crate::config::DiscordApp {
+            application_id: "1234".into(),
+            public_key: crate::chat::discord::tests::key()
+                .verifying_key()
+                .to_bytes(),
+            bot_token: "unused".into(),
+        });
+        cfg.chat_admins = vec![SLACK_ADMIN.into()];
+    })
+    .await;
+    s.registry
+        .add(AppSettings {
+            name: "Billing API".into(),
+            logs_url: String::new(),
+            health_url: "https://api.example.com/health".into(),
+            ..AppSettings::default()
+        })
+        .await
+        .unwrap();
+    s
+}
+
+/// A slash command as Slack sends it: no `Origin`, signed with the signing secret.
+fn slack_command(user: &str, text: &str) -> test::TestRequest {
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("command", "/pulse")
+        .append_pair("user_id", user)
+        .append_pair("text", text)
+        .finish();
+    let now = crate::uptime::unix_now().to_string();
+    let signature = crate::chat::slack::tests::sign(SLACK_SECRET, &now, body.as_bytes());
+    test::TestRequest::post()
+        .uri("/slack/commands")
+        .insert_header((header::HOST, HOST))
+        .insert_header((header::CONTENT_TYPE, "application/x-www-form-urlencoded"))
+        .insert_header(("X-Slack-Request-Timestamp", now))
+        .insert_header(("X-Slack-Signature", signature))
+        .set_payload(body)
+}
+
+fn discord_interaction(body: &serde_json::Value) -> test::TestRequest {
+    let body = body.to_string();
+    let now = crate::uptime::unix_now().to_string();
+    let signature = crate::chat::discord::tests::sign(&now, body.as_bytes());
+    test::TestRequest::post()
+        .uri("/discord/interactions")
+        .insert_header((header::HOST, HOST))
+        .insert_header((header::CONTENT_TYPE, "application/json"))
+        .insert_header(("X-Signature-Timestamp", now))
+        .insert_header(("X-Signature-Ed25519", signature))
+        .set_payload(body)
+}
+
+#[actix_web::test]
+async fn chat_endpoints_are_off_until_configured() {
+    let s = state().await;
+    let app = app!(s);
+    for uri in ["/slack/commands", "/discord/interactions"] {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri(uri)
+                .insert_header((header::HOST, HOST))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{uri}");
+    }
+}
+
+#[actix_web::test]
+async fn slack_commands_need_a_valid_signature_but_no_origin() {
+    let s = chat_state().await;
+    let app = app!(s);
+    let forged = slack_command(SLACK_ADMIN, "status")
+        .insert_header(("X-Slack-Signature", "v0=00"))
+        .to_request();
+    let resp = test::call_service(&app, forged).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let resp = test::call_service(&app, slack_command("U0SOMEONE", "status").to_request()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let reply: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(reply["response_type"], "in_channel");
+    assert!(
+        reply["text"].as_str().unwrap().contains("*Billing API*"),
+        "{reply}"
+    );
+}
+
+#[actix_web::test]
+async fn only_chat_admins_can_pause_and_resume() {
+    let s = chat_state().await;
+    let app = app!(s);
+    let resp = test::call_service(
+        &app,
+        slack_command("U0SOMEONE", "pause billing 2h").to_request(),
+    )
+    .await;
+    let reply: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(reply["response_type"], "ephemeral");
+    assert!(!s.registry.find("billing-api").await.unwrap().paused);
+
+    let resp = test::call_service(
+        &app,
+        slack_command(SLACK_ADMIN, "pause billing 2h").to_request(),
+    )
+    .await;
+    let reply: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(reply["response_type"], "in_channel", "{reply}");
+    let paused = s.registry.find("billing-api").await.unwrap();
+    assert!(paused.paused);
+    let left = paused.paused_until.unwrap() - crate::uptime::unix_now();
+    assert!((7190..=7200).contains(&left), "{left}");
+
+    test::call_service(
+        &app,
+        slack_command(SLACK_ADMIN, "resume billing").to_request(),
+    )
+    .await;
+    assert!(!s.registry.find("billing-api").await.unwrap().paused);
+}
+
+#[actix_web::test]
+async fn discord_pings_autocompletes_and_answers_commands() {
+    let s = chat_state().await;
+    let app = app!(s);
+    let unsigned = test::TestRequest::post()
+        .uri("/discord/interactions")
+        .insert_header((header::HOST, HOST))
+        .set_payload(r#"{"type":1}"#)
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, unsigned).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    let resp = test::call_service(
+        &app,
+        discord_interaction(&serde_json::json!({ "type": 1 })).to_request(),
+    )
+    .await;
+    let pong: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(pong, serde_json::json!({ "type": 1 }));
+
+    let autocomplete = serde_json::json!({
+        "type": 4,
+        "data": { "name": "pulse", "options": [{ "name": "status", "type": 1, "options": [
+            { "name": "app", "type": 3, "value": "bill", "focused": true },
+        ]}]},
+    });
+    let resp = test::call_service(&app, discord_interaction(&autocomplete).to_request()).await;
+    let choices: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(
+        choices["data"]["choices"],
+        serde_json::json!([{ "name": "Billing API", "value": "billing-api" }])
+    );
+
+    // A Discord user can't borrow a Slack admin's ID.
+    let pause = serde_json::json!({
+        "type": 2,
+        "data": { "name": "pulse", "options": [{ "name": "pause", "type": 1, "options": [
+            { "name": "app", "type": 3, "value": "billing-api" },
+        ]}]},
+        "member": { "user": { "id": "999" }, "roles": [] },
+    });
+    let resp = test::call_service(&app, discord_interaction(&pause).to_request()).await;
+    let reply: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(reply["type"], 4);
+    assert_eq!(reply["data"]["flags"], 64, "{reply}");
+    assert!(!s.registry.find("billing-api").await.unwrap().paused);
+}
+
+/// Every entry, newest first.
+async fn audit_entries(s: &TestState) -> Vec<crate::audit::Entry> {
+    s.audit
+        .query(crate::audit::Filter {
+            limit: 100,
+            ..crate::audit::Filter::default()
+        })
+        .await
+        .unwrap()
+}
+
+#[actix_web::test]
+async fn logins_and_app_changes_are_audited_under_the_email() {
+    let s = state().await;
+    let app = app!(s);
+    test::call_service(&app, login_request("wrong").to_request()).await;
+    let admin = login_as!(app, ADMIN_EMAIL);
+
+    let form = [
+        ("name", "Billing"),
+        ("logs_url", ""),
+        ("health_url", "https://api.example.com/health"),
+        ("headers", "Authorization: Bearer s3cret"),
+    ];
+    test::call_service(
+        &app,
+        post("/apps")
+            .cookie(admin.clone())
+            .set_form(form)
+            .to_request(),
+    )
+    .await;
+    let mut edited = form;
+    edited[0].1 = "Billing API";
+    test::call_service(
+        &app,
+        post("/apps/billing/edit")
+            .cookie(admin.clone())
+            .set_form(edited)
+            .to_request(),
+    )
+    .await;
+    test::call_service(&app, post("/logout").cookie(admin).to_request()).await;
+
+    let entries = audit_entries(&s).await;
+    let summary: Vec<(&str, &str, &str)> = entries
+        .iter()
+        .rev()
+        .map(|e| (e.action.as_str(), e.actor.as_str(), e.outcome.as_str()))
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("login.failed", ADMIN_EMAIL, "denied"),
+            ("login.ok", ADMIN_EMAIL, "ok"),
+            ("app.add", ADMIN_EMAIL, "ok"),
+            ("app.update", ADMIN_EMAIL, "ok"),
+            ("logout", ADMIN_EMAIL, "ok"),
+        ]
+    );
+    let update = &entries[1];
+    assert_eq!(update.target.as_deref(), Some("billing"));
+    assert_eq!(
+        update.detail.as_ref().unwrap()["name"],
+        serde_json::json!({ "from": "Billing", "to": "Billing API" })
+    );
+    let everything = serde_json::to_string(&entries).unwrap();
+    assert!(
+        !everything.contains("s3cret"),
+        "header values stay out: {everything}"
+    );
+    assert!(!everything.contains(ADMIN_PASSWORD));
+}
+
+#[actix_web::test]
+async fn every_chat_command_is_audited_even_when_refused() {
+    let s = chat_state().await;
+    let app = app!(s);
+    test::call_service(&app, slack_command("U0SOMEONE", "status").to_request()).await;
+    test::call_service(
+        &app,
+        slack_command("U0SOMEONE", "pause billing").to_request(),
+    )
+    .await;
+    test::call_service(
+        &app,
+        slack_command(SLACK_ADMIN, "pause billing 1h").to_request(),
+    )
+    .await;
+    test::call_service(&app, slack_command(SLACK_ADMIN, "reboot").to_request()).await;
+
+    let entries = audit_entries(&s).await;
+    let summary: Vec<(&str, &str, &str, Option<&str>)> = entries
+        .iter()
+        .rev()
+        .map(|e| {
+            (
+                e.action.as_str(),
+                e.actor.as_str(),
+                e.outcome.as_str(),
+                e.target.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("chat.status", "U0SOMEONE", "ok", None),
+            ("chat.pause", "U0SOMEONE", "denied", None),
+            ("chat.pause", SLACK_ADMIN, "ok", Some("billing-api")),
+            ("chat.invalid", SLACK_ADMIN, "error", None),
+        ]
+    );
+    assert!(entries.iter().all(|e| e.source == "slack"));
+    assert_eq!(
+        entries[1].detail.as_ref().unwrap()["text"],
+        "pause billing 1h"
+    );
+}
+
+#[actix_web::test]
+async fn the_audit_page_filters_and_exports() {
+    let s = state().await;
+    let app = app!(s);
+    let admin = login_as!(app, ADMIN_EMAIL);
+    s.audit
+        .record(crate::audit::Event::system("app.resume").target("billing"))
+        .await;
+
+    let page = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/audit?action=app.")
+            .cookie(admin.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(page.status(), StatusCode::OK);
+    let body = String::from_utf8(test::read_body(page).await.to_vec()).unwrap();
+    assert!(body.contains("app.resume"), "{body}");
+    assert!(!body.contains("login.ok"), "filtered out");
+
+    let csv = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/audit/export")
+            .cookie(admin)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(csv.status(), StatusCode::OK);
+    let body = String::from_utf8(test::read_body(csv).await.to_vec()).unwrap();
+    assert!(body.starts_with("id,at,source,actor,action"), "{body}");
+    assert!(
+        body.contains(",login.ok,") && body.contains(",app.resume,"),
+        "{body}"
+    );
+    let exported = audit_entries(&s).await;
+    assert_eq!(
+        exported[0].action, "audit.export",
+        "the export itself is audited"
+    );
 }

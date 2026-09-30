@@ -88,6 +88,48 @@ impl AuthMode {
     }
 }
 
+/// A Discord application answering `/pulse` over HTTP interactions.
+#[derive(Debug, Clone)]
+pub struct DiscordApp {
+    pub application_id: String,
+    /// Ed25519 key every interaction is signed with (the app's "Public Key", 64 hex chars).
+    pub public_key: [u8; 32],
+    /// Registers the slash command at startup.
+    pub bot_token: String,
+}
+
+impl DiscordApp {
+    /// `DISCORD_PUBLIC_KEY` turns it on; the application ID and bot token are then required.
+    fn from_env() -> Result<Option<Self>, ConfigError> {
+        let Some(raw) = optional("DISCORD_PUBLIC_KEY") else {
+            return Ok(None);
+        };
+        let public_key = crate::chat::decode_hex(&raw)
+            .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+            .ok_or(ConfigError::Invalid {
+                name: "DISCORD_PUBLIC_KEY",
+                value: raw,
+            })?;
+        Ok(Some(Self {
+            application_id: required("DISCORD_APPLICATION_ID")?,
+            public_key,
+            bot_token: required("DISCORD_BOT_TOKEN")?,
+        }))
+    }
+}
+
+/// Comma-separated list, trimmed, blanks dropped.
+fn list(name: &'static str) -> Vec<String> {
+    optional(name)
+        .map(|v| {
+            v.split(',')
+                .map(|e| e.trim().to_string())
+                .filter(|e| !e.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub host: String,
@@ -157,6 +199,18 @@ pub struct Config {
     /// just means no key is sent -- registered apps without this feature still work via
     /// the user's own JWT, same as before.
     pub admin_logs_key: Option<String>,
+    /// Signs every Slack slash command (`SLACK_SIGNING_SECRET`); `None` = `/slack/commands`
+    /// is off.
+    pub slack_signing_secret: Option<String>,
+    /// `None` = `/discord/interactions` is off.
+    pub discord: Option<DiscordApp>,
+    /// Slash command name on both services (`CHAT_COMMAND`, default `pulse`).
+    pub chat_command: String,
+    /// Who may run commands that change something (`CHAT_ADMINS`: Slack user IDs, Discord
+    /// user IDs, `&role` Discord roles). Empty = nobody: only read-only commands work.
+    pub chat_admins: Vec<String>,
+    /// Days audit log entries are kept (`AUDIT_RETENTION_DAYS`); 0 = forever.
+    pub audit_retention_days: u32,
 }
 
 impl Config {
@@ -180,6 +234,28 @@ impl Config {
             return Err(ConfigError::Invalid {
                 name: "UPTIME_MASS_DOWN_PCT",
                 value: uptime_mass_down_pct.to_string(),
+            });
+        }
+        let chat_command = optional("CHAT_COMMAND").unwrap_or_else(|| "pulse".to_string());
+        // Discord's rule for command names, which Slack also accepts.
+        let valid_command = (1..=32).contains(&chat_command.len())
+            && chat_command
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+        if !valid_command {
+            return Err(ConfigError::Invalid {
+                name: "CHAT_COMMAND",
+                value: chat_command,
+            });
+        }
+        let chat_admins = list("CHAT_ADMINS");
+        if let Some(bad) = chat_admins
+            .iter()
+            .find(|entry| crate::chat::Admin::parse(entry).is_none())
+        {
+            return Err(ConfigError::Invalid {
+                name: "CHAT_ADMINS",
+                value: bad.clone(),
             });
         }
         Ok(Self {
@@ -230,6 +306,11 @@ impl Config {
             allowed_hosts: required("ALLOWED_HOSTS")?,
             cookie_secure: parsed("COOKIE_SECURE", true)?,
             admin_logs_key: optional("ADMIN_LOGS_KEY"),
+            slack_signing_secret: optional("SLACK_SIGNING_SECRET"),
+            discord: DiscordApp::from_env()?,
+            chat_command,
+            chat_admins,
+            audit_retention_days: parsed("AUDIT_RETENTION_DAYS", 365)?,
         })
     }
 }

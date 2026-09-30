@@ -14,6 +14,7 @@ use tera::{Context, Tera};
 const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 use crate::{
+    audit::{self, Event, Outcome},
     auth::{self, Role, SessionStore},
     config::{AuthMode, Config, LocalAccount},
     i18n::I18n,
@@ -57,6 +58,12 @@ impl LoginFailure {
         Self::Rejected {
             key,
             upstream: None,
+        }
+    }
+
+    fn key(&self) -> &'static str {
+        match self {
+            Self::Rejected { key, .. } | Self::Unavailable(key) => key,
         }
     }
 
@@ -182,8 +189,17 @@ pub async fn submit_login(
     form: web::Form<LoginForm>,
 ) -> HttpResponse {
     let ip = security::client_ip(&req);
+    // As typed, for the audit log: an attempt is recorded under the email it tried.
+    let typed: String = form.email.trim().to_lowercase().chars().take(200).collect();
     if let Some(wait) = limiter.locked_for(&ip, &form.email) {
         tracing::warn!(%ip, email = %form.email, "login: throttled");
+        audit::record(
+            &req,
+            Event::web(&req, "login.throttled")
+                .actor(&typed)
+                .outcome(Outcome::Denied),
+        )
+        .await;
         let minutes = wait.as_secs().div_ceil(60).max(1).to_string();
         let msg = i18n.text("login.throttled", &[("minutes", &minutes)]);
         return render_login(&tera, Some(&msg), &form.email);
@@ -192,15 +208,25 @@ pub async fn submit_login(
     let (token, role) = match authenticate(&cfg, &form).await {
         Ok(granted) => granted,
         Err(failure) => {
-            if matches!(failure, LoginFailure::Rejected { .. }) {
+            let rejected = matches!(failure, LoginFailure::Rejected { .. });
+            if rejected {
                 limiter.record_failure(&ip, &form.email);
             }
+            let event = Event::web(&req, "login.failed")
+                .actor(&typed)
+                .outcome(if rejected {
+                    Outcome::Denied
+                } else {
+                    Outcome::Error
+                })
+                .detail(serde_json::json!({ "reason": failure.key() }));
+            audit::record(&req, event).await;
             return render_login(&tera, Some(&failure.message(&i18n)), &form.email);
         }
     };
     limiter.record_success(&ip, &form.email);
 
-    let session_id = match sessions.create(token, role).await {
+    let session_id = match sessions.create(&typed, token, role).await {
         Ok(id) => id,
         Err(e) => {
             tracing::error!(error = %e, "login: could not start a session");
@@ -210,6 +236,10 @@ pub async fn submit_login(
     };
 
     tracing::info!(email = %form.email, ?role, "login: access granted");
+    let event = Event::web(&req, "login.ok")
+        .actor(&typed)
+        .detail(serde_json::json!({ "role": role.as_str() }));
+    audit::record(&req, event).await;
     HttpResponse::Found()
         .append_header(("Location", "/"))
         .cookie(auth::build_session_cookie(session_id, cfg.cookie_secure))
@@ -221,6 +251,9 @@ pub async fn logout(
     cfg: web::Data<Config>,
     sessions: web::Data<SessionStore>,
 ) -> HttpResponse {
+    if auth::current_session(&req).is_some() {
+        audit::record(&req, Event::web(&req, "logout")).await;
+    }
     if let Some(cookie) = req.cookie(auth::SESSION_COOKIE)
         && let Err(e) = sessions.remove(cookie.value()).await
     {

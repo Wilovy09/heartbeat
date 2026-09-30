@@ -9,6 +9,7 @@ use actix_web::{HttpRequest, HttpResponse, web};
 use serde::Deserialize;
 
 use crate::{
+    audit::{self, Event},
     auth,
     config::Config,
     i18n::{I18n, Localize},
@@ -43,6 +44,12 @@ pub async fn get_logs(
             "error": i18n.text("api.not_registered", &[("slug", &slug)])
         }));
     };
+
+    // Polled every few seconds while the viewer is open: one entry per window.
+    let event = Event::web(&req, "logs.view")
+        .target(&slug)
+        .detail(serde_json::json!({ "stream": query.stream }));
+    audit::record_view(&req, event).await;
 
     let Some(logs_url) = app.logs_url.as_deref() else {
         return HttpResponse::NotFound().json(serde_json::json!({

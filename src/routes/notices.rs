@@ -4,6 +4,7 @@ use actix_web::{HttpRequest, HttpResponse, web};
 use tera::Tera;
 
 use crate::{
+    audit::{self, Event},
     auth,
     i18n::{I18n, Localize},
     notices::{NoticeDraft, NoticeState, NoticeStore},
@@ -12,6 +13,15 @@ use crate::{
 
 /// Parses the notice form. By hand, not with `web::Form`: each affected app arrives as its
 /// own `apps=<slug>` pair, and the urlencoded deserializer rejects repeated keys.
+/// A notice as the audit log keeps it.
+fn draft_detail(draft: &NoticeDraft) -> serde_json::Value {
+    serde_json::json!({
+        "title": draft.title,
+        "state": draft.state,
+        "apps": draft.apps,
+    })
+}
+
 fn draft_from(body: &[u8]) -> Option<NoticeDraft> {
     let (mut title, mut text, mut state, mut apps) = (None, String::new(), None, Vec::new());
     for (key, value) in url::form_urlencoded::parse(body) {
@@ -88,7 +98,16 @@ pub async fn create(
     let Some(draft) = draft_from(&body) else {
         return HttpResponse::BadRequest().finish();
     };
-    match store.create(draft).await {
+    let detail = draft_detail(&draft);
+    let result = store.create(draft).await;
+    let mut event = Event::web(&req, "notice.create")
+        .result(&result)
+        .detail(detail);
+    if let Ok(id) = &result {
+        event = event.target(id);
+    }
+    audit::record(&req, event).await;
+    match result {
         Ok(_) => back(),
         Err(e) => render(&tera, &store, &registry, Some(&e.localize(&i18n))).await,
     }
@@ -110,7 +129,15 @@ pub async fn update(
     let Some(draft) = draft_from(&body) else {
         return HttpResponse::BadRequest().finish();
     };
-    match store.update(&path.into_inner(), draft).await {
+    let id = path.into_inner();
+    let detail = draft_detail(&draft);
+    let result = store.update(&id, draft).await;
+    let event = Event::web(&req, "notice.update")
+        .target(&id)
+        .result(&result)
+        .detail(detail);
+    audit::record(&req, event).await;
+    match result {
         Ok(()) => back(),
         Err(e) => render(&tera, &store, &registry, Some(&e.localize(&i18n))).await,
     }
@@ -128,7 +155,15 @@ pub async fn delete(
     if let Err(resp) = auth::require_admin(&req) {
         return resp;
     }
-    match store.remove(&path.into_inner()).await {
+    let id = path.into_inner();
+    let before = store.list().await.into_iter().find(|n| n.id == id);
+    let result = store.remove(&id).await;
+    let event = Event::web(&req, "notice.delete")
+        .target(&id)
+        .result(&result)
+        .detail(serde_json::json!({ "title": before.map(|n| n.title) }));
+    audit::record(&req, event).await;
+    match result {
         Ok(()) => back(),
         Err(e) => render(&tera, &store, &registry, Some(&e.localize(&i18n))).await,
     }

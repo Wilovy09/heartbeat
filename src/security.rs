@@ -56,14 +56,18 @@ fn is_same_origin(req: &ServiceRequest) -> bool {
     })
 }
 
+/// Server-to-server endpoints: Slack and Discord send no `Origin`, and every request is
+/// authenticated by its own signature instead (see `chat`). No session cookie is read there.
+const SIGNED_PATHS: [&str; 2] = ["/slack/commands", "/discord/interactions"];
+
 /// Middleware: rejects any non-GET/HEAD request that isn't same-origin (see
-/// `is_same_origin`) before it reaches a handler.
+/// `is_same_origin`) before it reaches a handler, except on `SIGNED_PATHS`.
 pub async fn csrf(
     req: ServiceRequest,
     next: Next<impl MessageBody + 'static>,
 ) -> Result<ServiceResponse<EitherBody<impl MessageBody, BoxBody>>, Error> {
     let safe = matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
-    if safe || is_same_origin(&req) {
+    if safe || SIGNED_PATHS.contains(&req.path()) || is_same_origin(&req) {
         return next
             .call(req)
             .await

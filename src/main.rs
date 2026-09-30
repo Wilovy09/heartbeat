@@ -3,8 +3,10 @@ mod alerts;
 #[cfg(test)]
 mod app_tests;
 mod assets;
+mod audit;
 mod auth;
 mod bundles;
+mod chat;
 mod config;
 mod db;
 #[cfg(feature = "demo")]
@@ -125,6 +127,9 @@ async fn run() -> Result<(), StartupError> {
         lang: cfg.app_lang,
     })?;
 
+    let audit = audit::AuditLog::new(db.clone(), cfg.audit_retention_days);
+    audit.spawn_pruning();
+
     let monitor = UptimeMonitor::load(
         db.clone(),
         CheckPolicy {
@@ -142,6 +147,7 @@ async fn run() -> Result<(), StartupError> {
         Notifiers {
             alerter: Some(alerter.clone()),
             ping_url: cfg.heartbeat_ping_url.clone(),
+            audit: Some(audit.clone()),
         },
     )
     .await?;
@@ -153,17 +159,7 @@ async fn run() -> Result<(), StartupError> {
     let notices = notices::NoticeStore::load(db.clone()).await?;
     let themes = theme::ThemeStore::load(db.clone()).await?;
 
-    let auth_mode = match &cfg.auth {
-        config::AuthMode::Upstream { .. } => "upstream",
-        config::AuthMode::Password { .. } => "password",
-    };
-    tracing::info!(
-        host = %host,
-        port,
-        auth_mode,
-        alerts = !cfg.alert_webhook_urls.is_empty(),
-        "heartbeat starting"
-    );
+    log_startup(&cfg);
 
     let cfg_data = web::Data::new(cfg);
     let tera_data = web::Data::new(tera);
@@ -176,7 +172,9 @@ async fn run() -> Result<(), StartupError> {
     let monitor_data = web::Data::new(monitor);
     let notices_data = web::Data::new(notices);
     let themes_data = web::Data::new(themes);
+    let audit_data = web::Data::new(audit);
 
+    chat::discord::spawn_registration(&cfg_data, &i18n_data);
     tokio::spawn(
         monitor_data
             .clone()
@@ -199,12 +197,31 @@ async fn run() -> Result<(), StartupError> {
             .app_data(monitor_data.clone())
             .app_data(notices_data.clone())
             .app_data(themes_data.clone())
+            .app_data(audit_data.clone())
             .configure(routes::configure)
     })
     .bind((host, port))?
     .run()
     .await?;
     Ok(())
+}
+
+/// One line saying how this instance is set up.
+fn log_startup(cfg: &Config) {
+    let auth_mode = match &cfg.auth {
+        config::AuthMode::Upstream { .. } => "upstream",
+        config::AuthMode::Password { .. } => "password",
+    };
+    tracing::info!(
+        host = %cfg.host,
+        port = cfg.port,
+        auth_mode,
+        alerts = !cfg.alert_webhook_urls.is_empty(),
+        slack_commands = cfg.slack_signing_secret.is_some(),
+        discord_commands = cfg.discord.is_some(),
+        audit_retention_days = cfg.audit_retention_days,
+        "heartbeat starting"
+    );
 }
 
 async fn migrate_command() -> ExitCode {
