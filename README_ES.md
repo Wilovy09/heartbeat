@@ -90,6 +90,9 @@ Un solo binario de Rust con SQLite integrado: todo se guarda en un archivo,
 
   Una caída se reintenta `UPTIME_RETRIES` veces (5 s entre intentos) antes de marcarse,
   así que un paquete perdido no pinta la app de rojo ni manda una alerta.
+
+- **Comandos de chat**: `/pulse status`, `pause` y `resume` desde Slack y Discord; ver
+  [Comandos de chat](#comandos-de-chat).
 - **Alertas** (`ALERT_WEBHOOK_URLS`): solo en cambios de estado confirmados (caída y
   recuperación; degradado es opcional con `ALERT_ON_DEGRADED`), con el nombre de la app y
   un link a ella. Slack y Discord reciben su formato nativo; cualquier otra URL recibe un
@@ -135,6 +138,8 @@ Un solo binario de Rust con SQLite integrado: todo se guarda en un archivo,
 - **Integraciones**: `GET /metrics` en formato Prometheus (con `METRICS_TOKEN`) y
   exportación del historial de cada app a CSV o JSON desde el dashboard.
 - **Visor de logs** con filtros por nivel, módulo y texto.
+- **Registro de auditoría** (`/audit`): inicios de sesión, cada cambio, lecturas de logs y
+  comandos de chat, con quién y cuándo; ver "Registro de auditoría" más abajo.
 - **Dead man's switch** (`HEARTBEAT_PING_URL`): Heartbeat hace ping a esa URL después de
   cada ronda, para que un servicio externo te avise si Heartbeat mismo se detiene.
   `GET /healthz` responde `ok` para balanceadores.
@@ -178,6 +183,7 @@ código":
 ```
 
 Atributos opcionales:
+
 - `label="Mi API"`: texto en lugar del nombre de la app.
 - `theme="light"`: el tema por defecto es oscuro.
 - `lang="en"`: `es` o `en`; por defecto, el `APP_LANG` del servidor.
@@ -209,6 +215,7 @@ El estado elige el texto y el color; el texto sigue `APP_LANG`:
 | Sin chequeos todavía, o sin URL de health | <img src=".github/public/badges/es-unknown.svg" alt="API: Sin datos"/> |
 
 Parámetros:
+
 - `token` (obligatorio): el token del embed de la app. Uno incorrecto responde el mismo
   404 que un slug que no existe.
 - `label` (opcional): texto de la izquierda en lugar del nombre de la app, hasta 40
@@ -231,6 +238,67 @@ scrape_configs:
     authorization: { credentials: METRICS_TOKEN }
     static_configs: [{ targets: ["HEARTBEAT_HOST"] }]
 ```
+
+## Comandos de chat
+
+`/pulse` responde desde Slack y Discord, en el canal donde se escribe:
+
+| Comando | Qué hace | Quién |
+|---|---|---|
+| `/pulse status` | Todas las apps, las peores primero, con latencia y uptime de 24 h | Cualquiera |
+| `/pulse status <app>` | Una app: estado, error, latencia, uptime, pausa, certificado | Cualquiera |
+| `/pulse pause <app> [30m\|2h\|1d]` | Pausa sus chequeos (sin duración: hasta reanudarla) | `CHAT_ADMINS` |
+| `/pulse resume <app>` | Reanuda sus chequeos | `CHAT_ADMINS` |
+| `/pulse help` | Cómo usarlo, solo para ti | Cualquiera |
+
+`<app>` es el slug, el nombre o parte de ellos; Discord lo autocompleta. Cada instalación
+crea sus propias apps de Slack y Discord, así que ninguna solicitud pasa por terceros.
+Ambos servicios deben poder llegar a `PUBLIC_URL` por https.
+
+**Slack**
+
+1. `/settings` → *Comandos de chat* muestra un manifest que apunta a tu `PUBLIC_URL`.
+2. [api.slack.com/apps](https://api.slack.com/apps) → *Create New App* → *From a
+   manifest* → pégalo → *Install to Workspace*.
+3. Copia *Basic Information* → *Signing Secret* a `SLACK_SIGNING_SECRET` y reinicia.
+
+**Discord**
+
+1. [discord.com/developers](https://discord.com/developers/applications) → *New
+   Application*. Copia el *Application ID* y la *Public Key* a `DISCORD_APPLICATION_ID` y
+   `DISCORD_PUBLIC_KEY`, y *Bot* → *Reset Token* a `DISCORD_BOT_TOKEN`.
+2. Reinicia Heartbeat: registra el comando cada vez que arranca.
+3. Pega `https://<PUBLIC_URL>/discord/interactions` como *Interactions Endpoint URL*
+   (Discord la verifica en ese momento, así que Heartbeat debe estar corriendo).
+4. Abre el link de invitación de `/settings` y elige el servidor.
+
+`CHAT_ADMINS` define quién puede pausar y reanudar: IDs de usuario de Slack (`U…`), IDs de
+usuario de Discord y roles de Discord (`&…`), como en `ALERT_MENTIONS`. El nombre del
+comando es `CHAT_COMMAND`.
+
+## Registro de auditoría
+
+`/audit` (solo administradores) lista quién hizo qué, lo más reciente primero, y lo
+exporta como CSV:
+
+- **Sesiones**: inicios de sesión (exitosos, fallidos, bloqueados) y cierres, con el email
+  y la IP.
+- **Apps**: altas (con su configuración), ediciones (solo los campos que cambiaron, antes y
+  después), borrados, pausas y reanudaciones, publicación, rotación del token del embed y
+  pruebas de alertas.
+- **Chat**: todos los comandos de Slack y Discord, incluidos los rechazados por no estar
+  en `CHAT_ADMINS`, con el canal y lo que se escribió.
+- **Lecturas**: los logs de una app (una vez por persona y app cada 15 minutos, porque el
+  visor hace polling) y las exportaciones de uptime.
+- **Configuración**: el tema (con su CSS), las plantillas de alertas, las pruebas de
+  alertas y los avisos.
+- **Heartbeat mismo**: el fin de una pausa programada.
+
+Se guarda en la tabla `audit_log`, se filtra por quién, acción, app, origen, resultado y
+fecha, y se conserva `AUDIT_RETENTION_DAYS` días (365; 0 = para siempre). Nunca se
+registran contraseñas ni tokens, los headers del chequeo aparecen solo por nombre y las
+URLs de webhooks van enmascaradas. Las sesiones iniciadas antes de 0.3.1 no tienen email:
+sus acciones aparecen así hasta el siguiente inicio de sesión.
 
 ## Contrato de los endpoints
 
@@ -266,7 +334,9 @@ clave compartida del header `X-Admin-Logs-Key` (comparada en tiempo constante).
 
 - **Sesiones del lado del servidor** con IDs de 256 bits; una cookie inventada no da
   acceso y "Salir" (un POST) invalida la sesión de verdad.
-- **CSRF**: todo POST exige un `Origin` (o `Referer`) del mismo host.
+- **CSRF**: todo POST exige un `Origin` (o `Referer`) del mismo host, salvo
+  `/slack/commands` y `/discord/interactions`, que no leen la sesión y solo aceptan
+  solicitudes firmadas por Slack (HMAC-SHA256) o Discord (Ed25519) en los últimos 5 minutos.
 - **Headers**: CSP (solo recursos del propio origen), `frame-ancestors 'none'` y
   `X-Frame-Options: DENY` (sin clickjacking), `nosniff`, `Referrer-Policy`.
 - **Límite de intentos de login**: 5 fallos en 15 minutos bloquean esa IP y ese email.
