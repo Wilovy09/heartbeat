@@ -378,6 +378,72 @@ With [`just`](https://github.com/casey/just):
   http://localhost:8200 (requires [uv](https://docs.astral.sh/uv/)). Pushes to `main` publish
   it to GitHub Pages.
 
+## Benchmarks
+
+`just bench [apps] [days]` (needs [k6](https://k6.io)) builds a release binary, seeds a
+database with `apps` apps and `days` days of checks every minute (`scripts/bench_seed.py`,
+cached per size in `data/bench/`), and loads each endpoint in turn: the dashboard API, an
+app's detail (6 h and 30 days), the status page, embed, badge, `/metrics` and `/audit`.
+It reports req/s, p50/p95/p99 per endpoint, startup time and memory (idle and peak RSS),
+and saves the run to `data/bench/results/`.
+
+```bash
+just bench              # 100 apps, 30 days
+just bench 500          # 500 apps
+VUS=50 DURATION=30s just bench
+just bench-compare      # latest run of each size, side by side
+just bench-compare data/bench/results/a.json data/bench/results/b.json
+```
+
+The seeded apps have no health URL, so the monitor doesn't check them during the run: it
+measures serving the stored history. Results depend on the machine; compare runs from the
+same one.
+
+### Results on a MacBook M1 (8 GB)
+
+**In short: every endpoint answers under 10 ms at p99, except `/audit` (20-49 ms) and an
+app's uncached 30-day detail with 500 apps (~400 ms).**
+
+Setup:
+
+- Apple M1 (8 cores), 8 GB of RAM, macOS 26.3; `just bench 100` and `just bench 500`
+  with the defaults.
+- The database is seeded before anything is measured: 30 days of checks every minute,
+  4.3 million for 100 apps (167 MB) and 21.6 million for 500 (806 MB), plus 50 000 audit
+  entries.
+- Endpoints are loaded one after another, never together: each gets 20 concurrent
+  clients for 15 s, then a 2 s pause before the next.
+- k6 runs on the same machine, over localhost, and competes with the server for CPU. The
+  figures show what the server costs, not what a deployment answers over a network,
+  behind nginx and TLS.
+
+| Endpoint | 100 apps: req/s | p50 / p99 ms | 500 apps: req/s | p50 / p99 ms |
+|---|---:|---:|---:|---:|
+| `/healthz` | 42 900 | 0.3 / 1.6 | 41 900 | 0.3 / 1.7 |
+| Dashboard (`/api/uptime`) | 35 500 | 0.4 / 1.8 | 19 900 | 0.7 / 3.7 |
+| App detail, 6 h | 39 800 | 0.3 / 1.6 | 6 400 | 2.9 / 9.7 |
+| App detail, 30 days | 36 500 | 0.3 / 1.6 | 93 | 252 / 396 |
+| Status page | 15 900 | 0.7 / 9.1 | 15 400 | 0.8 / 9.3 |
+| Embed | 36 300 | 0.4 / 1.7 | 33 900 | 0.4 / 1.9 |
+| Badge | 34 400 | 0.4 / 1.9 | 37 200 | 0.4 / 1.7 |
+| `/metrics` | 29 300 | 0.4 / 2.5 | 22 300 | 0.6 / 3.4 |
+| `/audit` (50 000 entries) | 2 600 | 5.2 / 49 | 3 700 | 4.7 / 20 |
+
+| | 100 apps | 500 apps |
+|---|---:|---:|
+| Startup | 137 ms | 226 ms |
+| Memory (RSS), idle / peak | 43 / 64 MB | 50 / 107 MB |
+
+How to read it:
+
+- An app's detail is cached until its next check, and the seeded apps aren't checked: with
+  100 apps nearly every request after the first is a cache hit, while with 500 most are
+  each app's first, so the 500-app 30-day figure is the uncached cost (~20 ms of CPU each,
+  reading 43 000 checks). With `DATABASE_MMAP_MB=2048` it goes to 366 req/s (p50 66 ms),
+  at the cost described in `.env.example`.
+- Runs on a laptop vary about ±40 % between identical runs; repeat a run before reading a
+  difference smaller than 2×.
+
 ## Deployment
 
 ### With Docker

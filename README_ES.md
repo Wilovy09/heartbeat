@@ -388,6 +388,72 @@ Con [`just`](https://github.com/casey/just):
   en http://localhost:8200 (requiere [uv](https://docs.astral.sh/uv/)). Cada push a `main` lo
   publica en GitHub Pages.
 
+## Benchmarks
+
+`just bench [apps] [días]` (necesita [k6](https://k6.io)) compila en release, genera una
+base con `apps` apps y `días` días de chequeos cada minuto (`scripts/bench_seed.py`, que
+se guarda por tamaño en `data/bench/`) y carga cada endpoint por turno: la API del
+dashboard, el detalle de una app (6 h y 30 días), la página de estado, el embed, el badge,
+`/metrics` y `/audit`. Reporta req/s y p50/p95/p99 por endpoint, el tiempo de arranque y la
+memoria (RSS en reposo y pico), y guarda la corrida en `data/bench/results/`.
+
+```bash
+just bench              # 100 apps, 30 días
+just bench 500          # 500 apps
+VUS=50 DURATION=30s just bench
+just bench-compare      # la última corrida de cada tamaño, lado a lado
+just bench-compare data/bench/results/a.json data/bench/results/b.json
+```
+
+Las apps generadas no tienen health URL, así que el monitor no las chequea durante la
+corrida: se mide cuánto cuesta servir el historial guardado. Los resultados dependen de la
+máquina; compara corridas hechas en la misma.
+
+### Resultados en una MacBook M1 (8 GB)
+
+**En resumen: todos los endpoints responden en menos de 10 ms en p99, salvo `/audit`
+(20–49 ms) y el detalle de 30 días de una app sin caché con 500 apps (~400 ms).**
+
+Condiciones:
+
+- Apple M1 (8 núcleos), 8 GB de RAM, macOS 26.3; `just bench 100` y `just bench 500` con
+  los valores por defecto.
+- La base se genera antes de medir: 30 días de chequeos cada minuto, 4,3 millones con 100
+  apps (167 MB) y 21,6 millones con 500 (806 MB), más 50 000 entradas de auditoría.
+- Los endpoints se cargan uno después del otro, nunca juntos: cada uno recibe 20 clientes
+  concurrentes durante 15 s, con 2 s de pausa antes del siguiente.
+- k6 corre en la misma máquina, por localhost, y compite con el servidor por CPU. Las
+  cifras muestran cuánto cuesta servir cada endpoint, no lo que responde un despliegue a
+  través de la red, detrás de nginx y TLS.
+
+| Endpoint | 100 apps: req/s | p50 / p99 ms | 500 apps: req/s | p50 / p99 ms |
+|---|---:|---:|---:|---:|
+| `/healthz` | 42 900 | 0,3 / 1,6 | 41 900 | 0,3 / 1,7 |
+| Dashboard (`/api/uptime`) | 35 500 | 0,4 / 1,8 | 19 900 | 0,7 / 3,7 |
+| Detalle de una app, 6 h | 39 800 | 0,3 / 1,6 | 6 400 | 2,9 / 9,7 |
+| Detalle de una app, 30 días | 36 500 | 0,3 / 1,6 | 93 | 252 / 396 |
+| Página de estado | 15 900 | 0,7 / 9,1 | 15 400 | 0,8 / 9,3 |
+| Embed | 36 300 | 0,4 / 1,7 | 33 900 | 0,4 / 1,9 |
+| Badge | 34 400 | 0,4 / 1,9 | 37 200 | 0,4 / 1,7 |
+| `/metrics` | 29 300 | 0,4 / 2,5 | 22 300 | 0,6 / 3,4 |
+| `/audit` (50 000 entradas) | 2 600 | 5,2 / 49 | 3 700 | 4,7 / 20 |
+
+| | 100 apps | 500 apps |
+|---|---:|---:|
+| Arranque | 137 ms | 226 ms |
+| Memoria (RSS), en reposo / pico | 43 / 64 MB | 50 / 107 MB |
+
+Cómo leerlo:
+
+- El detalle de una app se cachea hasta su siguiente chequeo, y las apps generadas no se
+  chequean: con 100 apps casi todas las solicitudes después de la primera salen del caché,
+  mientras que con 500 la mayoría es la primera de cada app, así que la cifra de 30 días
+  con 500 apps es el costo sin caché (~20 ms de CPU cada una, leyendo 43 000 chequeos).
+  Con `DATABASE_MMAP_MB=2048` sube a 366 req/s (p50 66 ms), con el costo que explica
+  `.env.example`.
+- En una laptop, dos corridas idénticas varían cerca de ±40 %; repite una corrida antes de
+  interpretar una diferencia menor a 2×.
+
 ## Despliegue
 
 ### Con Docker

@@ -3,6 +3,51 @@
 All notable changes to Heartbeat. Versions follow [SemVer](https://semver.org/); entries
 before 0.2.0 were reconstructed from the git history.
 
+## [UNRELEASED - 0.3.2] - 2026-10-0?
+
+* [ ] Benchmarks
+```
+y podemos hacer comparaciones con:
+
+- Gatus: escrito en Go y muy ligero. Se configura todo en YAML, sin interfaz de edición, y permite condiciones avanzadas sobre la respuesta (status, body, tiempo, certificados). Es popular entre quienes prefieren "configuración como código".
+- Checkmate (de Bluewave Labs): proyecto más reciente, con interfaz moderna. Además de uptime, incluye monitoreo de infraestructura (CPU, RAM, disco) mediante un agente.
+- Kener: centrado en status pages bonitas, con monitoreo incluido. Está hecho en SvelteKit.
+- Statping-ng: fork mantenido del antiguo Statping, en Go. Combina monitoreo y status page, aunque su desarrollo es menos activo.
+- OneUptime: una plataforma mucho más grande y open source que junta uptime, incidentes, on-call, logs y APM. Es más pesada de desplegar.
+- Uptime Kuma
+```
+* [ ] Email, telegram alerts
+* [ ] Visor de memoria ram, cpu usage y disco del servidor de cada app
+
+### Performance
+- The dashboard's `/api/uptime` is built once per change (a round of checks, an app
+  edited) instead of on every request, and served gzipped to clients that accept it,
+  about 15 times smaller. With 500 apps and 30 days of checks: from 277 to ~19 600
+  req/s, p50 from 70 to 0.7 ms, peak memory from 236 to 103 MB.
+- `/metrics` uses the same cache: with 500 apps, from ~580 to ~12 000-19 000 req/s.
+- Status changes are marked when a check is stored (`heartbeats.flip`, migration
+  `0003_flips.sql`, which marks the existing history once) and read from a partial
+  index: the recent events, rebuilt for every app at startup, no longer walk each
+  app's history. With the 24 h figures counted by SQLite and apps rebuilt in parallel,
+  startup with 500 apps goes from 4.3 s to ~0.2 s, with 100 from 0.7 s to ~0.1 s.
+- An app's detail (the response-time chart and its incidents) is downsampled while
+  reading, and the incidents read only the down checks and the flips: a 30-day window
+  no longer loads its ~43 000 checks. It's cached per app and window until the app's
+  next check, and gzipped.
+- One reader connection per core (2 to 8, was 2).
+- `DATABASE_MMAP_MB` (off by default) reads the database through a memory map: cold
+  30-day charts under concurrency go from ~93 to ~370 req/s with 500 apps, but the
+  process's RSS then counts the mapped file once per connection (see `.env.example`).
+- Upgrading: the migration marks the existing history in one pass (well under a second
+  for a few apps, ~35 s for 500 apps with 30 days); a 0.3.1 binary won't open the
+  database afterwards, so rolling back means restoring the backup `deploy/update.sh`
+  takes.
+
+### Benchmarks
+- `just bench [apps] [days]` (needs k6) seeds a synthetic database, loads every endpoint
+  in turn and reports req/s, latency, startup time and memory; `just bench-compare` puts
+  runs side by side, and `BENCH_BIN` runs another build on the same data.
+
 ## [0.3.1] - 2026-09-30
 
 ### Audit log
