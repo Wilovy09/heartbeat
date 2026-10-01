@@ -18,6 +18,7 @@ mod store;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::error::Error as _;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
@@ -52,6 +53,11 @@ const DAY_SECS: u64 = 24 * 3600;
 const RECENT_BEATS: usize = 100;
 /// How many status changes the summary/detail event tables show.
 const MAX_EVENTS: usize = 30;
+/// Longest a cached overview is served without being rebuilt, even if nothing changed:
+/// events age out of the retention window with time alone.
+const OVERVIEW_TTL: Duration = Duration::from_secs(30);
+/// Details kept at once (an app and a window each); past it, stale ones go first.
+const MAX_CACHED_DETAILS: usize = 256;
 /// How many incidents the detail endpoint lists.
 const MAX_INCIDENTS: usize = 50;
 
@@ -92,6 +98,7 @@ impl Status {
     }
 
     /// Whether the app was serving requests -- slow still counts toward uptime.
+    #[cfg(test)]
     #[must_use]
     fn is_available(self) -> bool {
         match self {
@@ -372,10 +379,13 @@ pub(crate) fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// A run of heartbeats, oldest first: what the aggregations below work on.
+/// A run of heartbeats, oldest first, aggregated in Rust: the reference the SQLite
+/// versions in `store` (`stats`, `buckets`, `incident_beats`) are checked against.
+#[cfg(test)]
 #[derive(Debug, Default)]
 struct History(VecDeque<Heartbeat>);
 
+#[cfg(test)]
 impl History {
     fn since(&self, cutoff: u64) -> impl Iterator<Item = &Heartbeat> {
         self.0.iter().filter(move |b| b.at >= cutoff)
@@ -446,6 +456,15 @@ impl History {
     }
 }
 
+/// Width of the buckets a window from `cutoff` to `now` is downsampled into, so it fits
+/// `MAX_DETAIL_POINTS` (what `History::downsampled` uses for that many points).
+fn bucket_secs(cutoff: u64, now: u64) -> u64 {
+    now.saturating_sub(cutoff)
+        .max(1)
+        .div_ceil(MAX_DETAIL_POINTS as u64)
+        .max(1)
+}
+
 /// What's kept in memory about one app between rounds.
 #[derive(Debug, Default)]
 struct Live {
@@ -456,6 +475,10 @@ struct Live {
     /// Status changes, newest first, at most `MAX_EVENTS`.
     events: Vec<Heartbeat>,
     stats: Stats,
+    /// The monitor's generation when this app's checks last changed: what a cached
+    /// detail of the app is valid for. Unique across apps, so an app removed and
+    /// registered again under the same slug never matches an older entry.
+    version: u64,
 }
 
 impl Live {
@@ -472,6 +495,7 @@ impl Live {
             down_since,
             events: store::events(conn, slug, MAX_EVENTS)?,
             stats: store::stats(conn, slug, now)?,
+            version: 0,
         })
     }
 
@@ -612,6 +636,62 @@ pub struct UptimeMonitor {
     i18n: I18n,
     /// When each app that's down was last alerted about (down or reminder).
     reminded: Mutex<HashMap<String, u64>>,
+    /// Bumped after every change to `live` or `certs`.
+    generation: AtomicU64,
+    /// `overview_json`'s last answer.
+    overview_cache: OverviewCache<CachedJson>,
+    /// `metrics_text`'s last answer.
+    metrics_cache: OverviewCache<actix_web::web::Bytes>,
+    /// `detail_json`'s answers by (slug, window seconds), with the app version and time
+    /// they were built for.
+    detail_cache: Mutex<DetailCache>,
+}
+
+type DetailCache = HashMap<(String, u64), ((Option<u64>, Instant), CachedJson)>;
+
+/// Something built from the overview, kept until the state behind it changes (or
+/// `OVERVIEW_TTL` passes). An async lock, held while rebuilding: concurrent requests wait
+/// for that one build instead of each doing their own.
+struct OverviewCache<T>(tokio::sync::Mutex<Option<Cached<T>>>);
+
+struct Cached<T> {
+    /// (monitor generation, registry generation) read before building it.
+    key: (u64, u64),
+    built: Instant,
+    value: T,
+}
+
+impl<T> Default for OverviewCache<T> {
+    fn default() -> Self {
+        Self(tokio::sync::Mutex::new(None))
+    }
+}
+
+/// A cached JSON answer, plain and gzipped (the overview shrinks about 15 times: most of
+/// it is the recent checks, which repeat).
+#[derive(Clone)]
+pub struct CachedJson {
+    pub plain: actix_web::web::Bytes,
+    pub gzip: actix_web::web::Bytes,
+}
+
+impl CachedJson {
+    fn new(plain: Vec<u8>) -> Self {
+        use std::io::Write as _;
+        let mut encoder = flate2::write::GzEncoder::new(
+            Vec::with_capacity(plain.len() / 8),
+            flate2::Compression::default(),
+        );
+        // Writing into a Vec can't fail.
+        let gzip = encoder
+            .write_all(&plain)
+            .and_then(|()| encoder.finish())
+            .unwrap_or_default();
+        Self {
+            plain: plain.into(),
+            gzip: gzip.into(),
+        }
+    }
 }
 
 impl UptimeMonitor {
@@ -622,15 +702,27 @@ impl UptimeMonitor {
         outbound: Outbound,
         notifiers: Notifiers,
     ) -> Result<Self, UptimeError> {
-        let live = db
-            .read(|conn| {
-                let now = unix_now();
-                store::slugs(conn)?
-                    .into_iter()
-                    .map(|slug| Ok((slug.clone(), Live::load(conn, &slug, now)?)))
-                    .collect::<Result<HashMap<_, _>, DbError>>()
-            })
-            .await?;
+        // Split across the reader connections: rebuilding an app is a handful of
+        // queries, and with hundreds of apps the startup is mostly that.
+        let slugs = db.read(store::slugs).await?;
+        let chunk = slugs.len().div_ceil(db.read_parallelism()).max(1);
+        let now = unix_now();
+        let mut loads = JoinSet::new();
+        for part in slugs.chunks(chunk) {
+            let (db, part) = (db.clone(), part.to_vec());
+            loads.spawn(async move {
+                db.read(move |conn| {
+                    part.into_iter()
+                        .map(|slug| Ok((slug.clone(), Live::load(conn, &slug, now)?)))
+                        .collect::<Result<Vec<_>, DbError>>()
+                })
+                .await
+            });
+        }
+        let mut live = HashMap::with_capacity(slugs.len());
+        while let Some(part) = loads.join_next().await {
+            live.extend(part.map_err(DbError::from)??);
+        }
         Ok(Self {
             db,
             policy,
@@ -641,6 +733,10 @@ impl UptimeMonitor {
             gate: Mutex::default(),
             i18n: I18n::new(policy.lang),
             reminded: Mutex::default(),
+            generation: AtomicU64::new(0),
+            overview_cache: OverviewCache::default(),
+            metrics_cache: OverviewCache::default(),
+            detail_cache: Mutex::default(),
         })
     }
 
@@ -744,6 +840,7 @@ impl UptimeMonitor {
                 }
             }
         }
+        self.changed();
         let beats = done
             .iter()
             .map(|(app, result)| (app.slug.clone(), result.beat.clone()))
@@ -885,10 +982,17 @@ impl UptimeMonitor {
             tracing::error!(error = %e, checks = beats.len(), "uptime: failed to store heartbeats");
         }
         let mut live = self.live.write().await;
-        beats
+        let recorded = beats
             .iter()
             .map(|(slug, beat)| live.entry(slug.clone()).or_default().push(beat))
-            .collect()
+            .collect();
+        let version = self.changed();
+        for (slug, _) in &beats {
+            if let Some(state) = live.get_mut(slug) {
+                state.version = version;
+            }
+        }
+        recorded
     }
 
     /// Stores one heartbeat (tests; the monitor records whole rounds).
@@ -917,6 +1021,7 @@ impl UptimeMonitor {
                 for (stats, slug) in fresh {
                     live.entry(slug).or_default().stats = stats;
                 }
+                self.changed();
             }
             Err(e) => tracing::error!(error = %e, "uptime: could not refresh uptime figures"),
         }
@@ -947,6 +1052,100 @@ impl UptimeMonitor {
     pub async fn forget(&self, slug: &str) {
         self.live.write().await.remove(slug);
         self.certs.write().await.remove(slug);
+        self.changed();
+    }
+
+    /// Called after the state behind `overview` changes, never before: a reader that
+    /// saw the old generation can only have read data at least that new.
+    fn changed(&self) -> u64 {
+        self.generation.fetch_add(1, Ordering::Release) + 1
+    }
+
+    /// `detail` serialized, cached per app and window until that app gets a new check
+    /// (or `OVERVIEW_TTL` passes): the dashboard asks for the selected app's detail every
+    /// 30 s, and a 30-day window is its most expensive read.
+    pub async fn detail_json(&self, slug: &str, window: Duration) -> CachedJson {
+        // Read before the data, so a check stored meanwhile shows up as a newer version.
+        let version = self.live.read().await.get(slug).map(|state| state.version);
+        let key = (slug.to_string(), window.as_secs());
+        {
+            let cache = self
+                .detail_cache
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some((_, json)) = cache
+                .get(&key)
+                .filter(|(at, _)| at.0 == version && at.1.elapsed() < OVERVIEW_TTL)
+            {
+                return json.clone();
+            }
+        }
+        let json = CachedJson::new(
+            serde_json::to_vec(&self.detail(slug, window).await).unwrap_or_default(),
+        );
+        let mut cache = self
+            .detail_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if cache.len() >= MAX_CACHED_DETAILS {
+            cache.retain(|_, (at, _)| at.1.elapsed() < OVERVIEW_TTL);
+            if cache.len() >= MAX_CACHED_DETAILS {
+                cache.clear();
+            }
+        }
+        cache.insert(key, ((version, Instant::now()), json.clone()));
+        json
+    }
+
+    /// `overview` of every registered app, serialized. Rebuilt only when an app or a check
+    /// changed since the last build (or after `OVERVIEW_TTL`): the dashboard polls it
+    /// from every open tab, and between rounds of checks every answer is the same.
+    pub async fn overview_json(&self, registry: &AppRegistry) -> CachedJson {
+        self.cached(registry, &self.overview_cache, |overview| {
+            CachedJson::new(serde_json::to_vec(overview).unwrap_or_default())
+        })
+        .await
+    }
+
+    /// `render` applied to the overview's monitors (the `/metrics` text), cached like
+    /// `overview_json`: scrapers ask far more often than a round of checks ends.
+    pub async fn metrics_text(
+        &self,
+        registry: &AppRegistry,
+        render: fn(&[MonitorSummary]) -> String,
+    ) -> actix_web::web::Bytes {
+        self.cached(registry, &self.metrics_cache, |overview| {
+            render(&overview.monitors).into()
+        })
+        .await
+    }
+
+    async fn cached<T: Clone>(
+        &self,
+        registry: &AppRegistry,
+        cache: &OverviewCache<T>,
+        build: impl FnOnce(&Overview) -> T,
+    ) -> T {
+        let mut slot = cache.0.lock().await;
+        // Read before the data, so a change made meanwhile shows up as a newer key.
+        let key = (
+            self.generation.load(Ordering::Acquire),
+            registry.generation(),
+        );
+        if let Some(cached) = slot
+            .as_ref()
+            .filter(|c| c.key == key && c.built.elapsed() < OVERVIEW_TTL)
+        {
+            return cached.value.clone();
+        }
+        let apps = registry.list().await;
+        let value = build(&self.overview(&apps).await);
+        *slot = Some(Cached {
+            key,
+            built: Instant::now(),
+            value: value.clone(),
+        });
+        value
     }
 
     pub async fn overview(&self, apps: &[RegisteredApp]) -> Overview {
@@ -999,26 +1198,31 @@ impl UptimeMonitor {
                 .unwrap_or_default()
         };
         let owned = slug.to_string();
-        let beats = self
+        let read = self
             .db
             .read(move |conn| {
+                // A long window is downsampled by SQLite, a short one read as is; the
+                // incidents only need the down checks and the flips. Either way, a 30-day
+                // window never loads its tens of thousands of checks.
+                let points = if store::more_than(conn, &owned, cutoff, MAX_DETAIL_POINTS)? {
+                    store::buckets(conn, &owned, cutoff, bucket_secs(cutoff, now))?
+                } else {
+                    store::since(conn, &owned, cutoff)?
+                };
                 // From before the window when an outage was already going on at its start,
                 // so that incident is reported from its real beginning.
                 let from = store::window_start(conn, &owned, cutoff)?;
-                store::since(conn, &owned, from)
+                Ok((points, store::incident_beats(conn, &owned, from)?))
             })
             .await;
-        let history = History(match beats {
-            Ok(beats) => beats.into(),
-            Err(e) => {
-                tracing::error!(app = %slug, error = %e, "uptime: could not read the history");
-                VecDeque::new()
-            }
+        let (beats, incident_beats) = read.unwrap_or_else(|e| {
+            tracing::error!(app = %slug, error = %e, "uptime: could not read the history");
+            (Vec::new(), Vec::new())
         });
         MonitorDetail {
-            beats: history.downsampled(cutoff, now, MAX_DETAIL_POINTS),
+            beats,
             events,
-            incidents: IncidentReport::build(history.0.iter(), cutoff, now, MAX_INCIDENTS),
+            incidents: IncidentReport::build(incident_beats.iter(), cutoff, now, MAX_INCIDENTS),
         }
     }
 
@@ -1348,6 +1552,279 @@ mod tests {
             monitor.overview(&[registered("app")]).await.monitors[0]
                 .recent
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn events_from_the_flip_index_match_walking_the_history() {
+        // A small deterministic generator: the same histories on every run.
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        for case in 0..40 {
+            let db = db_with(&["app"]).await;
+            let len = 1 + next(400);
+            // Runs of random length and status, so some apps flip a lot and some never.
+            let mut beats = Vec::new();
+            let mut status = Status::Up;
+            for i in 0..len {
+                if next(10) == 0 {
+                    status = [Status::Up, Status::Degraded, Status::Down]
+                        [usize::try_from(next(3)).unwrap()];
+                }
+                beats.push(beat(1_000 + i * 60, status, Some(100)));
+            }
+            // Mostly in order, like rounds of checks; some cases shuffled, like an import
+            // of overlapping files, with a few duplicates thrown in.
+            if case % 3 == 0 {
+                for i in (1..beats.len()).rev() {
+                    let j = usize::try_from(next(u64::try_from(i).unwrap() + 1)).unwrap();
+                    beats.swap(i, j);
+                }
+                let dupes: Vec<Heartbeat> = beats.iter().step_by(17).cloned().collect();
+                beats.extend(dupes);
+            }
+            store_beats(&db, "app", beats).await;
+            // Prune a prefix in some cases, as the retention does.
+            if case % 2 == 1 {
+                let cutoff = 1_000 + next(len) * 60;
+                db.write(move |tx| {
+                    tx.execute(
+                        "DELETE FROM heartbeats WHERE slug = 'app' AND at < ?1",
+                        [i64::try_from(cutoff).unwrap()],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            }
+            for max in [1, 5, 30, 1000] {
+                let (indexed, walked) = db
+                    .read(move |conn| {
+                        Ok((
+                            store::events(conn, "app", max)?,
+                            store::events_by_walking(conn, "app", max)?,
+                        ))
+                    })
+                    .await
+                    .unwrap();
+                let key =
+                    |e: &Vec<Heartbeat>| e.iter().map(|b| (b.at, b.status)).collect::<Vec<_>>();
+                assert_eq!(key(&indexed), key(&walked), "case {case}, max {max}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_detail_read_by_sqlite_matches_the_whole_history() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let now = 1_000_000;
+        for case in 0..20 {
+            let db = db_with(&["app"]).await;
+            // Irregular spacing, every status, ties for the worst within a bucket,
+            // missing latencies and an outage going on across the window's start.
+            let mut beats = Vec::new();
+            let mut at = now - 200_000 - next(5_000);
+            let mut status = Status::Up;
+            while at < now {
+                if next(8) == 0 {
+                    status = [Status::Up, Status::Degraded, Status::Down]
+                        [usize::try_from(next(3)).unwrap()];
+                }
+                let latency = (next(9) != 0).then(|| 20 + u32::try_from(next(2_000)).unwrap());
+                let mut b = beat(at, status, latency);
+                b.message = format!("m{}", next(4));
+                beats.push(b);
+                at += 1 + next(120);
+            }
+            store_beats(&db, "app", beats.clone()).await;
+            let history = History(beats.into());
+            let cutoff = now - 150_000 - next(10_000);
+
+            let (points, incident_beats) = db
+                .read(move |conn| {
+                    let from = store::window_start(conn, "app", cutoff)?;
+                    Ok((
+                        store::buckets(conn, "app", cutoff, bucket_secs(cutoff, now))?,
+                        store::incident_beats(conn, "app", from)?,
+                    ))
+                })
+                .await
+                .unwrap();
+            let key = |v: &[Heartbeat]| {
+                v.iter()
+                    .map(|b| (b.at, b.status, b.latency_ms, b.message.clone()))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                key(&points),
+                key(&history.downsampled(cutoff, now, MAX_DETAIL_POINTS)),
+                "case {case}: buckets"
+            );
+            let all = IncidentReport::build(history.0.iter(), cutoff, now, MAX_INCIDENTS);
+            let read = IncidentReport::build(incident_beats.iter(), cutoff, now, MAX_INCIDENTS);
+            assert_eq!(read.incidents, all.incidents, "case {case}: incidents");
+            assert_eq!(
+                (read.mttr_secs, read.total_down_secs),
+                (all.mttr_secs, all.total_down_secs),
+                "case {case}: statistics"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stats_counted_by_sqlite_match_the_checks() {
+        let db = db_with(&["api"]).await;
+        let now = unix_now();
+        // Every status, missing latencies, and checks just outside the 24 h window.
+        let beats: Vec<Heartbeat> = (0..3000_u32)
+            .map(|i| {
+                let status = match i % 7 {
+                    0 => Status::Down,
+                    1 | 2 => Status::Degraded,
+                    _ => Status::Up,
+                };
+                let latency = (i % 11 != 0).then_some(50 + i % 900);
+                beat(now - u64::from(i) * 37, status, latency)
+            })
+            .collect();
+        store_beats(&db, "api", beats.clone()).await;
+        let stats = db
+            .read(move |conn| store::stats(conn, "api", now))
+            .await
+            .unwrap();
+        let mut sorted = beats;
+        sorted.sort_by_key(|b| b.at);
+        let history = History(sorted.into());
+        let cutoff = now - DAY_SECS;
+        assert_eq!(stats.uptime_24h, history.uptime_pct(cutoff));
+        assert_eq!(stats.avg_latency_24h_ms, history.avg_latency_ms(cutoff));
+        assert!(stats.uptime_24h.is_some() && stats.avg_latency_24h_ms.is_some());
+
+        let empty = db_with(&["new"]).await;
+        let none = empty
+            .read(move |conn| store::stats(conn, "new", now))
+            .await
+            .unwrap();
+        assert_eq!((none.uptime_24h, none.avg_latency_24h_ms), (None, None));
+    }
+
+    #[tokio::test]
+    async fn the_cached_detail_is_per_app_and_follows_its_checks() {
+        let db = db_with(&["api", "web"]).await;
+        let monitor = UptimeMonitor::load(db, policy(), outbound(), Notifiers::default())
+            .await
+            .unwrap();
+        let window = Duration::from_hours(6);
+        let first = monitor.detail_json("api", window).await;
+        let again = monitor.detail_json("api", window).await;
+        assert_eq!(
+            first.plain.as_ptr(),
+            again.plain.as_ptr(),
+            "served from the cache"
+        );
+
+        monitor
+            .record("web", beat(unix_now(), Status::Up, Some(5)))
+            .await;
+        let other_app = monitor.detail_json("api", window).await;
+        assert_eq!(
+            first.plain.as_ptr(),
+            other_app.plain.as_ptr(),
+            "another app's check doesn't touch it"
+        );
+
+        monitor
+            .record("api", beat(unix_now(), Status::Down, None))
+            .await;
+        let fresh: serde_json::Value =
+            serde_json::from_slice(&monitor.detail_json("api", window).await.plain).unwrap();
+        assert_eq!(
+            fresh["beats"].as_array().unwrap().len(),
+            1,
+            "its own check rebuilds it"
+        );
+        assert_eq!(fresh["incidents"]["incidents"].as_array().unwrap().len(), 1);
+    }
+
+    /// The /metrics text, as a string.
+    async fn metrics_of(monitor: &UptimeMonitor, registry: &AppRegistry) -> String {
+        let text = monitor
+            .metrics_text(registry, crate::routes::metrics::render)
+            .await;
+        String::from_utf8(text.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_cached_overview_follows_new_checks_and_app_changes() {
+        let db = db_with(&["api"]).await;
+        let registry = AppRegistry::load(db.clone()).await.unwrap();
+        let monitor = UptimeMonitor::load(db, policy(), outbound(), Notifiers::default())
+            .await
+            .unwrap();
+        let read = |json: CachedJson| -> serde_json::Value {
+            let mut unzipped = Vec::new();
+            std::io::Read::read_to_end(
+                &mut flate2::read::GzDecoder::new(&json.gzip[..]),
+                &mut unzipped,
+            )
+            .unwrap();
+            assert_eq!(
+                unzipped, json.plain,
+                "both encodings carry the same overview"
+            );
+            serde_json::from_slice(&json.plain).unwrap()
+        };
+
+        let empty = monitor.overview_json(&registry).await;
+        assert_eq!(
+            read(empty.clone())["monitors"][0]["recent"],
+            serde_json::json!([])
+        );
+        let again = monitor.overview_json(&registry).await;
+        assert_eq!(
+            empty.plain.as_ptr(),
+            again.plain.as_ptr(),
+            "unchanged state is served from the cache"
+        );
+
+        monitor
+            .record("api", beat(unix_now(), Status::Down, None))
+            .await;
+        let after_check = read(monitor.overview_json(&registry).await);
+        assert_eq!(
+            after_check["monitors"][0]["status"], "down",
+            "a check rebuilds it"
+        );
+
+        registry.set_paused("api", true, None).await.unwrap();
+        let after_pause = read(monitor.overview_json(&registry).await);
+        assert_eq!(
+            after_pause["monitors"][0]["paused"], true,
+            "an app change rebuilds it"
+        );
+
+        // /metrics has its own cache, kept by the same generations.
+        let paused = metrics_of(&monitor, &registry).await;
+        assert!(
+            paused.contains(r#"heartbeat_paused{app="api",name="api"} 1"#),
+            "{paused}"
+        );
+        registry.set_paused("api", false, None).await.unwrap();
+        let resumed = metrics_of(&monitor, &registry).await;
+        assert!(
+            resumed.contains(r#"heartbeat_paused{app="api",name="api"} 0"#),
+            "{resumed}"
         );
     }
 

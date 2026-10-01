@@ -211,6 +211,9 @@ pub struct Config {
     pub chat_admins: Vec<String>,
     /// Days audit log entries are kept (`AUDIT_RETENTION_DAYS`); 0 = forever.
     pub audit_retention_days: u32,
+    /// MB of the database read through a memory map (`DATABASE_MMAP_MB`); 0 = off. See
+    /// `Db::open_with`.
+    pub database_mmap_mb: u32,
 }
 
 impl Config {
@@ -311,6 +314,7 @@ impl Config {
             chat_command,
             chat_admins,
             audit_retention_days: parsed("AUDIT_RETENTION_DAYS", 365)?,
+            database_mmap_mb: parsed("DATABASE_MMAP_MB", 0)?,
         })
     }
 }

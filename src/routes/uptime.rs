@@ -10,7 +10,7 @@ use crate::{
     auth,
     i18n::I18n,
     registry::AppRegistry,
-    uptime::UptimeMonitor,
+    uptime::{CachedJson, UptimeMonitor},
 };
 
 /// Longest chart window the detail endpoint serves -- matches the monitor's retention.
@@ -18,6 +18,19 @@ const MAX_WINDOW_HOURS: u64 = 30 * 24;
 
 fn unauthorized() -> HttpResponse {
     HttpResponse::Unauthorized().json(serde_json::json!({ "error": "unauthorized" }))
+}
+
+/// Whether the client takes a gzipped body (`Accept-Encoding: gzip`, not `gzip;q=0`).
+fn accepts_gzip(req: &HttpRequest) -> bool {
+    req.headers()
+        .get_all(header::ACCEPT_ENCODING)
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .any(|coding| {
+            let mut parts = coding.split(';').map(str::trim);
+            parts.next().is_some_and(|c| c.eq_ignore_ascii_case("gzip"))
+                && parts.all(|p| p.replace(' ', "") != "q=0")
+        })
 }
 
 /// GET /api/uptime -- every registered app's current status, uptime and recent heartbeats.
@@ -29,8 +42,20 @@ pub async fn overview(
     if auth::session_token(&req).is_none() {
         return unauthorized();
     }
-    let apps = registry.list().await;
-    HttpResponse::Ok().json(monitor.overview(&apps).await)
+    json_response(&req, monitor.overview_json(&registry).await)
+}
+
+/// A cached JSON answer, gzipped for the clients that take it.
+fn json_response(req: &HttpRequest, json: CachedJson) -> HttpResponse {
+    let mut resp = HttpResponse::Ok();
+    resp.content_type("application/json")
+        .insert_header((header::VARY, "Accept-Encoding"));
+    if accepts_gzip(req) {
+        resp.insert_header((header::CONTENT_ENCODING, "gzip"))
+            .body(json.gzip)
+    } else {
+        resp.body(json.plain)
+    }
 }
 
 #[derive(Deserialize)]
@@ -58,9 +83,10 @@ pub async fn detail(
         }));
     }
     let hours = query.hours.unwrap_or(6).clamp(1, MAX_WINDOW_HOURS);
-    HttpResponse::Ok().json(
+    json_response(
+        &req,
         monitor
-            .detail(&slug, Duration::from_secs(hours * 3600))
+            .detail_json(&slug, Duration::from_secs(hours * 3600))
             .await,
     )
 }

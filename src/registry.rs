@@ -6,6 +6,7 @@
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
 
 use crate::db::{Db, DbError};
@@ -376,6 +377,9 @@ pub struct AppRegistry {
     db: Db,
     /// Every app, in registration order.
     apps: RwLock<Vec<RegisteredApp>>,
+    /// Bumped after every change to `apps`, while it's still locked: whoever reads the
+    /// generation and then the list never pairs a newer generation with older apps.
+    generation: AtomicU64,
 }
 
 /// The `settings` JSON column: everything about an app that's only read together with it.
@@ -542,7 +546,17 @@ impl AppRegistry {
         Ok(Self {
             db,
             apps: RwLock::new(apps),
+            generation: AtomicU64::new(0),
         })
+    }
+
+    /// Changes whenever any app does (see `generation` on the struct).
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    fn changed(&self) {
+        self.generation.fetch_add(1, Ordering::Release);
     }
 
     /// Writes `app` to the database; the caller updates the in-memory copy after.
@@ -607,6 +621,7 @@ impl AppRegistry {
         };
         app.apply(settings);
         apps.push(self.save(app).await?);
+        self.changed();
         Ok(slug)
     }
 
@@ -625,6 +640,7 @@ impl AppRegistry {
         let mut changed = app.clone();
         change(&mut changed)?;
         *app = self.save(changed).await?;
+        self.changed();
         Ok(())
     }
 
@@ -686,6 +702,7 @@ impl AppRegistry {
                 *slot = app;
             }
         }
+        self.changed();
         Ok(slugs)
     }
 
@@ -720,6 +737,7 @@ impl AppRegistry {
             })
             .await?;
         apps.retain(|a| a.slug != slug);
+        self.changed();
         Ok(())
     }
 

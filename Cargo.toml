@@ -35,6 +35,9 @@ rusqlite = { version = "0.40", default-features = false, features = [
     "backup",
     "serde_json",
 ] }
+# The dashboard overview is gzipped once per change (see uptime::overview_json), not per
+# request; pure-Rust backend.
+flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
 # Chat commands: Slack signs requests with HMAC-SHA256, Discord with Ed25519.
 hmac = "0.13"
 sha2 = "0.11"
