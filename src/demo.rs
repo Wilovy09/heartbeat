@@ -372,6 +372,89 @@ pub fn logs(url: &Url, stream: Option<&str>, lines: Option<&str>) -> Option<Valu
     }))
 }
 
+/// What a demo app's system URL (`https://logs.heartbeat.invalid/<slug>/system`) would
+/// answer: a server that matches the app's profile (the down one out of memory, the slow
+/// one busy), drifting slowly with the clock. `None` for any other URL.
+pub fn system(url: &Url) -> Option<crate::system::Snapshot> {
+    use crate::system::{Cpu, Disk, Memory, Process, Snapshot, Swap};
+    const GB: u64 = 1 << 30;
+    if !url.host_str()?.ends_with(DEMO_HOST_SUFFIX) {
+        return None;
+    }
+    let slug = url.path_segments()?.next()?.to_string();
+    let minute = unix_now() / 60;
+    let seed = slug
+        .bytes()
+        .fold(minute, |h, b| h.wrapping_mul(31).wrapping_add(u64::from(b)));
+    let mut rng = Rng::new(seed);
+    let jitter = |rng: &mut Rng, spread: u64| {
+        #[allow(clippy::cast_precision_loss)]
+        let value = rng.below(spread * 2 + 1) as f64 - spread as f64;
+        value
+    };
+    let (cpu, memory_pct, disk_pct) = match Profile::for_slug(&slug).at(0) {
+        Profile::Steady | Profile::Recovered => (18.0, 46.0, 41.0),
+        Profile::Flaky => (if minute % 6 < 2 { 92.0 } else { 35.0 }, 62.0, 58.0),
+        Profile::Slow => (88.0, 71.0, 66.0),
+        Profile::Down => (64.0, 96.0, 93.0),
+    };
+    let memory_total = 4 * GB;
+    let disk_total = 50 * GB;
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let share = |total: u64, pct: f64| (total as f64 * pct.clamp(0.0, 100.0) / 100.0) as u64;
+    let cpu = (cpu + jitter(&mut rng, 6)).clamp(0.0, 100.0);
+    let memory_used = share(memory_total, memory_pct + jitter(&mut rng, 2));
+    let names = [
+        "api",
+        "postgres",
+        "nginx",
+        "worker",
+        "redis",
+        "node_exporter",
+    ];
+    let processes = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            #[allow(clippy::cast_precision_loss)]
+            let weight = (names.len() - i) as f64;
+            Process {
+                pid: 1000 + u32::try_from(i).unwrap_or(0) * 37,
+                name: (*name).to_string(),
+                cpu_pct: (cpu * weight / 12.0 + jitter(&mut rng, 2)).max(0.0),
+                memory_bytes: memory_used / (2 + u64::try_from(i).unwrap_or(0) * 2),
+            }
+        })
+        .collect();
+    Some(Snapshot {
+        cpu: Cpu {
+            usage_pct: cpu,
+            cores: Some(2),
+            load: Some([cpu / 50.0, cpu / 60.0, cpu / 70.0]),
+        },
+        memory: Memory {
+            total_bytes: memory_total,
+            used_bytes: memory_used,
+            available_bytes: Some(memory_total - memory_used),
+        },
+        swap: Some(Swap {
+            total_bytes: 2 * GB,
+            used_bytes: share(2 * GB, (memory_pct - 60.0).max(0.0) * 2.0),
+        }),
+        disks: vec![Disk {
+            mount: "/".to_string(),
+            total_bytes: disk_total,
+            used_bytes: share(disk_total, disk_pct),
+        }],
+        processes,
+        uptime_secs: Some(12 * 86_400 + minute % 86_400),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

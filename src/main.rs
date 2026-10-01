@@ -19,6 +19,7 @@ mod password;
 mod registry;
 mod routes;
 mod security;
+mod system;
 mod theme;
 mod token;
 mod uptime;
@@ -121,15 +122,7 @@ async fn run() -> Result<(), StartupError> {
 
     let templates =
         std::sync::Arc::new(alert_templates::TemplateStore::load(db.clone(), &i18n).await?);
-    let alerter = Alerter::new(AlertSettings {
-        webhook_urls: cfg.alert_webhook_urls.clone(),
-        on_degraded: cfg.alert_on_degraded,
-        public_url: cfg.public_url.clone(),
-        mentions: cfg.alert_mentions.clone(),
-        templates: Some(templates),
-        remind_after: Some(Duration::from_secs(u64::from(cfg.alert_remind_mins) * 60)),
-        lang: cfg.app_lang,
-    })?;
+    let alerter = Alerter::new(alert_settings(&cfg, templates))?;
 
     let audit = audit::AuditLog::new(db.clone(), cfg.audit_retention_days);
     audit.spawn_pruning();
@@ -177,6 +170,13 @@ async fn run() -> Result<(), StartupError> {
     let notices_data = web::Data::new(notices);
     let themes_data = web::Data::new(themes);
     let audit_data = web::Data::new(audit);
+    let system_data = start_system(
+        &cfg_data,
+        &db,
+        &outbound_data,
+        &alerter_data,
+        &registry_data,
+    );
 
     chat::discord::spawn_registration(&cfg_data, &i18n_data);
     tokio::spawn(
@@ -202,12 +202,64 @@ async fn run() -> Result<(), StartupError> {
             .app_data(notices_data.clone())
             .app_data(themes_data.clone())
             .app_data(audit_data.clone())
+            .app_data(system_data.clone())
             .configure(routes::configure)
     })
     .bind((host, port))?
     .run()
     .await?;
     Ok(())
+}
+
+/// Where alerts go and how they read, from the configuration.
+fn alert_settings(
+    cfg: &Config,
+    templates: std::sync::Arc<alert_templates::TemplateStore>,
+) -> AlertSettings {
+    AlertSettings {
+        webhook_urls: cfg.alert_webhook_urls.clone(),
+        on_degraded: cfg.alert_on_degraded,
+        public_url: cfg.public_url.clone(),
+        mentions: cfg.alert_mentions.clone(),
+        templates: Some(templates),
+        remind_after: Some(Duration::from_secs(u64::from(cfg.alert_remind_mins) * 60)),
+        lang: cfg.app_lang,
+    }
+}
+
+/// Starts sampling CPU, memory and disk (this server's and the apps' system URLs).
+fn start_system(
+    cfg: &Config,
+    db: &db::Db,
+    outbound: &Outbound,
+    alerter: &Alerter,
+    registry: &web::Data<AppRegistry>,
+) -> web::Data<system::SystemMonitor> {
+    let c = &cfg.system;
+    let policy = system::SystemPolicy {
+        interval: Duration::from_secs(c.interval_secs),
+        retention: Duration::from_hours(24 * u64::from(c.retention_days)),
+        thresholds: system::Thresholds {
+            cpu_pct: c.alert_cpu_pct,
+            memory_pct: c.alert_memory_pct,
+            disk_pct: c.alert_disk_pct,
+            sustain: Duration::from_secs(u64::from(c.alert_sustain_mins) * 60),
+        },
+    };
+    let monitor = web::Data::new(system::SystemMonitor::new(
+        db.clone(),
+        policy,
+        outbound.clone(),
+        alerter.clone(),
+        cfg.admin_logs_key.clone(),
+    ));
+    tokio::spawn(
+        monitor
+            .clone()
+            .into_inner()
+            .run(registry.clone().into_inner()),
+    );
+    monitor
 }
 
 /// One line saying how this instance is set up.

@@ -27,6 +27,9 @@ pub struct AppForm {
     name: String,
     logs_url: String,
     health_url: String,
+    /// Blank = the app's resources aren't sampled.
+    #[serde(default)]
+    system_url: String,
     #[serde(default)]
     degraded_after_ms: String,
     #[serde(default)]
@@ -96,6 +99,7 @@ impl AppForm {
         Ok(AppSettings {
             name: self.name.clone(),
             logs_url: self.logs_url.clone(),
+            system_url: self.system_url.clone(),
             health_url: self.health_url.clone(),
             degraded_after_ms,
             expect_body: Some(self.expect_body.clone()),
@@ -127,6 +131,12 @@ impl AppForm {
         outbound
             .check_health(&self.health_url)
             .map_err(|e| field_error("err.label_health", &e))?;
+        // Sampled with ADMIN_LOGS_KEY, so the same policy as the logs URL.
+        if !self.system_url.trim().is_empty() {
+            outbound
+                .check(&self.system_url)
+                .map_err(|e| field_error("err.label_system", &e))?;
+        }
         Ok(())
     }
 }

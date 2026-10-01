@@ -121,7 +121,10 @@ impl crate::i18n::Localize for RegistryError {
         match self {
             Self::EmptyName => i18n.text("err.empty_name", &[]),
             Self::NameWithoutAlphanumerics => i18n.text("err.name_no_alnum", &[]),
-            Self::InvalidUrl(label) => i18n.text("err.invalid_url", &[("label", label)]),
+            Self::InvalidUrl(label) => i18n.text(
+                "err.invalid_url",
+                &[("label", &i18n.text(&format!("err.label_{label}"), &[]))],
+            ),
             Self::IntervalOutOfRange => i18n.text(
                 "err.interval",
                 &[
@@ -205,6 +208,10 @@ pub struct RegisteredApp {
     /// This app's own mentions (`ALERT_MENTIONS` syntax), added to the global ones.
     #[serde(default)]
     pub alert_mentions: Vec<String>,
+    /// Endpoint answering the app's CPU, memory and disk (see `system`); `None` = not
+    /// sampled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_url: Option<String>,
 }
 
 /// What an admin sets when registering or editing an app. The slug and embed token are
@@ -224,6 +231,8 @@ pub struct AppSettings {
     pub headers: Vec<CheckHeader>,
     pub alert_webhooks: Vec<String>,
     pub alert_mentions: Vec<String>,
+    /// Blank = the app's resources aren't sampled.
+    pub system_url: String,
 }
 
 /// `AppSettings` after `normalized`: trimmed, validated, blanks turned into `None`.
@@ -240,6 +249,7 @@ struct ValidSettings {
     headers: Vec<CheckHeader>,
     alert_webhooks: Vec<String>,
     alert_mentions: Vec<String>,
+    system_url: Option<String>,
 }
 
 impl AppSettings {
@@ -253,6 +263,10 @@ impl AppSettings {
         let health_url = self.health_url.trim().to_string();
         if let Some(url) = &logs_url {
             validate_url(url, "logs", &["http://", "https://"])?;
+        }
+        let system_url = Some(self.system_url.trim().to_string()).filter(|u| !u.is_empty());
+        if let Some(url) = &system_url {
+            validate_url(url, "system", &["http://", "https://"])?;
         }
         validate_url(&health_url, "health", &["http://", "https://", "tcp://"])?;
         let expect_body = self
@@ -313,6 +327,7 @@ impl AppSettings {
             headers: self.headers,
             alert_webhooks,
             alert_mentions,
+            system_url,
         })
     }
 }
@@ -358,6 +373,7 @@ impl RegisteredApp {
         self.headers = settings.headers;
         self.alert_webhooks = settings.alert_webhooks;
         self.alert_mentions = settings.alert_mentions;
+        self.system_url = settings.system_url;
     }
 
     /// Constant-time comparison, so response timing doesn't leak how much of a guessed
@@ -403,6 +419,8 @@ struct StoredSettings {
     alert_webhooks: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     alert_mentions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    system_url: Option<String>,
 }
 
 impl From<&RegisteredApp> for StoredSettings {
@@ -417,6 +435,7 @@ impl From<&RegisteredApp> for StoredSettings {
             headers: app.headers.clone(),
             alert_webhooks: app.alert_webhooks.clone(),
             alert_mentions: app.alert_mentions.clone(),
+            system_url: app.system_url.clone(),
         }
     }
 }
@@ -449,6 +468,7 @@ fn app_from_row(row: &rusqlite::Row<'_>) -> std::result::Result<RegisteredApp, D
         headers: settings.headers,
         alert_webhooks: settings.alert_webhooks,
         alert_mentions: settings.alert_mentions,
+        system_url: settings.system_url,
     })
 }
 
@@ -618,6 +638,7 @@ impl AppRegistry {
             headers: Vec::new(),
             alert_webhooks: Vec::new(),
             alert_mentions: Vec::new(),
+            system_url: None,
         };
         app.apply(settings);
         apps.push(self.save(app).await?);
@@ -732,6 +753,9 @@ impl AppRegistry {
         let owned = slug.to_string();
         self.db
             .write(move |tx| {
+                // Samples aren't tied to `apps` by a foreign key (Heartbeat's own aren't
+                // an app's), so they go by hand.
+                tx.execute("DELETE FROM system_samples WHERE source = ?1", [&owned])?;
                 tx.execute("DELETE FROM apps WHERE slug = ?1", [owned])?;
                 Ok(())
             })

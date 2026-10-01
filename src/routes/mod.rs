@@ -11,6 +11,7 @@ pub mod metrics;
 pub mod notices;
 pub mod settings;
 pub mod status;
+pub mod system;
 pub mod uptime;
 
 use actix_web::web;
@@ -66,6 +67,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/notices", web::post().to(notices::create))
         .route("/notices/{id}", web::post().to(notices::update))
         .route("/notices/{id}/delete", web::post().to(notices::delete))
+        .route("/api/system", web::get().to(system::host))
+        .route("/api/system/{slug}", web::get().to(system::app))
         .route("/audit", web::get().to(audit::show))
         .route("/audit/export", web::get().to(audit::export))
         .route(

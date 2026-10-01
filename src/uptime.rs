@@ -529,6 +529,7 @@ impl Live {
             name: app.name.clone(),
             health_url: app.health_url.clone(),
             has_logs: app.logs_url.is_some(),
+            has_system: app.system_url.is_some(),
             paused: app.paused,
             paused_at: app.paused_at,
             paused_until: app.paused_until,
@@ -555,6 +556,8 @@ pub struct MonitorSummary {
     pub health_url: Option<String>,
     /// `false` for monitor-only apps (no logs endpoint).
     pub has_logs: bool,
+    /// Whether the app has a system URL (CPU, memory, disk; see `system`).
+    pub has_system: bool,
     /// Paused apps aren't probed; `status` is then the last reading before the pause.
     pub paused: bool,
     /// Unix seconds when the current pause began.

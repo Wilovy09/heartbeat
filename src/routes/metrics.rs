@@ -134,6 +134,7 @@ mod tests {
             name: "API \"v2\"".into(),
             health_url: None,
             has_logs: false,
+            has_system: false,
             paused: false,
             paused_at: None,
             paused_until: None,

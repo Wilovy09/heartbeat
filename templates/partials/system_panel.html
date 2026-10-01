@@ -1,0 +1,96 @@
+{# The body of a system panel, inside an element with x-data="systemPanel(...)". #}
+<div class="system-head">
+  <div class="system-title">
+    <h2 class="bay-title" style="margin: 0" x-text="title"></h2>
+    <span class="system-at mono" x-show="readAt()" x-text="T('js.system_read_at', {when: fmtDateTime(readAt())})"></span>
+  </div>
+  <div class="segmented" role="group" aria-label="{{ t(k="dash.range") }}">
+    <template x-for="r in SYSTEM_RANGES" :key="r.hours">
+      <button type="button" :aria-pressed="hours === r.hours" @click="setHours(r.hours)" x-text="r.label"></button>
+    </template>
+  </div>
+</div>
+
+<p class="empty" x-show="loaded && !snap() && !error && !(reading && reading.error)">{{ t(k="system.waiting") }}</p>
+<div class="error-box" x-show="error" x-text="T('js.system_load_failed', {error})"></div>
+<div class="error-box" x-show="reading && reading.error" x-text="T('js.system_read_failed', {error: reading && reading.error})"></div>
+
+<template x-if="snap()">
+  <div class="system-body">
+    <div class="system-meters">
+      <div class="meter">
+        <div class="readout-label">CPU</div>
+        <div class="readout-value mono" :class="'st-text-' + level(cpuPct())" x-text="fmtPct(cpuPct())"></div>
+        <div class="meter-bar"><span :class="'lvl-' + level(cpuPct())" :style="{ width: (cpuPct() || 0) + '%' }"></span></div>
+        <div class="meter-note mono" x-text="T('js.system_load', {load: fmtLoad(), cores: snap().cpu.cores || '—'})"></div>
+      </div>
+      <div class="meter">
+        <div class="readout-label">{{ t(k="system.memory") }}</div>
+        <div class="readout-value mono" :class="'st-text-' + level(memoryPct())" x-text="fmtPct(memoryPct())"></div>
+        <div class="meter-bar"><span :class="'lvl-' + level(memoryPct())" :style="{ width: (memoryPct() || 0) + '%' }"></span></div>
+        <div class="meter-note mono" x-text="fmtBytes(snap().memory.used_bytes) + ' / ' + fmtBytes(snap().memory.total_bytes)"></div>
+        <div class="meter-note mono" x-show="snap().swap" x-text="snap().swap ? T('js.system_swap', {used: fmtBytes(snap().swap.used_bytes), total: fmtBytes(snap().swap.total_bytes)}) : ''"></div>
+      </div>
+      <div class="meter">
+        <div class="readout-label">{{ t(k="system.disk") }} <span class="mono meter-mount" x-text="fullestDisk() ? fullestDisk().mount : ''"></span></div>
+        <div class="readout-value mono" :class="'st-text-' + level(diskPct())" x-text="fmtPct(diskPct())"></div>
+        <div class="meter-bar"><span :class="'lvl-' + level(diskPct())" :style="{ width: (diskPct() || 0) + '%' }"></span></div>
+        <div class="meter-note mono" x-text="fullestDisk() ? fmtBytes(fullestDisk().used_bytes) + ' / ' + fmtBytes(fullestDisk().total_bytes) : '—'"></div>
+      </div>
+      <div class="meter">
+        <div class="readout-label">{{ t(k="system.uptime") }}</div>
+        <div class="readout-value mono" x-text="fmtUptime()"></div>
+      </div>
+    </div>
+
+    <div class="system-chart" x-init="observe($el)">
+      <div x-html="chartSvg()"></div>
+      <div class="system-legend">
+        <span><i style="background: var(--info)"></i>CPU</span>
+        <span><i style="background: var(--warn)"></i>{{ t(k="system.memory") }}</span>
+        <span><i class="dashed" style="border-color: var(--ink-3)"></i>{{ t(k="system.disk") }}</span>
+      </div>
+    </div>
+
+    <template x-if="snap().disks.length > 1">
+      <table class="system-table">
+        <thead><tr><th>{{ t(k="system.disk") }}</th><th class="num">{{ t(k="system.used") }}</th><th class="num">{{ t(k="system.total") }}</th><th class="num">%</th></tr></thead>
+        <tbody>
+          <template x-for="d in snap().disks" :key="d.mount">
+            <tr>
+              <td class="mono" x-text="d.mount"></td>
+              <td class="num mono" x-text="fmtBytes(d.used_bytes)"></td>
+              <td class="num mono" x-text="fmtBytes(d.total_bytes)"></td>
+              <td class="num mono" :class="'st-text-' + level(pct(d.used_bytes, d.total_bytes))" x-text="fmtPct(pct(d.used_bytes, d.total_bytes))"></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </template>
+
+    <details class="system-processes" x-show="snap().processes.length">
+      <summary>{{ t(k="system.processes") }}</summary>
+      <table class="system-table">
+        <thead>
+          <tr>
+            <th>PID</th>
+            <th>{{ t(k="system.process") }}</th>
+            <th class="num"><button type="button" class="sort" :aria-pressed="sortBy === 'cpu'" @click="sortBy = 'cpu'">CPU %</button></th>
+            <th class="num"><button type="button" class="sort" :aria-pressed="sortBy === 'memory'" @click="sortBy = 'memory'">{{ t(k="system.memory") }}</button></th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="p in processes()" :key="p.pid">
+            <tr>
+              <td class="mono muted" x-text="p.pid"></td>
+              <td class="mono" x-text="p.name"></td>
+              <td class="num mono" x-text="p.cpu_pct.toFixed(1)"></td>
+              <td class="num mono" x-text="fmtBytes(p.memory_bytes)"></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+      <p class="hint">{{ t(k="system.processes_hint") }}</p>
+    </details>
+  </div>
+</template>

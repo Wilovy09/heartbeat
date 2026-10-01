@@ -194,6 +194,9 @@ pub async fn interactions(
                 audit: req
                     .app_data::<web::Data<crate::audit::AuditLog>>()
                     .map(web::Data::get_ref),
+                system: req
+                    .app_data::<web::Data<crate::system::SystemMonitor>>()
+                    .map(web::Data::get_ref),
             };
             let parsed = interaction
                 .subcommand()

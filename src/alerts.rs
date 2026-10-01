@@ -266,6 +266,23 @@ pub enum MassOutage {
     Ended { total: usize },
 }
 
+/// A resource (CPU, memory, disk) of an app's server or of Heartbeat's own crossing its
+/// threshold (`started`) or coming back under it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResourceAlert {
+    /// Empty for Heartbeat's own host.
+    pub slug: String,
+    pub name: String,
+    pub route: AppRoute,
+    /// `cpu`, `memory` or `disk`.
+    pub resource: &'static str,
+    /// The disk's mount point, for `disk`.
+    pub detail: Option<String>,
+    pub pct: f64,
+    pub threshold: u8,
+    pub started: bool,
+}
+
 #[derive(Serialize)]
 struct GenericEvent<'a> {
     event: &'static str,
@@ -712,6 +729,76 @@ impl Alerter {
         for hook in &self.webhooks {
             let payload = self.mass_payload(hook.flavor, outage);
             self.deliver(hook.clone(), payload, "mass-outage".to_string());
+        }
+    }
+
+    /// Sends a resource alert: to the global webhooks, and the app's own for an app.
+    /// Crossing the threshold pages the mentions, like a down alert; going back under
+    /// it doesn't.
+    pub fn send_resource(&self, alert: &ResourceAlert) {
+        for hook in self.destinations(&alert.route) {
+            let payload = self.resource_payload(hook.flavor, alert);
+            self.deliver(hook, payload, format!("{}:{}", alert.slug, alert.resource));
+        }
+    }
+
+    fn resource_text(&self, flavor: Flavor, alert: &ResourceAlert) -> String {
+        let link = self.dashboard_url(&alert.slug).unwrap_or_default();
+        let mut resource = self
+            .i18n
+            .text(&format!("alert.resource_{}", alert.resource), &[]);
+        if let Some(mount) = &alert.detail {
+            resource = format!("{resource} {mount}");
+        }
+        let pct = format!("{:.0} %", alert.pct);
+        let text = if alert.started {
+            let mut mentions = self.mentions.clone();
+            for mention in alert.route.mentions() {
+                if !mentions.contains(&mention) {
+                    mentions.push(mention);
+                }
+            }
+            let mentions: Vec<String> = mentions.iter().filter_map(|m| m.render(flavor)).collect();
+            self.i18n.text(
+                "alert.resource_high",
+                &[
+                    ("mentions", &mentions.join(" ")),
+                    ("app", &alert.name),
+                    ("resource", &resource),
+                    ("pct", &pct),
+                    ("threshold", &format!("{} %", alert.threshold)),
+                    ("link", &link),
+                ],
+            )
+        } else {
+            self.i18n.text(
+                "alert.resource_ok",
+                &[
+                    ("app", &alert.name),
+                    ("resource", &resource),
+                    ("pct", &pct),
+                    ("link", &link),
+                ],
+            )
+        };
+        alert_templates::render(&text, &TemplateVars::default())
+    }
+
+    fn resource_payload(&self, flavor: Flavor, alert: &ResourceAlert) -> serde_json::Value {
+        let text = self.resource_text(flavor, alert);
+        match flavor {
+            Flavor::Slack => serde_json::json!({ "text": text }),
+            Flavor::Discord => serde_json::json!({ "content": text }),
+            Flavor::Generic => serde_json::json!({
+                "event": if alert.started { "resource_high" } else { "resource_ok" },
+                "app": { "slug": alert.slug, "name": alert.name },
+                "resource": alert.resource,
+                "detail": alert.detail,
+                "pct": alert.pct,
+                "threshold_pct": alert.threshold,
+                "at": unix_now(),
+                "text": text,
+            }),
         }
     }
 
@@ -1372,5 +1459,39 @@ mod tests {
         assert!(started.starts_with("<!here> 🌐 4 de 5 apps"), "{started}");
         let ended = a.mass_payload(Flavor::Generic, MassOutage::Ended { total: 5 });
         assert_eq!(ended["event"], "mass_outage_ended");
+    }
+
+    #[test]
+    fn resource_alerts_page_on_the_way_up_and_name_the_disk() {
+        let a = alerter_with(false, &["here"]);
+        let mut alert = ResourceAlert {
+            slug: "billing".into(),
+            name: "Billing".into(),
+            route: AppRoute {
+                webhooks: Vec::new(),
+                mentions: vec!["U0TEAM".into()],
+            },
+            resource: "disk",
+            detail: Some("/data".into()),
+            pct: 93.4,
+            threshold: 90,
+            started: true,
+        };
+        let high = a.resource_text(Flavor::Slack, &alert);
+        assert!(
+            high.starts_with("<!here> <@U0TEAM> 📈 Billing: disco /data al 93 % (umbral 90 %)"),
+            "{high}"
+        );
+        alert.started = false;
+        alert.pct = 71.0;
+        let ok = a.resource_text(Flavor::Discord, &alert);
+        assert!(
+            ok.starts_with("✅ Billing: disco /data de vuelta al 71 %"),
+            "{ok}"
+        );
+        assert!(!ok.contains('@'), "coming back doesn't page: {ok}");
+        let generic = a.resource_payload(Flavor::Generic, &alert);
+        assert_eq!(generic["event"], "resource_ok");
+        assert_eq!(generic["threshold_pct"], 90);
     }
 }

@@ -100,6 +100,9 @@ pub async fn commands(
         audit: req
             .app_data::<web::Data<crate::audit::AuditLog>>()
             .map(web::Data::get_ref),
+        system: req
+            .app_data::<web::Data<crate::system::SystemMonitor>>()
+            .map(web::Data::get_ref),
     };
     let caller = Caller::Slack {
         user: field("user_id"),
