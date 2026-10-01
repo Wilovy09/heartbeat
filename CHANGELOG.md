@@ -3,21 +3,20 @@
 All notable changes to Heartbeat. Versions follow [SemVer](https://semver.org/); entries
 before 0.2.0 were reconstructed from the git history.
 
-## [UNRELEASED - 0.3.2] - 2026-10-0?
+## [0.3.2] - 2026-10-2
 
-* [ ] Benchmarks
-```
-y podemos hacer comparaciones con:
-
-- Gatus: escrito en Go y muy ligero. Se configura todo en YAML, sin interfaz de edición, y permite condiciones avanzadas sobre la respuesta (status, body, tiempo, certificados). Es popular entre quienes prefieren "configuración como código".
-- Checkmate (de Bluewave Labs): proyecto más reciente, con interfaz moderna. Además de uptime, incluye monitoreo de infraestructura (CPU, RAM, disco) mediante un agente.
-- Kener: centrado en status pages bonitas, con monitoreo incluido. Está hecho en SvelteKit.
-- Statping-ng: fork mantenido del antiguo Statping, en Go. Combina monitoreo y status page, aunque su desarrollo es menos activo.
-- OneUptime: una plataforma mucho más grande y open source que junta uptime, incidentes, on-call, logs y APM. Es más pesada de desplegar.
-- Uptime Kuma
-```
-* [ ] Email, telegram alerts
-* [ ] Visor de memoria ram, cpu usage y disco del servidor de cada app
+### System
+- CPU, memory, swap, disk, load and the busiest processes (like `top`) of Heartbeat's own
+  server, on the dashboard, and of each app's, in its detail, from an optional per-app
+  system URL called every `SYSTEM_INTERVAL_SECS` (30) with `X-Admin-Logs-Key`. A 1 h-7 d
+  chart from samples kept `SYSTEM_RETENTION_DAYS` (7) in `system_samples` (migration
+  `0004_system.sql`); the full latest reading stays in memory.
+- Alerts when the fullest disk reaches `SYSTEM_ALERT_DISK_PCT`, or memory or CPU stay over
+  `SYSTEM_ALERT_MEMORY_PCT` / `SYSTEM_ALERT_CPU_PCT` for `SYSTEM_ALERT_SUSTAIN_MINS`, and when
+  they're back under (5 points of hysteresis); paused apps don't alert.
+- `/pulse status <app>` adds the server's latest figures. The README has the JSON contract
+  and an axum handler to copy.
+- `just demo` answers a system URL per demo app and seeds 24 h of samples.
 
 ### Performance
 - The dashboard's `/api/uptime` is built once per change (a round of checks, an app
