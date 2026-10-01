@@ -25,6 +25,7 @@ demo lang="es":
     # The demo data is written as a 0.2 install, so every demo run exercises the importer.
     rm -rf ./data/demo/heartbeat.db ./data/demo/heartbeat.db-wal ./data/demo/heartbeat.db-shm ./data/demo/*.migrated*
     ./target/debug/heartbeat migrate
+    python3 scripts/demo_system.py ./data/demo/heartbeat.db
     echo "Heartbeat demo: http://localhost:8090  (demo@example.com / demo, viewer@example.com / demo)"
     ./target/debug/heartbeat
 
