@@ -131,7 +131,9 @@ registry = []
 for slug, name, health, start, fn in apps:
     beats = series(start, fn)
     (UP_DIR / f"{slug}.jsonl").write_text("".join(json.dumps(b) + "\n" for b in beats))
-    registry.append({"slug": slug, "name": name, "logs_url": f"https://logs.heartbeat.invalid/{slug}/logs", "health_url": health, "embed_token": secrets.token_hex(24)})
+    registry.append({"slug": slug, "name": name, "logs_url": f"https://logs.heartbeat.invalid/{slug}/logs", "health_url": health, "embed_token": secrets.token_hex(24),
+                     # Answered by src/demo.rs, like the logs: a server that fits the app.
+                     "system_url": f"https://logs.heartbeat.invalid/{slug}/system"})
     print(f"{slug:20} {len(beats):6} beats")
 
 # 8. Single-page frontends: monitor-only (no logs URL) with the bundle check on. httpbin
