@@ -35,6 +35,11 @@
       <p class="hint">{{ t(k="apps.health_hint", secs=uptime_interval_secs, ms=uptime_degraded_ms) }}</p>
       <p class="hint">{{ t(k="apps.tcp_hint") }} <span class="mono">tcp://db.example.com:5432</span></p>
     </div>
+    <div class="field">
+      <label for="system_url">{{ t(k="apps.system_url") }} <span class="optional">· {{ t(k="apps.logs_optional") }}</span></label>
+      <input id="system_url" name="system_url" type="url" class="mono-input" placeholder="https://api.example.com/admin/system" value="{% if register_values %}{{ register_values.system_url }}{% endif %}">
+      <p class="hint">{{ t(k="apps.system_hint") }}</p>
+    </div>
     <details class="advanced"{% if register_values %} open{% endif %}>
       <summary>{{ t(k="apps.advanced") }}</summary>
       <div class="field">
@@ -143,6 +148,7 @@
         {% else %}
         <dd class="entry-missing">{{ t(k="apps.missing_health") }}</dd>
         {% endif %}
+        {% if app.system_url %}<dt>{{ t(k="apps.dt_system") }}</dt><dd class="mono">{{ app.system_url }}</dd>{% endif %}
         {% if app.degraded_after_ms %}<dt>{{ t(k="apps.dt_threshold") }}</dt><dd class="mono">{{ app.degraded_after_ms }} ms</dd>{% endif %}
         {% if app.expect_body %}<dt>{{ t(k="apps.dt_keyword") }}</dt><dd class="mono">{{ app.expect_body }}</dd>{% endif %}
         {% if app.check_assets %}<dt>{{ t(k="apps.dt_bundles") }}</dt><dd class="entry-muted">{{ t(k="apps.bundles_checked") }}</dd>{% endif %}
@@ -169,6 +175,10 @@
           <div class="field">
             <label for="health-{{ app.slug }}">{{ t(k="apps.health_url") }}</label>
             <input id="health-{{ app.slug }}" name="health_url" class="mono-input" required value="{% if editing %}{{ edit_values.health_url }}{% elif app.health_url %}{{ app.health_url }}{% endif %}">
+          </div>
+          <div class="field">
+            <label for="system-{{ app.slug }}">{{ t(k="apps.system_url") }} <span class="optional">· {{ t(k="apps.logs_optional") }}</span></label>
+            <input id="system-{{ app.slug }}" name="system_url" type="url" class="mono-input" value="{% if editing %}{{ edit_values.system_url }}{% elif app.system_url %}{{ app.system_url }}{% endif %}">
           </div>
           <div class="field-row">
             <div class="field">

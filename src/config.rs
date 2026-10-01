@@ -130,6 +130,51 @@ fn list(name: &'static str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// How CPU, memory and disk are sampled and when they alert (`SYSTEM_*`).
+#[derive(Debug, Clone)]
+pub struct SystemConfig {
+    /// Seconds between samples (`SYSTEM_INTERVAL_SECS`).
+    pub interval_secs: u64,
+    /// Days the samples are kept (`SYSTEM_RETENTION_DAYS`).
+    pub retention_days: u32,
+    /// Alert thresholds, in %; 0 = that alert is off.
+    pub alert_cpu_pct: u8,
+    pub alert_memory_pct: u8,
+    pub alert_disk_pct: u8,
+    /// Minutes CPU or memory must stay over its threshold before alerting.
+    pub alert_sustain_mins: u32,
+}
+
+impl SystemConfig {
+    fn from_env() -> Result<Self, ConfigError> {
+        let interval_secs = parsed("SYSTEM_INTERVAL_SECS", 30)?;
+        if interval_secs < 5 {
+            return Err(ConfigError::Invalid {
+                name: "SYSTEM_INTERVAL_SECS",
+                value: interval_secs.to_string(),
+            });
+        }
+        let percent = |name: &'static str| -> Result<u8, ConfigError> {
+            let value: u8 = parsed(name, 90)?;
+            if value > 100 {
+                return Err(ConfigError::Invalid {
+                    name,
+                    value: value.to_string(),
+                });
+            }
+            Ok(value)
+        };
+        Ok(Self {
+            interval_secs,
+            retention_days: parsed("SYSTEM_RETENTION_DAYS", 7)?.max(1),
+            alert_cpu_pct: percent("SYSTEM_ALERT_CPU_PCT")?,
+            alert_memory_pct: percent("SYSTEM_ALERT_MEMORY_PCT")?,
+            alert_disk_pct: percent("SYSTEM_ALERT_DISK_PCT")?,
+            alert_sustain_mins: parsed("SYSTEM_ALERT_SUSTAIN_MINS", 5)?,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub host: String,
@@ -214,6 +259,8 @@ pub struct Config {
     /// MB of the database read through a memory map (`DATABASE_MMAP_MB`); 0 = off. See
     /// `Db::open_with`.
     pub database_mmap_mb: u32,
+    /// CPU, memory and disk sampling (`SYSTEM_*`).
+    pub system: SystemConfig,
 }
 
 impl Config {
@@ -315,6 +362,7 @@ impl Config {
             chat_admins,
             audit_retention_days: parsed("AUDIT_RETENTION_DAYS", 365)?,
             database_mmap_mb: parsed("DATABASE_MMAP_MB", 0)?,
+            system: SystemConfig::from_env()?,
         })
     }
 }

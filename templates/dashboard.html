@@ -64,6 +64,10 @@
           </div>
         </div>
 
+        <div class="bay system-panel" x-data="systemPanel('', $el.dataset.title)" data-title="{{ t(k="system.host_title") }}">
+          {% include "partials/system_panel.html" %}
+        </div>
+
         <template x-if="stalePauses().length">
           <div class="bay notice warn">
             <span class="vital st-paused"></span>
@@ -185,6 +189,12 @@
               </div>
             </div>
 
+            <template x-for="slug in (current().has_system ? [current().slug] : [])" :key="slug">
+              <div class="bay system-panel" x-data="systemPanel(slug, $el.dataset.title)" data-title="{{ t(k="system.app_title") }}">
+                {% include "partials/system_panel.html" %}
+              </div>
+            </template>
+
             <div class="bay">
               <div class="chart-head">
                 <h2 class="bay-title" style="margin: 0">{{ t(k="dash.response_time") }}</h2>
@@ -281,6 +291,7 @@
 {% endblock %}
 {% block head %}
 <script src="/static/uptime.js"></script>
+<script src="/static/system.js"></script>
 <style>
   .monitor { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 24px; align-items: start; }
   /* Narrow screens: the verdict/detail leads, the channel list follows. */
@@ -397,5 +408,35 @@
   .tip-row { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
   .tip-row strong { margin-left: auto; font-weight: 500; }
   .tip-msg { color: var(--ink-3); margin-top: 4px; word-break: break-word; }
+
+  /* System panels */
+  .system-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; }
+  .system-title { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .system-at { font-size: 11px; color: var(--ink-4); }
+  .system-body { display: flex; flex-direction: column; gap: 16px; }
+  .system-meters { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px 24px; }
+  .meter .readout-value { margin: 6px 0 8px; }
+  .meter-bar { height: 4px; border-radius: 2px; background: var(--well); overflow: hidden; }
+  .meter-bar span { display: block; height: 100%; border-radius: 2px; background: var(--rhythm-up); transition: width 300ms var(--ease-out); }
+  .meter-bar .lvl-degraded { background: var(--rhythm-degraded); }
+  .meter-bar .lvl-down { background: var(--rhythm-down); }
+  .meter-note { margin-top: 6px; font-size: 11px; color: var(--ink-3); }
+  .meter-mount { text-transform: none; letter-spacing: 0; color: var(--ink-4); }
+  .st-text-up { color: inherit; }
+  .st-text-unknown { color: var(--ink-3); }
+  .system-chart { min-width: 0; }
+  .system-chart svg { display: block; }
+  .system-legend { display: flex; gap: 16px; margin-top: 6px; font-size: 11px; color: var(--ink-3); }
+  .system-legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .system-legend i { display: inline-block; width: 12px; height: 2px; border-radius: 1px; }
+  .system-legend i.dashed { height: 0; border-top: 2px dashed; background: none; }
+  .system-table { width: 100%; font-size: 12px; }
+  .system-table th, .system-table td { padding: 6px 8px; }
+  .system-table .num { text-align: right; }
+  .system-table .sort { background: none; border: 0; padding: 0; color: var(--ink-3); font: inherit; text-transform: inherit; letter-spacing: inherit; cursor: pointer; }
+  .system-table .sort[aria-pressed="true"] { color: var(--ink); }
+  .system-processes summary { font-size: 12px; color: var(--ink-3); cursor: pointer; width: fit-content; }
+  .system-processes[open] summary { margin-bottom: 8px; }
+  .system-processes .hint { margin: 8px 0 0; font-size: 11px; color: var(--ink-4); }
 </style>
 {% endblock %}

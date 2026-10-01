@@ -386,6 +386,8 @@ pub struct Chat<'a> {
     pub public_url: Option<&'a str>,
     /// `None` only in tests that don't look at it.
     pub audit: Option<&'a AuditLog>,
+    /// For the server's CPU, memory and disk in an app's detail; `None` in tests.
+    pub system: Option<&'a crate::system::SystemMonitor>,
 }
 
 impl Chat<'_> {
@@ -606,10 +608,40 @@ impl Chat<'_> {
             let ago = format_duration(unix_now().saturating_sub(beat.at));
             lines.push(self.t("chat.detail_checked", &[("ago", &ago)]));
         }
+        if let Some(line) = self.system_line(app).await {
+            lines.push(line);
+        }
         if let Some(base) = self.public_url {
             lines.push(format!("{base}/#{}", app.slug));
         }
         Reply::public(lines.join("\n")).on(app)
+    }
+
+    /// `🖥️ CPU 23 % · memory 42 % · disk / 37 %`, from the latest reading of the app's
+    /// system URL; `None` when it has none.
+    async fn system_line(&self, app: &RegisteredApp) -> Option<String> {
+        app.system_url.as_ref()?;
+        let reading = self.system?.latest(&app.slug).await?;
+        let Some(s) = reading.snapshot else {
+            let error = reading.error.unwrap_or_default();
+            return Some(self.t("chat.detail_system_error", &[("error", &error)]));
+        };
+        let disk = s.fullest_disk().map_or_else(
+            || "—".to_string(),
+            |d| {
+                #[allow(clippy::cast_precision_loss)]
+                let pct = d.used_bytes as f64 * 100.0 / d.total_bytes.max(1) as f64;
+                format!("{} {pct:.0} %", d.mount)
+            },
+        );
+        Some(self.t(
+            "chat.detail_system",
+            &[
+                ("cpu", &format!("{:.0} %", s.cpu.usage_pct)),
+                ("memory", &format!("{:.0} %", s.memory_pct())),
+                ("disk", &disk),
+            ],
+        ))
     }
 
     /// "until <date>" or "until resumed".

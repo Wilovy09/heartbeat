@@ -25,6 +25,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_init.sql"),
     include_str!("../migrations/0002_audit.sql"),
     include_str!("../migrations/0003_flips.sql"),
+    include_str!("../migrations/0004_system.sql"),
 ];
 
 /// Read connections next to the writer, for a file database: one per core, within these

@@ -38,6 +38,7 @@ struct TestState {
     notices: web::Data<NoticeStore>,
     themes: web::Data<crate::theme::ThemeStore>,
     audit: web::Data<crate::audit::AuditLog>,
+    system: web::Data<crate::system::SystemMonitor>,
 }
 
 /// The configuration every route test runs with, files under `path(name)`.
@@ -87,6 +88,14 @@ pub(crate) fn test_config(path: &dyn Fn(&str) -> String) -> Config {
         chat_admins: Vec::new(),
         audit_retention_days: 365,
         database_mmap_mb: 0,
+        system: crate::config::SystemConfig {
+            interval_secs: 30,
+            retention_days: 7,
+            alert_cpu_pct: 90,
+            alert_memory_pct: 90,
+            alert_disk_pct: 90,
+            alert_sustain_mins: 5,
+        },
     }
 }
 
@@ -129,7 +138,23 @@ async fn state_with(adjust: impl FnOnce(&mut Config)) -> TestState {
         alerter: web::Data::new(Alerter::new(AlertSettings::default()).unwrap()),
         notices: web::Data::new(NoticeStore::load(db.clone()).await.unwrap()),
         themes: web::Data::new(crate::theme::ThemeStore::load(db.clone()).await.unwrap()),
-        audit: web::Data::new(crate::audit::AuditLog::new(db, 365)),
+        audit: web::Data::new(crate::audit::AuditLog::new(db.clone(), 365)),
+        system: web::Data::new(crate::system::SystemMonitor::new(
+            db,
+            crate::system::SystemPolicy {
+                interval: Duration::from_secs(30),
+                retention: Duration::from_hours(24 * 7),
+                thresholds: crate::system::Thresholds {
+                    cpu_pct: 90,
+                    memory_pct: 90,
+                    disk_pct: 90,
+                    sustain: Duration::from_mins(5),
+                },
+            },
+            Outbound::new("*.example.com").unwrap(),
+            Alerter::new(AlertSettings::default()).unwrap(),
+            None,
+        )),
         tera: web::Data::new(tera),
         i18n: web::Data::new(i18n),
         cfg: web::Data::new(cfg),
@@ -155,6 +180,7 @@ macro_rules! app {
                 .app_data($s.notices.clone())
                 .app_data($s.themes.clone())
                 .app_data($s.audit.clone())
+                .app_data($s.system.clone())
                 .configure(routes::configure),
         )
         .await
@@ -1107,4 +1133,51 @@ async fn the_overview_is_gzipped_only_for_clients_that_ask() {
         serde_json::from_slice::<serde_json::Value>(&unzipped).unwrap(),
         plain
     );
+}
+
+#[actix_web::test]
+async fn the_system_api_serves_this_host_and_only_apps_with_a_system_url() {
+    let s = state().await;
+    s.registry
+        .add(AppSettings {
+            name: "Billing".into(),
+            health_url: "https://api.example.com/health".into(),
+            ..AppSettings::default()
+        })
+        .await
+        .unwrap();
+    s.system.round(&s.registry.list().await).await;
+    let app = app!(s);
+    let unauthorized = test::call_service(
+        &app,
+        test::TestRequest::get().uri("/api/system").to_request(),
+    )
+    .await;
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let viewer = login_as!(app, VIEWER_EMAIL);
+    let get = |uri: &str| {
+        test::TestRequest::get()
+            .uri(uri)
+            .cookie(viewer.clone())
+            .to_request()
+    };
+    let resp = test::call_service(&app, get("/api/system?hours=1")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert!(
+        body["reading"]["snapshot"]["memory"]["total_bytes"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert_eq!(
+        body["samples"].as_array().unwrap().len(),
+        1,
+        "the round stored a sample"
+    );
+    assert_eq!(body["interval_secs"], 30);
+
+    let missing = test::call_service(&app, get("/api/system/billing")).await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND, "no system URL");
 }
