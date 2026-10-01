@@ -56,6 +56,17 @@ e2e:
     for _ in $(seq 50); do curl -fsS localhost:8199/healthz >/dev/null 2>&1 && break; sleep 0.2; done
     cd tests/e2e && npm install --silent && node smoke.mjs
 
+# Benchmarks (needs k6): a release build against a synthetic database of `apps` apps with
+# `days` days of checks, loaded endpoint by endpoint. Prints req/s and latency per endpoint,
+# startup time and memory, and saves the run to data/bench/results/. VUS (clients, 20) and
+# DURATION (per endpoint, 15s) tune the load: `VUS=50 just bench 500`.
+bench apps="100" days="30":
+    scripts/bench.sh {{apps}} {{days}}
+
+# Side by side: the latest run of each size, or the result files given, oldest first.
+bench-compare *files:
+    python3 scripts/bench_compare.py {{files}}
+
 # The landing page and docs (site/), built from README.md / README_ES.md and served on
 # http://localhost:8200. Deployed to GitHub Pages by .github/workflows/pages.yml.
 site:
