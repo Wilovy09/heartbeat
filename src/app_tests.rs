@@ -86,6 +86,7 @@ pub(crate) fn test_config(path: &dyn Fn(&str) -> String) -> Config {
         chat_command: "pulse".into(),
         chat_admins: Vec::new(),
         audit_retention_days: 365,
+        database_mmap_mb: 0,
     }
 }
 
@@ -1059,5 +1060,51 @@ async fn the_audit_page_filters_and_exports() {
     assert_eq!(
         exported[0].action, "audit.export",
         "the export itself is audited"
+    );
+}
+
+#[actix_web::test]
+async fn the_overview_is_gzipped_only_for_clients_that_ask() {
+    let s = state().await;
+    let app = app!(s);
+    let admin = login_as!(app, ADMIN_EMAIL);
+    let get = |encoding: Option<&str>| {
+        let mut req = test::TestRequest::get()
+            .uri("/api/uptime")
+            .cookie(admin.clone());
+        if let Some(e) = encoding {
+            req = req.insert_header((header::ACCEPT_ENCODING, e));
+        }
+        req.to_request()
+    };
+
+    let plain = test::call_service(&app, get(None)).await;
+    assert!(plain.headers().get(header::CONTENT_ENCODING).is_none());
+    let plain: serde_json::Value = test::read_body_json(plain).await;
+
+    for refused in ["identity", "gzip;q=0", "br"] {
+        let resp = test::call_service(&app, get(Some(refused))).await;
+        assert!(
+            resp.headers().get(header::CONTENT_ENCODING).is_none(),
+            "{refused}"
+        );
+    }
+
+    let zipped = test::call_service(&app, get(Some("br, gzip;q=0.8"))).await;
+    assert_eq!(
+        zipped.headers().get(header::CONTENT_ENCODING).unwrap(),
+        "gzip"
+    );
+    assert_eq!(
+        zipped.headers().get(header::VARY).unwrap(),
+        "Accept-Encoding"
+    );
+    let body = test::read_body(zipped).await;
+    let mut unzipped = Vec::new();
+    std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&body[..]), &mut unzipped)
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&unzipped).unwrap(),
+        plain
     );
 }

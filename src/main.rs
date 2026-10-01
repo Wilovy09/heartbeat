@@ -110,7 +110,11 @@ async fn run() -> Result<(), StartupError> {
     i18n.register(&mut tera);
     assets::load_templates(&mut tera)?;
 
-    let db = db::Db::open(&cfg.database_path).await?;
+    let db = db::Db::open_with(
+        &cfg.database_path,
+        u64::from(cfg.database_mmap_mb) * 1024 * 1024,
+    )
+    .await?;
     migrate::ensure_nothing_pending(&cfg, &db).await?;
     let registry = AppRegistry::load(db.clone()).await?;
     let outbound = Outbound::new(&cfg.allowed_hosts)?;

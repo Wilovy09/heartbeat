@@ -118,11 +118,9 @@ pub async fn show(
             .insert_header((header::WWW_AUTHENTICATE, "Bearer"))
             .finish();
     }
-    let apps = registry.list().await;
-    let overview = monitor.overview(&apps).await;
     HttpResponse::Ok()
         .content_type("text/plain; version=0.0.4")
-        .body(render(&overview.monitors))
+        .body(monitor.metrics_text(&registry, render).await)
 }
 
 #[cfg(test)]
