@@ -136,6 +136,8 @@ A single Rust binary with SQLite built in: everything is stored in one file,
   (see below).
 - **Integrations**: `GET /metrics` in the Prometheus format (with `METRICS_TOKEN`) and
   each app's history exported to CSV or JSON from the dashboard.
+- **System**: CPU, memory, disk and the busiest processes of Heartbeat's server and of
+  each app's, with history and alerts; see [System](#system).
 - **Log viewer** with filters by level, module and text.
 - **Audit log** (`/audit`): logins, every change, log views and chat commands, with who
   and when; see [Audit log](#audit-log).
@@ -289,6 +291,104 @@ It's stored in the `audit_log` table, filtered by who, action, app, source, outc
 date, and kept `AUDIT_RETENTION_DAYS` (365; 0 = forever). Passwords and tokens are never
 recorded, check headers appear by name only and webhook URLs are masked. Sessions started
 before 0.3.1 have no email: their actions show as such until the next login.
+
+## System
+
+Heartbeat shows the CPU, memory and disk of its own server on the dashboard, and of each
+app's server in its detail (click the app), with a 1 h–7 d chart, the busiest processes
+(like `top`) and alerts. `/pulse status <app>` adds a line with the latest figures.
+
+- **Heartbeat's own server** is read directly (no setup).
+- **Each app** gets an optional **system URL** in `/apps`, which Heartbeat calls every
+  `SYSTEM_INTERVAL_SECS` (30) with `X-Admin-Logs-Key: <ADMIN_LOGS_KEY>`, under the same host
+  policy as the logs URL. Samples are kept `SYSTEM_RETENTION_DAYS` (7).
+- **Alerts** go to the global webhooks (and an app's own) when the fullest disk reaches
+  `SYSTEM_ALERT_DISK_PCT` (90), or memory or CPU stay over `SYSTEM_ALERT_MEMORY_PCT` /
+  `SYSTEM_ALERT_CPU_PCT` (90) for `SYSTEM_ALERT_SUSTAIN_MINS` (5); a message when it's back
+  under, 5 points below. 0 turns one off. A paused app doesn't alert.
+
+The system URL answers JSON like this (`cpu.usage_pct`, `memory.total_bytes` and
+`memory.used_bytes` are required; the rest is optional):
+
+```json
+{
+  "cpu": { "usage_pct": 23.5, "cores": 2, "load": [0.4, 0.3, 0.2] },
+  "memory": { "total_bytes": 952107008, "used_bytes": 404750336, "available_bytes": 546308096 },
+  "swap": { "total_bytes": 0, "used_bytes": 0 },
+  "disks": [{ "mount": "/", "total_bytes": 25769803776, "used_bytes": 9126805504 }],
+  "processes": [{ "pid": 1234, "name": "api", "cpu_pct": 12.1, "memory_bytes": 81264640 }],
+  "uptime_secs": 864000
+}
+```
+
+Heartbeat keeps up to 16 disks and 20 processes, and reads at most 256 KB. A handler for
+an axum app, with [`sysinfo`](https://crates.io/crates/sysinfo):
+
+<details>
+  <summary>Show the code</summary>
+
+```rust
+// GET /admin/system for Heartbeat: CPU, memory, disks and the busiest processes.
+// Cargo.toml: sysinfo = { version = "0.39", default-features = false, features = ["system", "disk"] }
+use std::sync::{Arc, Mutex};
+
+use axum::{Json, extract::State, http::{HeaderMap, StatusCode}};
+use serde_json::{Value, json};
+use sysinfo::{Disks, ProcessRefreshKind, ProcessesToUpdate, System};
+
+/// Kept between calls: CPU usage is measured since the previous one.
+#[derive(Clone, Default)]
+pub struct SystemState(Arc<Mutex<System>>);
+
+pub async fn system(State(state): State<SystemState>, headers: HeaderMap) -> Result<Json<Value>, StatusCode> {
+    // The same key as /admin/logs. Compare it in constant time in production.
+    let key = std::env::var("ADMIN_LOGS_KEY").map_err(|_| StatusCode::NOT_FOUND)?;
+    if headers.get("x-admin-logs-key").and_then(|v| v.to_str().ok()) != Some(key.as_str()) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let body = tokio::task::spawn_blocking(move || {
+        let mut sys = state.0.lock().unwrap();
+        sys.refresh_cpu_usage();
+        sys.refresh_memory();
+        let kind = ProcessRefreshKind::nothing().with_cpu().with_memory();
+        sys.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
+        let mut processes: Vec<_> = sys.processes().values().collect();
+        processes.sort_by(|a, b| b.cpu_usage().total_cmp(&a.cpu_usage()));
+        let load = System::load_average();
+        let disks: Vec<Value> = Disks::new_with_refreshed_list()
+            .list()
+            .iter()
+            .filter(|d| d.mount_point() == std::path::Path::new("/"))
+            .map(|d| json!({
+                "mount": d.mount_point(),
+                "total_bytes": d.total_space(),
+                "used_bytes": d.total_space() - d.available_space(),
+            }))
+            .collect();
+        json!({
+            "cpu": { "usage_pct": sys.global_cpu_usage(), "cores": sys.cpus().len(),
+                     "load": [load.one, load.five, load.fifteen] },
+            "memory": { "total_bytes": sys.total_memory(), "used_bytes": sys.used_memory(),
+                        "available_bytes": sys.available_memory() },
+            "swap": { "total_bytes": sys.total_swap(), "used_bytes": sys.used_swap() },
+            "disks": disks,
+            "processes": processes.iter().take(20).map(|p| json!({
+                "pid": p.pid().as_u32(), "name": p.name().to_string_lossy(),
+                "cpu_pct": p.cpu_usage(), "memory_bytes": p.memory(),
+            })).collect::<Vec<_>>(),
+            "uptime_secs": System::uptime(),
+        })
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(body))
+}
+```
+
+Mounted with `.route("/admin/system", get(system::system)).with_state(SystemState::default())`.
+CPU usage is measured between two calls, so the first one reads about 0.
+
+</details>
 
 ## Endpoint contract
 
