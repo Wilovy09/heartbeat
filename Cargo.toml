@@ -1,6 +1,6 @@
 [package]
 name = "heartbeat"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 license = "Elastic-2.0"
 publish = false
@@ -37,12 +37,17 @@ rusqlite = { version = "0.40", default-features = false, features = [
 ] }
 # The dashboard overview is gzipped once per change (see uptime::overview_json), not per
 # request; pure-Rust backend.
-flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
+flate2 = { version = "1.1.10", default-features = false, features = [
+    "rust_backend",
+] }
 # Chat commands: Slack signs requests with HMAC-SHA256, Discord with Ed25519.
 hmac = "0.13"
 sha2 = "0.11"
 ed25519-dalek = "3"
-sysinfo = { version = "0.39.6", default-features = false, features = ["system", "disk"] }
+sysinfo = { version = "0.39.6", default-features = false, features = [
+    "system",
+    "disk",
+] }
 
 [features]
 # `just demo` only: synthetic logs for the demo apps (see src/demo.rs).
